@@ -129,6 +129,17 @@ const NOTIFY = {
   agent_end: (e) => `${e.agent || 'Agent'} finished`,
 };
 
+/**
+ * Every lane/row in this file falls back to worktree when there is no lane
+ * (applyEvents' key at line ~157, render's `·` placeholder) — worktree is the
+ * one identifier that always exists, since resolveLane always sets it from the
+ * directory basename even when lane is null (lib/context.mjs:86-99). The
+ * notification title follows the same fallback so it is never unidentifiable.
+ */
+export function notifyTitle(e) {
+  return `${e.project || 'lanes'}${e.lane ? ` · lane ${e.lane}` : e.worktree ? ` · ${e.worktree}` : ''}${e.issue ? ` · #${e.issue}` : ''}`;
+}
+
 function notify(title, body) {
   try {
     const esc = (s) => String(s).replace(/["\\]/g, '\\$&');
@@ -286,7 +297,7 @@ export async function runUi() {
       for (const e of fresh) {
         const body = NOTIFY[e.ev]?.(e);
         if (body) {
-          notify(`${e.project || 'lanes'} · lane ${e.lane ?? '?'}${e.issue ? ` · #${e.issue}` : ''}`, body);
+          notify(notifyTitle(e), body);
         }
       }
       applyEvents(state, fresh);

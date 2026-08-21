@@ -36,7 +36,7 @@ mkdirSync(join(TMP, '.claude'));
 const { resolveContext, issueFromBranch, resolveLane, findProject, LANES_DIR } =
   await import(`${ROOT}/lib/context.mjs`);
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK } = await import(`${ROOT}/lib/marks.mjs`);
-const { createState, applyEvents, render } = await import(`${ROOT}/ui/dashboard.mjs`);
+const { createState, applyEvents, render, notifyTitle } = await import(`${ROOT}/ui/dashboard.mjs`);
 const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE } = await import(`${ROOT}/lib/colors.mjs`);
 const worktrees = await import(`${ROOT}/lib/worktrees.mjs`);
 const sv = await import(`${ROOT}/lib/services.mjs`);
@@ -248,6 +248,11 @@ test('render shows a declared lane with no events at all as offline', () => {
   const frame = render(resolveContext(lane2), createState());
   assert.ok(frame.includes('demo-3'));
   assert.ok(frame.includes('offline'));
+});
+
+test('notifyTitle falls back to worktree, never to an unidentified "lane ?"', () => {
+  assert.equal(notifyTitle(ev(1, 'idle', { lane: null, issue: '12' })), 'demo · demo-1 · #12');
+  assert.equal(notifyTitle(ev(1, 'idle')), 'demo · lane 1');
 });
 
 // ── Lane lifecycle ──────────────────────────────────────────────────
