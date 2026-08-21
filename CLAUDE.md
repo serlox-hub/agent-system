@@ -28,8 +28,8 @@ raise the budget to avoid pruning.
 Scope definitions and entry format live in `DECISIONS.md`'s own header. The
 proposal mechanics live in the skills that do the proposing:
 
-- **`/review` proposes `core` entries** — clean context, whole diff read.
-- **`/architect` proposes `product` entries** — `/review` cannot catch these,
+- **`/gate` proposes `core` entries** — clean context, whole diff read.
+- **`/architect` proposes `product` entries** — `/gate` cannot catch these,
   since a product decision is made in conversation and barely shows in a diff.
 
 Both propose, you approve, they write. Never write an entry the user did not

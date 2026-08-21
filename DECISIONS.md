@@ -16,8 +16,8 @@ to make room.
 
 ---
 
-## D15 — The quality gates run only in `/review` Phase 5, never in the reviewer
-`product` · 2026-08 · `skills/review/SKILL.md`, `agents/code-reviewer.md`
+## D15 — The quality gates run only in `/gate` Phase 5, never in the reviewer
+`product` · 2026-08 · `skills/gate/SKILL.md`, `agents/code-reviewer.md`
 Phases 3-4 modify the tree, so anything validated earlier validated a state that
 no longer exists — and on a real repo those commands are minutes, twice.
 Rejected: letting the reviewer run them for early signal on failing tests; the
@@ -102,9 +102,9 @@ POSIX `O_APPEND` is atomic below PIPE_BUF (4096B) and entries are single-line JS
 well under it, so concurrent sessions cannot interleave; oversized lines are
 dropped. Rejected: flock, SQLite, file-per-session — no such problem exists here.
 
-## D6 — `/review` is a skill; the commit hook is only a thin guard
+## D6 — `/gate` is a skill; the commit hook is only a thin guard
 `product` · 2026-08 · `hooks/commit-guard.mjs`
-`/review` is interactive and writes to disk — a hook can do neither — so the hook
+`/gate` is interactive and writes to disk — a hook can do neither — so the hook
 blocks and returns a reason for the agent to ask about. Rejected: running the full
 review from the hook, and a read-only reviewer at commit time (loses fix application).
 

@@ -1,5 +1,5 @@
 ---
-name: review
+name: gate
 description: Reviews the uncommitted changes end to end — code review with clean context, auto-applies mechanical fixes, asks only about judgment calls, writes unit tests for what changed, then runs lint --fix and typecheck. Marks the diff as reviewed so the commit guard lets it through. Run this before every commit.
 ---
 

@@ -216,7 +216,7 @@ fact.
 
 ## Step 6 — Record the product decision, if there is one
 
-Only when the repo has a `DECISIONS.md`. **This step is yours because `/review`
+Only when the repo has a `DECISIONS.md`. **This step is yours because `/gate`
 cannot do it:** a `product` decision — what the tool does to its users, what it
 refuses to do, where a boundary sits — is made in this conversation and often
 barely shows up in the diff. A reviewer reading only code will miss it every time.
@@ -242,7 +242,7 @@ Print, and then **stop**:
 Issue:  #<number> — <url>
 Branch: <name>
 Lane:   <n> — <worktree name>   <path>
-Next:   implement, then /review before committing.
+Next:   implement, then /gate before committing.
 ```
 
 **If the lane is not the worktree this session is running in, say so first and
@@ -262,4 +262,4 @@ decides when to move, and moving is a fresh, uncontaminated start.
 Say so plainly and refuse to run the full flow for: typo fixes, dependency
 bumps, one-line config changes, anything the user has already decided and merely
 wants typed. Ceremony on a trivial task is exactly the drag this system was
-built to avoid. Suggest they just do it, and `/review` before committing.
+built to avoid. Suggest they just do it, and `/gate` before committing.

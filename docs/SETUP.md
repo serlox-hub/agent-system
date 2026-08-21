@@ -106,12 +106,12 @@ In a spare terminal. Empty until a session in an adopted repo produces events.
                    ↓  you decide when to move
                    implement, in the same session
                    ↓  you decide when to move
-/review            review, apply fixes, write tests, run the gates
-git commit         guarded: blocked unless /review passed on this exact diff
+/gate              review, apply fixes, write tests, run the gates
+git commit         guarded: blocked unless /gate passed on this exact diff
 ```
 
 `/architect` is for non-trivial work only — skip it for typos, dependency bumps,
-anything already decided. `/review` is worth running on every commit.
+anything already decided. `/gate` is worth running on every commit.
 
 **Commit small.** The reviewer is a commit-time gate, so diff size is review
 quality: findings get applied at ~200 changed lines, ignored at 800. The guard
@@ -161,15 +161,15 @@ entry in your shell profile, every `.claude/agent-system.json` in your repos.
 | `lanes: command not found` | `bin/` not on PATH — re-run `./install.sh`, it prints the exact export line |
 | Nothing in `lanes ui` | Session predates the install — restart it. Then `lanes doctor` |
 | Commit guard never fires | Check `review.commitGuard` isn't `false`, and that the repo has a config |
-| Guard fires again right after `/review` | Expected — the tree changed since. The marker is a hash of the diff |
-| `/review` says "nothing to review" | Check `review.excludePattern` isn't too broad — the skill prints what it excluded |
+| Guard fires again right after `/gate` | Expected — the tree changed since. The marker is a hash of the diff |
+| `/gate` says "nothing to review" | Check `review.excludePattern` isn't too broad — the skill prints what it excluded |
 | Lane numbers look wrong | They're the alphabetical position of each `worktreesDir` subdirectory — `lanes doctor` prints the one it resolved for where you're standing |
 
 ---
 
 ## Other repo-level opt-ins (not config fields)
 
-- **`DECISIONS.md`** — if present at the repo root, `/review` and `/architect`
+- **`DECISIONS.md`** — if present at the repo root, `/gate` and `/architect`
   propose entries for decisions a future session would plausibly reverse, and
   the reviewer flags diffs that contradict a live one. Absent, they skip it
   silently. See this repo's own `DECISIONS.md` + `CLAUDE.md` for the format.

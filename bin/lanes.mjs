@@ -257,7 +257,7 @@ switch (cmd) {
     out(`${WARN} review.domainAxes is empty, and it is the field that decides whether`);
     out('  the reviewer is worth running. Without it you get a generic reviewer that');
     out('  finds only what your linter already found. Fill it in before relying on');
-    out('  /review — hover the field in your editor (this file ships with $schema),');
+    out('  /gate — hover the field in your editor (this file ships with $schema),');
     out('  or read config/agent-system.schema.json, for how to write them.');
     out();
     out('Then: lanes doctor');
@@ -495,7 +495,7 @@ switch (cmd) {
       const cmds = ctx.config?.commands || {};
       const missing = ['lint', 'typecheck', 'test'].filter((k) => !cmds[k]);
       missing.length
-        ? warn('commands', `missing: ${missing.join(', ')} — /review will skip those gates`)
+        ? warn('commands', `missing: ${missing.join(', ')} — /gate will skip those gates`)
         : row(OK, 'commands', `lint, typecheck, test all set`);
 
       const axes = ctx.config?.review?.domainAxes || [];

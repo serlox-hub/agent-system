@@ -119,10 +119,10 @@ async function main() {
 
   deny(
     [
-      `Commit blocked by agent-system: this diff has not been through /review. ${sizeNote}`,
+      `Commit blocked by agent-system: this diff has not been through /gate. ${sizeNote}`,
       '',
       'Ask the user with AskUserQuestion — do not decide for them:',
-      '  1. Run /review now, then commit (recommended).',
+      '  1. Run /gate now, then commit (recommended).',
       '  2. Commit anyway, without review.',
       '',
       `If they choose 2: run \`lanes allow-commit\` in ${root}, then retry the identical git commit command.`,
