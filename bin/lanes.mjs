@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { createInterface } from 'node:readline/promises';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -204,13 +205,37 @@ switch (cmd) {
     }
 
     const { pm, commands, hasDev } = detectCommands(root);
-    const worktreesDir = detectWorktreesDir(process.cwd());
+    const projectName = detectProjectName(process.cwd());
+    let worktreesDir = detectWorktreesDir(process.cwd());
+    let createdWorktreesDir = null;
+    // Only when nothing was auto-detected and there is a real terminal to ask on
+    // — a non-interactive run (tests, CI) must fall through to today's behaviour
+    // unchanged rather than hang waiting on stdin.
+    if (!worktreesDir && process.stdin.isTTY) {
+      const proposed = join(dirname(root), `${projectName}-lanes`);
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      // Ctrl+D (no answer typed) rejects the promise with AbortError rather than
+      // resolving empty — treat that the same as a plain "no" instead of crashing.
+      const answer = await rl
+        .question(`No lanes directory found. Create ${proposed} for this project's lanes? [Y/n] `)
+        .catch(() => 'n');
+      rl.close();
+      if (!/^n/i.test(answer.trim())) {
+        try {
+          mkdirSync(proposed, { recursive: true });
+          worktreesDir = proposed;
+          createdWorktreesDir = proposed;
+        } catch (err) {
+          out(`${WARN} could not create ${proposed}: ${err.message} — leaving worktreesDir unset`);
+        }
+      }
+    }
     const config = {
       // Points editors (VSCode etc.) at this install's schema for hover docs and
       // autocomplete on every field — the config documents itself, no separate
       // doc page to keep in sync. Absolute, since it must resolve from any repo.
       $schema: join(ROOT, 'config', 'agent-system.schema.json'),
-      project: detectProjectName(process.cwd()),
+      project: projectName,
       ...(worktreesDir ? { worktreesDir, basePort: 300 } : {}),
       commands,
       // A guess, and flagged as one below: `--port` is right for Vite and Next
@@ -243,7 +268,13 @@ switch (cmd) {
     out();
     out(`  project        ${config.project}`);
     out(`  package mgr    ${pm || 'not detected'}`);
-    out(`  worktrees      ${worktreesDir || `${DIM}none detected — lanes disabled, everything else works${RESET}`}`);
+    out(
+      `  worktrees      ${
+        createdWorktreesDir
+          ? `${worktreesDir} ${DIM}(created)${RESET}`
+          : worktreesDir || `${DIM}none detected — lanes disabled, everything else works${RESET}`
+      }`,
+    );
     for (const [k, v] of Object.entries(commands)) {
       out(`  ${k.padEnd(14)} ${v || `${DIM}not detected${RESET}`}`);
     }
@@ -312,6 +343,7 @@ switch (cmd) {
       const from = rest.includes('--from') ? rest[rest.indexOf('--from') + 1] : undefined;
       const plan = worktrees.planCreate(ctx.config, name);
       if (plan.error) die(plan.error);
+      if (plan.createdDir) out(`${OK} created worktrees directory ${plan.createdDir}`);
       if (plan.renumbered.length) {
         out(`${WARN} creating "${name}" renumbers existing lanes, because lane numbers are`);
         out('  the alphabetical position. Colours and ports move with the number:');
@@ -507,7 +539,11 @@ switch (cmd) {
       if (!wtDir) {
         row(DIM + '·' + RESET, 'worktrees', 'not configured — lanes disabled, rest works');
       } else if (!existsSync(wtDir)) {
-        bad('worktrees', `${wtDir} does not exist`);
+        // `lanes new` self-heals this exact state (creates wtDir) as long as its
+        // parent exists — matches the same boundary in worktrees.mjs#planCreate.
+        existsSync(dirname(wtDir))
+          ? warn('worktrees', `${wtDir} does not exist yet — \`lanes new\` will create it`)
+          : bad('worktrees', `${wtDir} does not exist, and neither does its parent`);
       } else {
         row(OK, 'worktrees', wtDir);
       }
