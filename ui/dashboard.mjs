@@ -13,10 +13,11 @@
  *     degrade the display, not kill the process.
  */
 
-import { existsSync, statSync, openSync, readSync, closeSync, readdirSync } from 'node:fs';
+import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { EVENTS_FILE, resolveContext, expandHome } from '../lib/context.mjs';
+import { EVENTS_FILE, resolveContext, issueFromBranch } from '../lib/context.mjs';
 import { laneColorFor } from '../lib/colors.mjs';
+import { enumerateLanes, laneMarks } from '../lib/worktrees.mjs';
 
 const HISTORY_LIMIT = 12;
 
@@ -215,34 +216,35 @@ export function applyEvents(state, events) {
   return state;
 }
 
-/** All lanes a project declares, so idle worktrees still get a row. */
-function declaredLanes(ctx) {
-  const dir = expandHome(ctx?.config?.worktreesDir);
-  if (!dir || !existsSync(dir)) return [];
-  try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-      .sort();
-  } catch {
-    return [];
-  }
-}
-
-function rowsFor(ctx, lanes) {
+function rowsFor(ctx, lanes, laneInfo) {
   const project = ctx?.project;
   const rows = [];
   const seen = new Set();
 
-  declaredLanes(ctx).forEach((name, i) => {
-    const lane = i + 1;
-    const key = `${project}#${name}`;
+  for (const l of laneInfo) {
+    const key = `${project}#${l.name}`;
     seen.add(key);
-    // `lane`/`worktree` always come from the current directory listing, never
-    // from the stored event — those are keyed by name but may carry a lane
-    // number recorded back when this name sat at a different position.
-    rows.push({ ...(lanes.get(key) || { ev: 'session_end' }), lane, worktree: name });
-  });
+    const prev = lanes.get(key) || { ev: 'session_end' };
+    // `lane`/`worktree`/`dirty`/`ahead`/`behind`/`baseKnown` always come from
+    // the live git read, never from the stored event — those are keyed by
+    // name but may carry a lane number recorded back when this name sat at a
+    // different position, and never carried divergence data at all.
+    rows.push({
+      ...prev,
+      ...l,
+      worktree: l.name,
+      // A transient git failure (fresh value `null`) must never blank a
+      // previously-known-good branch — hence nullish, not `||`.
+      branch: l.branch ?? prev.branch,
+      // Falls back to the last reported issue only when the branch itself
+      // could not be read — matching `resolveContext`, which derives the
+      // issue from the branch alone with no fallback. If the branch *was*
+      // read and simply encodes no issue (e.g. back on base), that is the
+      // truth: keeping a stale issue would contradict a fresh "free" MARKS
+      // on the same row, since neither this issue nor this branch matches it.
+      issue: l.branch ? issueFromBranch(l.branch, ctx?.config) : prev.issue,
+    });
+  }
 
   // Anything in the log that is not a declared lane — another repo, or a
   // worktree outside the configured directory. `lanes rm` deletes its entry
@@ -261,9 +263,28 @@ function rowsFor(ctx, lanes) {
   return rows;
 }
 
+const MARKS_WIDTH = 12;
+const MARKS_TONE = { dirty: C.yellow, ahead: C.green, behind: C.red, unknown: C.yellow, free: C.dim };
+
+/**
+ * The plain text (`laneMarks`' tokens joined by ' ') is measured and padded
+ * first, since `pad()` counts raw `.length` and would misalign on text that
+ * already carries ANSI codes; the coloured version is then wrapped around
+ * each token, reusing the padding `pad()` already computed.
+ */
+function marksCell(r) {
+  const tokens = laneMarks(r);
+  const plain = tokens.map((t) => t.text).join(' ');
+  const padded = pad(plain, MARKS_WIDTH);
+  if (!plain || plain.length >= MARKS_WIDTH) return padded;
+  const trailing = padded.slice(plain.length);
+  const colored = tokens.map((t) => `${MARKS_TONE[t.tone]}${t.text}${C.reset}`).join(' ');
+  return colored + trailing;
+}
+
 /** Build the frame as a string. Callers decide whether to clear the screen. */
-export function render(ctx, state, now = Date.now()) {
-  const rows = rowsFor(ctx, state.lanes);
+export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config)) {
+  const rows = rowsFor(ctx, state.lanes, laneInfo);
   const colorFor = laneColorFor();
   const width = Math.max(60, process.stdout.columns || 100);
   const out = [];
@@ -273,12 +294,12 @@ export function render(ctx, state, now = Date.now()) {
   // Wide and fixed on purpose: a narrower adaptive layout would have to hide
   // columns as more get added over time, and STAGE next to STATE is exactly
   // that first addition. Assumes a wide-enough terminal; a split pane wraps.
-  const barWidth = Math.min(width, 140);
+  const barWidth = Math.min(width, 152);
   const gap = Math.max(1, barWidth - title.length - clock.length);
   out.push(`${C.bold}${title}${C.reset}${C.dim}${' '.repeat(gap)}${clock}${C.reset}`);
   out.push('');
   out.push(
-    `${C.bold}${pad('#', 3)}${pad('WORKTREE', 20)}${pad('BRANCH', 40)}${pad('ISSUE', 8)}${pad('STAGE', 18)}${pad('STATE', 32)}FOR${C.reset}`,
+    `${C.bold}${pad('#', 3)}${pad('WORKTREE', 20)}${pad('BRANCH', 40)}${pad('MARKS', MARKS_WIDTH)}${pad('ISSUE', 8)}${pad('STAGE', 18)}${pad('STATE', 32)}FOR${C.reset}`,
   );
   out.push(`${C.dim}${'─'.repeat(barWidth)}${C.reset}`);
 
@@ -293,6 +314,7 @@ export function render(ctx, state, now = Date.now()) {
       pad(r.lane ?? '·', 3) +
         laneColor + pad(r.worktree, 20) + C.reset +
         pad(r.branch || '—', 40) +
+        marksCell(r) +
         pad(r.issue ? `#${r.issue}` : '—', 8) +
         C.dim + pad(r.stage || '—', 18) + C.reset +
         s.color + pad(`${s.icon} ${s.label(r)}`, 32) + C.reset +
@@ -341,6 +363,15 @@ export async function runUi() {
   process.on('SIGINT', restore);
   process.on('SIGTERM', restore);
 
+  // Git-derived per-lane data costs a subprocess set per lane, so it is
+  // refreshed only every 20 ticks (~20s at the 1Hz redraw below) rather than
+  // on every paint — including which worktrees exist, so a lane created or
+  // removed elsewhere can take up to ~20s to appear/disappear here. Setup-time
+  // action, not a per-task one, so that lag is accepted rather than paid for
+  // on every tick.
+  let tick = -1;
+  let laneInfo;
+
   const paint = () => {
     try {
       const fresh = tail.read();
@@ -351,10 +382,12 @@ export async function runUi() {
         }
       }
       applyEvents(state, fresh);
+      tick += 1;
+      if (tick % 20 === 0) laneInfo = enumerateLanes(ctx.config);
       // Full redraw: cheap at this size, and it avoids every partial-update
       // artefact that incremental cursor movement would introduce.
       process.stdout.write(
-        `\x1b[2J\x1b[H${render(ctx, state)}\n${C.dim}ctrl-c to quit${C.reset}\n`,
+        `\x1b[2J\x1b[H${render(ctx, state, Date.now(), laneInfo)}\n${C.dim}ctrl-c to quit${C.reset}\n`,
       );
     } catch {
       /* never let a render bug kill the dashboard */
