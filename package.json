@@ -1,0 +1,17 @@
+{
+  "name": "agent-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Architect gate, generic reviewer/test-writer, and a zero-token lane dashboard for Claude Code worktrees.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "install-system": "node install.mjs",
+    "uninstall-system": "node install.mjs --uninstall",
+    "doctor": "node bin/lanes.mjs doctor",
+    "ui": "node bin/lanes.mjs ui"
+  }
+}

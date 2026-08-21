@@ -1,0 +1,23 @@
+#!/usr/bin/env sh
+#
+# Wrapper for the lanes CLI.
+#
+# This directory goes on your PATH, so this file is what `lanes` runs.
+#
+# It stays a wrapper rather than a bare Node script because an extensionless Node
+# entry point takes its module type from the nearest package.json — which breaks
+# the moment anyone symlinks or copies the CLI out of the repo. Resolving our own
+# path here in POSIX sh and handing Node an explicit .mjs removes the question.
+
+# Resolve this script's own path through any chain of symlinks.
+SELF=$0
+while [ -L "$SELF" ]; do
+  TARGET=$(readlink "$SELF")
+  case $TARGET in
+    /*) SELF=$TARGET ;;
+    *)  SELF=$(dirname "$SELF")/$TARGET ;;
+  esac
+done
+DIR=$(cd "$(dirname "$SELF")" && pwd)
+
+exec node "$DIR/lanes.mjs" "$@"

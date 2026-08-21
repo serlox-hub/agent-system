@@ -1,0 +1,205 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "agent-system project configuration",
+  "description": "Drop this at <repo>/.claude/agent-system.json to opt a project into the agent-system. Absence of this file means the project is not opted in: hooks stay silent and the commit guard never fires.",
+  "type": "object",
+  "required": [
+    "project"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "project": {
+      "type": "string",
+      "description": "Short project name, used as the event-log key and the dashboard title."
+    },
+    "worktreesDir": {
+      "type": "string",
+      "description": "Directory holding the fixed worktrees. Lane numbers are the 1-based alphabetical position of each subdirectory — stable across worktree add/remove. Supports ~ expansion."
+    },
+    "basePort": {
+      "type": "integer",
+      "description": "Dev-server port prefix, purely informational. Lane N is shown as serving on `${basePort}${N}` (basePort 300 -> lane 2 is 3002)."
+    },
+    "commands": {
+      "type": "object",
+      "description": "Project commands. /review runs the gates once at the end; the reviewer never runs them. A command left null is a gate that is skipped, and /review says so.",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "properties": {
+        "install": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lintFix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "typecheck": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "test": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "testTargeted": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "build": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "branch": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Regex whose first all-digits capture group is the issue number. Default: ^[a-z]+/(\\d+)-"
+        },
+        "prefixes": {
+          "type": "object",
+          "description": "Branch prefix -> issue label. null means no label.",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "base": {
+          "type": "string",
+          "description": "Base branch new work branches off, and the reference for ahead/behind and free-lane detection. Default \"main\"."
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "commitGuard": {
+          "type": "boolean",
+          "description": "When false, `git commit` is never blocked for lack of review. Default true."
+        },
+        "largeDiffThreshold": {
+          "type": "integer",
+          "description": "Changed-line count past which the guard warns that review quality degrades. Default 400."
+        },
+        "excludePattern": {
+          "type": "string",
+          "description": "Regex of generated/vendored paths to drop from review scope. Reviewing them is pure noise."
+        },
+        "domainAxes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Project-specific judgment axes for the reviewer. This is the field that makes the reviewer worth running: a generic 'best practices' reviewer finds nothing useful."
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "properties": {
+        "framework": {
+          "type": "string"
+        },
+        "expertiseDoc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Repo-relative path to the project's testing conventions doc, read by the test agent before writing anything."
+        },
+        "locationRule": {
+          "type": "string"
+        }
+      }
+    },
+    "architect": {
+      "type": "object",
+      "properties": {
+        "issueProvider": {
+          "type": "string",
+          "enum": [
+            "github",
+            "none"
+          ]
+        },
+        "specSections": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "challengeSpec": {
+          "type": "boolean",
+          "description": "Run the spec-challenger agent against the draft spec before creating the issue. Default true."
+        }
+      }
+    },
+    "dev": {
+      "type": "object",
+      "description": "Per-lane dev services. Every project declares its own: no two stacks start the same way, and one repo can have several services (e.g. a React client and a Python API) with different commands, directories and port series.",
+      "properties": {
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "command"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Short id, used in `lanes dev` output, log filenames and `lanes logs <n> <name>`."
+              },
+              "command": {
+                "type": "string",
+                "description": "Shell command. Placeholders: {port} {lane} {worktree} {name}."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Directory relative to the worktree root. Default \".\" — set it for monorepo services."
+              },
+              "portBase": {
+                "type": "integer",
+                "description": "Port prefix for this service. Lane N gets `${portBase}${N}` (400 -> lane 2 is 4002). Defaults to the top-level basePort."
+              },
+              "url": {
+                "type": "string",
+                "description": "Optional URL shown when the service starts. Same placeholders."
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
