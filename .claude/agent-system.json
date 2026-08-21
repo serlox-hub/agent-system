@@ -1,0 +1,54 @@
+{
+  "$schema": "/Users/sergio/MyProjects/agent-system/config/agent-system.schema.json",
+  "project": "agent-system",
+  "commands": {
+    "install": "npm install",
+    "lint": null,
+    "lintFix": null,
+    "typecheck": null,
+    "test": "npm test",
+    "testTargeted": "node test/smoke.mjs",
+    "build": null
+  },
+  "dev": {
+    "services": []
+  },
+  "branch": {
+    "pattern": "^(?:feat|fix|refactor|chore|docs)/(\\d+)-",
+    "prefixes": {
+      "feat": "enhancement",
+      "fix": "bug",
+      "refactor": "refactor",
+      "docs": "documentation",
+      "chore": null
+    }
+  },
+  "review": {
+    "commitGuard": true,
+    "largeDiffThreshold": 400,
+    "excludePattern": "^CHANGELOG\\.md$|^(pnpm-lock\\.yaml|package-lock\\.json|yarn\\.lock|bun\\.lockb)$",
+    "domainAxes": [
+      "Zero runtime dependencies is the pitch, not a style preference: any new package in package.json, or an import of anything outside node: builtins, is a defect unless the standard library genuinely cannot do it — not a convenience worth the exception.",
+      "Hooks must never break a session: every path in hooks/*.mjs and hooks/*.sh must swallow its own errors and exit 0, including failure paths — observability is not correctness, and failing to log an event must never fail a user's turn. Separately, hooks must never write to stdout except a deliberate decision (e.g. commit-guard's block reason) — stray stdout is fed back into the model and silently costs tokens on every single tool call.",
+      "agents/*.md and skills/*/SKILL.md are the product, not scaffolding — review prompt edits with the same scrutiny as logic changes. Flag anything that softens architect / code-reviewer / spec-challenger into being agreeable: an agreeable reviewer is a broken reviewer.",
+      "English only for everything committed — prompts, issues, specs, code comments, commit messages. Flag any other language slipping into a diff."
+    ]
+  },
+  "tests": {
+    "framework": null,
+    "expertiseDoc": "test/smoke.mjs",
+    "locationRule": "There is no per-file convention: everything lives in test/smoke.mjs, a single hand-rolled node:assert suite run against a real throwaway git repo in os.tmpdir(). Add new assertions there, near the function they cover — do not introduce a test framework or a second test file."
+  },
+  "architect": {
+    "issueProvider": "github",
+    "specSections": [
+      "Problem",
+      "Constraints",
+      "Approach",
+      "Contract",
+      "Out of scope",
+      "Acceptance"
+    ],
+    "challengeSpec": true
+  }
+}
