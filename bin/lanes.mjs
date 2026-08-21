@@ -19,7 +19,7 @@ import { createInterface } from 'node:readline/promises';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 
-const { resolveContext, emitWithContext, expandHome, EVENTS_FILE, EVENTS_PREV, LANES_DIR, CONFIG_REL } =
+const { resolveContext, emitWithContext, emit, expandHome, EVENTS_FILE, EVENTS_PREV, LANES_DIR, CONFIG_REL } =
   await import(join(ROOT, 'lib', 'context.mjs'));
 const { diffFingerprint, writeMark, REVIEW_MARK, BYPASS_MARK } = await import(
   join(ROOT, 'lib', 'marks.mjs')
@@ -339,7 +339,7 @@ switch (cmd) {
     if (cmd === 'new') {
       const name = rest.find((a) => !a.startsWith('-'));
       if (!name) die('Usage: lanes new <name> [--branch <branch>] [--from <ref>]');
-      const branch = rest[rest.indexOf('--branch') + 1];
+      const branch = rest.includes('--branch') ? rest[rest.indexOf('--branch') + 1] : undefined;
       const from = rest.includes('--from') ? rest[rest.indexOf('--from') + 1] : undefined;
       const plan = worktrees.planCreate(ctx.config, name);
       if (plan.error) die(plan.error);
@@ -353,6 +353,17 @@ switch (cmd) {
       }
       const res = worktrees.createWorktree(ctx.config, name, branch, from);
       if (res.error) die(res.error);
+      emit({
+        ev: 'lane_created',
+        project: ctx.project,
+        lane: res.lane,
+        worktree: name,
+        // Without `--branch`, createWorktree checks out the base ref directly
+        // — a detached HEAD, not a branch named after `baseBranch` — so there
+        // is no real branch name to report yet, same as the line above.
+        branch: branch || null,
+        path: res.path,
+      });
       out(`${OK} lane ${res.lane} — ${name}${branch ? ` on ${branch}` : ''}`);
       out(`  ${res.path}`);
       break;
@@ -368,6 +379,15 @@ switch (cmd) {
           out(`${BAD} ${res.error}`);
           continue;
         }
+        emit({
+          ev: 'lane_removed',
+          project: ctx.project,
+          lane: l.lane,
+          worktree: l.name,
+          branch: l.branch,
+          path: l.path,
+          detail: res.wasForced ? 'forced' : null,
+        });
         out(`${OK} removed lane ${l.lane} — ${res.removed}${res.wasForced ? ' (forced)' : ''}`);
         if (res.branchKept) {
           out(`${DIM}  branch ${res.branchKept} still exists — reusing this name needs`);

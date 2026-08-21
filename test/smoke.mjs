@@ -206,8 +206,8 @@ const ev = (ts, e, extra = {}) => ({ ts, ev: e, project: 'demo', lane: 1, worktr
 test('applyEvents keeps only the latest state per lane', () => {
   const s = applyEvents(createState(), [ev(1, 'session_start'), ev(2, 'agent_start', { agent: 'code-reviewer' })]);
   assert.equal(s.lanes.size, 1);
-  assert.equal(s.lanes.get('demo#1').ev, 'agent_start');
-  assert.equal(s.lanes.get('demo#1').agent, 'code-reviewer');
+  assert.equal(s.lanes.get('demo#demo-1').ev, 'agent_start');
+  assert.equal(s.lanes.get('demo#demo-1').agent, 'code-reviewer');
 });
 
 test('agent_end clears the running agent; busy is kept out of history', () => {
@@ -216,15 +216,50 @@ test('agent_end clears the running agent; busy is kept out of history', () => {
     ev(2, 'agent_end'),
     ev(3, 'busy'),
   ]);
-  assert.equal(s.lanes.get('demo#1').agent, null);
+  assert.equal(s.lanes.get('demo#demo-1').agent, null);
   assert.equal(s.history.length, 2, 'busy is noise, it fires on every message');
+});
+
+test('lane_removed deletes the lane outright, so a same-named lane never inherits its state', () => {
+  const s = applyEvents(createState(), [
+    ev(1, 'session_start', { issue: '402' }),
+    ev(2, 'stage', { stage: 'review' }),
+    ev(3, 'lane_removed'),
+  ]);
+  assert.equal(s.lanes.has('demo#demo-1'), false, 'the removed lane must leave no trace to inherit from');
+
+  const recreated = applyEvents(s, [ev(4, 'lane_created', { branch: 'feat/999-other' })]);
+  const row = recreated.lanes.get('demo#demo-1');
+  assert.equal(row.issue, undefined, 'a fresh lane must not inherit the old occupant\'s issue');
+  assert.equal(row.stage, undefined, 'nor its stage');
+  assert.equal(row.branch, 'feat/999-other');
 });
 
 test('applyEvents is incremental — folding twice equals folding once', () => {
   const events = [ev(1, 'session_start'), ev(2, 'stage', { stage: 'review' })];
   const once = applyEvents(createState(), events);
   const twice = applyEvents(applyEvents(createState(), [events[0]]), [events[1]]);
-  assert.deepEqual(twice.lanes.get('demo#1'), once.lanes.get('demo#1'));
+  assert.deepEqual(twice.lanes.get('demo#demo-1'), once.lanes.get('demo#demo-1'));
+});
+
+test('a stage event is a milestone, not a liveness signal — it must not overwrite the lane state', () => {
+  const onlyStage = applyEvents(createState(), [ev(1, 'stage', { stage: 'implement' })]);
+  const row = onlyStage.lanes.get('demo#demo-1');
+  assert.equal(row.ev, null, 'no session/agent event was ever seen for this lane');
+  assert.equal(row.stage, 'implement');
+
+  const withSession = applyEvents(createState(), [ev(1, 'session_start'), ev(2, 'stage', { stage: 'review' })]);
+  const row2 = withSession.lanes.get('demo#demo-1');
+  assert.equal(row2.ev, 'session_start', 'the stage marker must not clobber the last real state');
+  assert.equal(row2.stage, 'review');
+});
+
+test('render puts stage and state in separate columns, and never paints a bare stage as live', () => {
+  const frame = render(resolveContext(lane2), applyEvents(createState(), [ev(1, 'stage', { stage: 'implement' })]));
+  const table = frame.slice(0, frame.indexOf('RECENT')); // RECENT is a log; the merged "stage: X" label is fine there
+  assert.ok(table.includes('implement'), 'the stage still shows');
+  assert.ok(table.includes('no session seen'), 'a bare stage marker is not a state, and must not be painted as one');
+  assert.ok(!table.includes('stage: implement'), 'the old merged "stage: X" state label must be gone from the table');
 });
 
 test('history is capped so a long-running dashboard cannot grow without bound', () => {
@@ -261,6 +296,49 @@ test('RECENT rows fall back to worktree too — a lane-less event must still say
     applyEvents(createState(), [ev(1, 'idle', { lane: null, worktree: 'demo-7' })]),
   );
   assert.ok(frame.includes('demo-7'), 'the worktree name must appear somewhere, not just a bare "·"');
+});
+
+test('a lane whose worktree was removed outside the dashboard is dropped, not stuck forever', () => {
+  const state = createState();
+  state.lanes.set('demo#demo-ghost', {
+    project: 'demo', worktree: 'demo-ghost', ev: 'busy', since: 1,
+    path: join(wtDir, 'demo-ghost'), // never created — existsSync must say so
+  });
+  const frame = render(resolveContext(lane2), state);
+  assert.ok(!frame.includes('demo-ghost'), 'its path is gone — it must not linger as a live row');
+});
+
+test('a ghost row from another project is dropped too — liveness is checked by path, not by project', () => {
+  const state = createState();
+  state.lanes.set('other-project#some-worktree', {
+    project: 'other-project', worktree: 'some-worktree', ev: 'busy', since: 1,
+    path: join(wtDir, 'not-there'),
+  });
+  const frame = render(resolveContext(lane2), state);
+  assert.ok(!frame.includes('some-worktree'), 'existsSync needs no project match to tell this path is gone');
+});
+
+test('a ghost row with no recorded path fails open — events written before that field existed cannot be verified', () => {
+  const state = createState();
+  state.lanes.set('other-project#some-worktree', { project: 'other-project', worktree: 'some-worktree', ev: 'busy', since: 1 });
+  const frame = render(resolveContext(lane2), state);
+  assert.ok(frame.includes('some-worktree'), 'no path recorded means it cannot be checked, so it must not be hidden');
+});
+
+test('a currently-declared lane bypasses the existsSync liveness check entirely, even with a stale path', () => {
+  const state = createState();
+  state.lanes.set('demo#demo-1', {
+    project: 'demo', worktree: 'demo-1', ev: 'idle', since: 1,
+    // A path left over from before a rename, say — must never be consulted:
+    // declared lanes are matched by name against the live directory listing,
+    // not verified against a path recorded in a past event.
+    path: join(wtDir, 'demo-1-stale-path-from-before-a-rename'),
+  });
+  const frame = render(resolveContext(lane2), state);
+  const row = frame.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  assert.ok(row, 'demo-1 must still get a row');
+  assert.ok(row.includes('waiting for you'), 'a declared lane must keep its real state regardless of a stale path');
+  assert.ok(!row.includes('offline'), 'it must not fall back to the no-events default either');
 });
 
 // ── Lane lifecycle ──────────────────────────────────────────────────
@@ -502,6 +580,53 @@ test('lanes adopt writes a config a fresh repo can be verified against', () => {
 
 test('lanes adopt refuses to clobber an existing config without --force', () => {
   assert.throws(() => execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: lane2, stdio: 'pipe' }));
+});
+
+const readEvents = () =>
+  readFileSync(join(LANES_DIR, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+test('lanes new emits lane_created, and lanes rm emits lane_removed', () => {
+  const base = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['new', 'demo-4', '--branch', 'feat/999-lane-events', '--from', base], {
+    cwd: repo,
+    encoding: 'utf8',
+  });
+  const created = readEvents().findLast((e) => e.ev === 'lane_created' && e.worktree === 'demo-4');
+  assert.ok(created, 'lanes new must emit lane_created');
+  assert.equal(created.project, 'demo');
+  assert.equal(typeof created.lane, 'number');
+  assert.equal(created.branch, 'feat/999-lane-events');
+  assert.equal(created.path, join(wtDir, 'demo-4'), 'path is what liveness checks rely on');
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', 'demo-4'], { cwd: repo, encoding: 'utf8' });
+  const removed = readEvents().findLast((e) => e.ev === 'lane_removed' && e.worktree === 'demo-4');
+  assert.ok(removed, 'lanes rm must emit lane_removed');
+  assert.equal(removed.project, 'demo');
+  assert.equal(typeof removed.lane, 'number');
+});
+
+test('lanes new without --branch does not invent a branch name from the worktree name', () => {
+  // A commit SHA, not the branch name: checking out `main` in a second worktree
+  // while `repo` already has it checked out is refused by git. A raw SHA always
+  // lands detached, which is the whole point of this no-`--branch` case.
+  const base = git(repo, 'rev-parse', 'HEAD').trim();
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['new', 'demo-5', '--from', base], { cwd: repo, encoding: 'utf8' });
+  const created = readEvents().findLast((e) => e.ev === 'lane_created' && e.worktree === 'demo-5');
+  assert.ok(created, 'lanes new must emit lane_created');
+  assert.equal(created.branch, null, 'no --branch means a detached HEAD, not a fabricated branch name');
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', 'demo-5'], { cwd: repo, encoding: 'utf8' });
+});
+
+test('emitWithContext fills path from ctx.worktreeRoot too, not just the two direct emit() calls in lanes new/rm', () => {
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['stage', 'implement', 'path propagation check'], {
+    cwd: lane2,
+    encoding: 'utf8',
+  });
+  const staged = readEvents().findLast((e) => e.ev === 'stage' && e.worktree === 'demo-2' && e.stage === 'implement');
+  assert.ok(staged, 'lanes stage must emit a stage event');
+  assert.equal(staged.path, lane2, 'emitWithContext must carry the real worktree root, same as the direct emit() calls');
+  assert.ok(existsSync(staged.path), 'the recorded path must be a real, currently-existing directory');
 });
 
 test('the suite writes its events inside the sandbox, not the real home', () => {

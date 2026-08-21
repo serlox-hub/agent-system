@@ -116,9 +116,17 @@ const STATES = {
   commit_blocked: { icon: '■', color: C.red, label: () => 'commit blocked — needs review' },
   session_start: { icon: '○', color: C.dim, label: () => 'session open' },
   session_end: { icon: '○', color: C.grey, label: () => 'offline' },
+  lane_created: { icon: '+', color: C.green, label: () => 'lane created' },
+  lane_removed: { icon: '−', color: C.grey, label: () => 'lane removed' },
 };
 
 function stateOf(ev) {
+  // null/undefined means the fold never saw a liveness event at all for this
+  // lane — distinct from `session_end`, which means it saw one close. A stage
+  // marker alone (applyEvents no longer lets `stage` set `ev`) is the usual way
+  // to land here: real progress was recorded with no session to attach it to,
+  // so claiming a state — even "offline" — would overclaim.
+  if (ev == null) return { icon: '·', color: C.dim, label: () => 'no session seen' };
   return STATES[ev] || { icon: '·', color: C.dim, label: () => ev };
 }
 
@@ -159,25 +167,45 @@ export function createState() {
  * since the last call, so cost is proportional to what arrived — not to how
  * long the dashboard has been running.
  *
- * Lane key is `${project}#${lane ?? worktree}` so a worktree outside the
- * configured directory still gets a row rather than silently vanishing.
+ * Lane key is `${project}#${worktree}`, never the lane number: the number is
+ * only the alphabetical position under `worktreesDir` right now (D9), so it is
+ * reused as worktrees come and go. Keying by it — like the bug D18 already
+ * fixed once for lib/services.mjs — makes a freshly created lane inherit a
+ * removed one's stale state the moment it lands on the same position.
  */
 export function applyEvents(state, events) {
   for (const e of events) {
     if (!e || !e.ev) continue;
-    const key = `${e.project || '?'}#${e.lane ?? e.worktree ?? '?'}`;
-    const prev = state.lanes.get(key) || {};
-    state.lanes.set(key, {
-      project: e.project ?? prev.project,
-      lane: e.lane ?? prev.lane,
-      worktree: e.worktree ?? prev.worktree,
-      branch: e.branch ?? prev.branch,
-      issue: e.issue ?? prev.issue,
-      ev: e.ev,
-      agent: e.ev === 'agent_start' ? e.agent : e.ev === 'agent_end' ? null : prev.agent,
-      stage: e.ev === 'stage' ? e.stage : prev.stage,
-      since: e.ts,
-    });
+    const key = `${e.project || '?'}#${e.worktree ?? '?'}`;
+    if (e.ev === 'lane_removed') {
+      // Authoritative: this name is gone, so nothing it carried (issue, stage,
+      // agent) may leak into whatever gets created under the same name next.
+      state.lanes.delete(key);
+    } else {
+      // A fresh occupant starts from nothing — merging into the outgoing
+      // lane's leftover state is exactly the name-reuse bug this guards
+      // against (lane numbers already had this fixed by keying on name; a
+      // recreated name needs the same reset lane numbers get automatically).
+      const prev = e.ev === 'lane_created' ? {} : (state.lanes.get(key) || {});
+      state.lanes.set(key, {
+        project: e.project ?? prev.project,
+        lane: e.lane ?? prev.lane,
+        worktree: e.worktree ?? prev.worktree,
+        branch: e.branch ?? prev.branch,
+        issue: e.issue ?? prev.issue,
+        path: e.path ?? prev.path,
+        // `stage` is a pipeline milestone, not a liveness signal — it must not
+        // overwrite the last real session/agent state, or a lane goes cyan
+        // "working" the moment a checkpoint fires and stays that way forever
+        // once the session behind it is long gone.
+        ev: e.ev === 'stage' ? (prev.ev ?? null) : e.ev,
+        agent: e.ev === 'agent_start' ? e.agent : e.ev === 'agent_end' ? null : prev.agent,
+        stage: e.ev === 'stage' ? e.stage : prev.stage,
+        // Same reasoning as `ev`: a stage marker must not reset how long the
+        // *state* next to it has been true, or FOR lies the instant one fires.
+        since: e.ev === 'stage' ? (prev.since ?? e.ts) : e.ts,
+      });
+    }
     // `busy` fires on every user message; in the log it is noise.
     if (e.ev !== 'busy') {
       state.history.push(e);
@@ -208,15 +236,27 @@ function rowsFor(ctx, lanes) {
 
   declaredLanes(ctx).forEach((name, i) => {
     const lane = i + 1;
-    const key = `${project}#${lane}`;
+    const key = `${project}#${name}`;
     seen.add(key);
-    rows.push({ lane, worktree: name, ...(lanes.get(key) || { ev: 'session_end' }) });
+    // `lane`/`worktree` always come from the current directory listing, never
+    // from the stored event — those are keyed by name but may carry a lane
+    // number recorded back when this name sat at a different position.
+    rows.push({ ...(lanes.get(key) || { ev: 'session_end' }), lane, worktree: name });
   });
 
-  // Anything in the log that is not a declared lane of the current project —
-  // another repo, or a worktree outside the configured directory.
+  // Anything in the log that is not a declared lane — another repo, or a
+  // worktree outside the configured directory. `lanes rm` deletes its entry
+  // outright (see applyEvents), so what is left here is either genuinely
+  // outside `worktreesDir` or was removed some other way (manual `rm -rf`,
+  // `git worktree remove`) with no event to say so. `existsSync` on the path
+  // recorded with the event is the backstop for that second case — exact,
+  // not name-matched, and works for any project since it needs no git call
+  // scoped to the current repo. Events older than the `path` field have none
+  // and fail open, same as anything we simply can't verify.
   for (const [key, st] of lanes) {
-    if (!seen.has(key)) rows.push(st);
+    if (seen.has(key)) continue;
+    if (st.path && !existsSync(st.path)) continue;
+    rows.push(st);
   }
   return rows;
 }
@@ -230,13 +270,17 @@ export function render(ctx, state, now = Date.now()) {
 
   const title = `agent-system${ctx?.project ? ` · ${ctx.project}` : ''}`;
   const clock = fmtClock(now);
-  const gap = Math.max(1, Math.min(width, 92) - title.length - clock.length);
+  // Wide and fixed on purpose: a narrower adaptive layout would have to hide
+  // columns as more get added over time, and STAGE next to STATE is exactly
+  // that first addition. Assumes a wide-enough terminal; a split pane wraps.
+  const barWidth = Math.min(width, 140);
+  const gap = Math.max(1, barWidth - title.length - clock.length);
   out.push(`${C.bold}${title}${C.reset}${C.dim}${' '.repeat(gap)}${clock}${C.reset}`);
   out.push('');
   out.push(
-    `${C.bold}${pad('#', 3)}${pad('WORKTREE', 16)}${pad('BRANCH', 30)}${pad('ISSUE', 7)}${pad('STATE', 28)}FOR${C.reset}`,
+    `${C.bold}${pad('#', 3)}${pad('WORKTREE', 20)}${pad('BRANCH', 40)}${pad('ISSUE', 8)}${pad('STAGE', 18)}${pad('STATE', 32)}FOR${C.reset}`,
   );
-  out.push(`${C.dim}${'─'.repeat(Math.min(width, 92))}${C.reset}`);
+  out.push(`${C.dim}${'─'.repeat(barWidth)}${C.reset}`);
 
   if (rows.length === 0) {
     out.push(`${C.dim}  No lanes yet. Start a Claude Code session in a configured worktree.${C.reset}`);
@@ -247,10 +291,11 @@ export function render(ctx, state, now = Date.now()) {
     const laneColor = colorFor(r.lane);
     out.push(
       pad(r.lane ?? '·', 3) +
-        laneColor + pad(r.worktree, 16) + C.reset +
-        pad(r.branch || '—', 30) +
-        pad(r.issue ? `#${r.issue}` : '—', 7) +
-        s.color + pad(`${s.icon} ${s.label(r)}`, 28) + C.reset +
+        laneColor + pad(r.worktree, 20) + C.reset +
+        pad(r.branch || '—', 40) +
+        pad(r.issue ? `#${r.issue}` : '—', 8) +
+        C.dim + pad(r.stage || '—', 18) + C.reset +
+        s.color + pad(`${s.icon} ${s.label(r)}`, 32) + C.reset +
         (r.ev === 'idle' ? C.yellow : C.dim) + (r.since ? fmtElapsed(now - r.since) : '—') + C.reset,
     );
   }
