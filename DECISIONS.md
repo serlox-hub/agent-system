@@ -78,12 +78,12 @@ churns lane numbers, and lane numbers drive colour and port.
 killing the wrapper shell leaves the real dev server orphaned, and the failure is
 silent until you find the port still bound.
 
-## D18 — Service pid and log files are keyed by worktree name, not lane number
-`core` · 2026-08 · `lib/services.mjs:resolveServices`
-Lane numbers are positional and shift when a lane is added or removed, which
-would leave a running service's bookkeeping pointing at a different worktree. The
-port it actually bound to is recorded in the pid file for the same reason.
-Rejected: keying by lane, consistent with everything else and silently wrong.
+## D18 — State keyed to a worktree is keyed by name, never by lane number
+`core` · 2026-08 · `lib/services.mjs:resolveServices`, `ui/dashboard.mjs:applyEvents`
+Lane numbers are positional and shift when a lane is added or removed, leaving
+service bookkeeping or the dashboard's folded state pointing at — or inheriting
+from — the wrong worktree; the bound port is recorded in the pid file likewise.
+Rejected: keying by lane — it's what the UI displays, but silently wrong on add/remove.
 
 ## D17 — Lane colours live per machine, never in the project config
 `product` · 2026-08 · `lib/colors.mjs`, `lanes color`

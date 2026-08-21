@@ -108,8 +108,9 @@ Turn it off per project with `"review": { "commitGuard": false }`.
 
 ## Events
 
-Everything is appended to `~/.claude/lanes/events.jsonl` by hooks — the model
-never sees any of it, so the dashboard costs zero tokens.
+Everything is appended to `~/.claude/lanes/events.jsonl` by hooks, and by a few
+`lanes` CLI commands directly — the model never sees any of it, so the
+dashboard costs zero tokens.
 
 | event | meaning |
 |---|---|
@@ -120,6 +121,7 @@ never sees any of it, so the dashboard costs zero tokens.
 | `stage` | a pipeline stage was entered (`lanes stage …`) |
 | `reviewed` | `/gate` marked the diff clean |
 | `commit_blocked` / `commit_bypass` / `commit_reviewed` | commit guard outcomes |
+| `lane_created` / `lane_removed` | `lanes new` / `lanes rm` created or removed a lane |
 
 `idle` is the one that earns the dashboard its keep: with four lanes, the thing
 you cannot see is which one has been sitting waiting on you for twenty minutes.
