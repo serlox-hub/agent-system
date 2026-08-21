@@ -22,7 +22,7 @@
     },
     "commands": {
       "type": "object",
-      "description": "Project commands. /review runs the gates once at the end; the reviewer never runs them. A command left null is a gate that is skipped, and /review says so.",
+      "description": "Project commands. /gate runs the gates once at the end; the reviewer never runs them. A command left null is a gate that is skipped, and /gate says so.",
       "additionalProperties": {
         "type": [
           "string",
@@ -102,7 +102,7 @@
       "properties": {
         "commitGuard": {
           "type": "boolean",
-          "description": "Default true: blocks `git commit` when the current diff has not been through /review. It does not just fail — it hands the agent a reason, the agent asks you whether to review first or commit anyway, and 'anyway' arms a one-shot bypass (`lanes allow-commit`). Set false to disable; /review still works when invoked directly."
+          "description": "Default true: blocks `git commit` when the current diff has not been through /gate. It does not just fail — it hands the agent a reason, the agent asks you whether to review first or commit anyway, and 'anyway' arms a one-shot bypass (`lanes allow-commit`). Set false to disable; /gate still works when invoked directly."
         },
         "largeDiffThreshold": {
           "type": "integer",

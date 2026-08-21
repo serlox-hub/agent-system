@@ -28,7 +28,7 @@ Zero dependencies. Plain Node ESM and two shell scripts.
                                                     │
                           ── you decide when to move ──
                                                     ▼
-/review     ──►  code-reviewer  ──►  auto-apply mechanical / ask on judgment
+/gate       ──►  code-reviewer  ──►  auto-apply mechanical / ask on judgment
                                  ──►  test-writer  ──►  lint --fix + typecheck
                                                     │
                                                     ▼
@@ -72,7 +72,7 @@ lanes ui                 Live dashboard (leave it running in a terminal)
 lanes status             One-shot snapshot
 lanes adopt              Scaffold .claude/agent-system.json for this repo
 lanes doctor             Verify the install, the repo config and this worktree
-lanes reviewed           Mark the current diff reviewed (the /review skill does this)
+lanes reviewed           Mark the current diff reviewed (the /gate skill does this)
 lanes allow-commit       One-shot bypass of the commit guard
 lanes stage <name>       Emit a pipeline stage event (the skills do this)
 ```
@@ -96,7 +96,7 @@ different branch on a different machine.
 
 ## The commit guard
 
-`git commit` is blocked when the current diff has not been through `/review`.
+`git commit` is blocked when the current diff has not been through `/gate`.
 The hook cannot talk to you directly, so it denies the call and hands the agent
 a reason; the agent then asks you whether to review first or commit anyway. If
 you choose to commit anyway it runs `lanes allow-commit` and retries.
@@ -118,7 +118,7 @@ never sees any of it, so the dashboard costs zero tokens.
 | `idle` | the agent finished its turn — **the lane is waiting for you** |
 | `agent_start` / `agent_end` | a subagent was spawned / returned |
 | `stage` | a pipeline stage was entered (`lanes stage …`) |
-| `reviewed` | `/review` marked the diff clean |
+| `reviewed` | `/gate` marked the diff clean |
 | `commit_blocked` / `commit_bypass` / `commit_reviewed` | commit guard outcomes |
 
 `idle` is the one that earns the dashboard its keep: with four lanes, the thing
@@ -162,7 +162,7 @@ Stated plainly, because finding these yourself later is worse:
 - **Project-local agents and skills win over these.** A repo with its own
   `.claude/agents/` or `.claude/skills/` keeps using them, so adopting this
   system there does not change existing behaviour on its own — you get the hooks
-  and the dashboard, not the agents. Worth knowing before wondering why `/review`
+  and the dashboard, not the agents. Worth knowing before wondering why `/gate`
   behaves differently in one repo.
 
 ## Layout
@@ -172,7 +172,7 @@ CLAUDE.md         repo rules; points every session at DECISIONS.md
 DECISIONS.md      why the code is the way it is, and what was rejected
 docs/SETUP.md     install + per-repo configuration walkthrough
 agents/           spec-challenger, code-reviewer, test-writer  → ~/.claude/agents/
-skills/           architect, review                            → ~/.claude/skills/
+skills/           architect, gate                              → ~/.claude/skills/
 hooks/            emit.mjs, commit-guard.{sh,mjs}              → wired in settings.json
 lib/              context.mjs (project/lane/event), marks.mjs (review markers)
 ui/               dashboard.mjs (the lane dashboard)
