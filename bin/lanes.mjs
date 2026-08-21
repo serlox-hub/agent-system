@@ -206,6 +206,10 @@ switch (cmd) {
     const { pm, commands, hasDev } = detectCommands(root);
     const worktreesDir = detectWorktreesDir(process.cwd());
     const config = {
+      // Points editors (VSCode etc.) at this install's schema for hover docs and
+      // autocomplete on every field — the config documents itself, no separate
+      // doc page to keep in sync. Absolute, since it must resolve from any repo.
+      $schema: join(ROOT, 'config', 'agent-system.schema.json'),
       project: detectProjectName(process.cwd()),
       ...(worktreesDir ? { worktreesDir, basePort: 300 } : {}),
       commands,
@@ -253,8 +257,8 @@ switch (cmd) {
     out(`${WARN} review.domainAxes is empty, and it is the field that decides whether`);
     out('  the reviewer is worth running. Without it you get a generic reviewer that');
     out('  finds only what your linter already found. Fill it in before relying on');
-    out('  /review — see the review.domainAxes section of docs/SETUP.md for how to');
-    out('  write them, with worked examples.');
+    out('  /review — hover the field in your editor (this file ships with $schema),');
+    out('  or read config/agent-system.schema.json, for how to write them.');
     out();
     out('Then: lanes doctor');
     break;
