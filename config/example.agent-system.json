@@ -1,0 +1,70 @@
+{
+  "project": "my-app",
+
+  "worktreesDir": "~/Projects/my-app-worktrees",
+  "basePort": 300,
+
+  "commands": {
+    "install": "pnpm install",
+    "lint": "pnpm lint",
+    "lintFix": "pnpm lint --fix",
+    "typecheck": "pnpm type-check",
+    "test": "pnpm test:run",
+    "testTargeted": "pnpm vitest run",
+    "build": "pnpm build"
+  },
+
+  "dev": {
+    "services": [
+      {
+        "name": "web",
+        "command": "pnpm dev --port {port}",
+        "portBase": 300,
+        "url": "http://localhost:{port}"
+      },
+      {
+        "name": "api",
+        "cwd": "services/api",
+        "command": "uv run uvicorn app.main:app --port {port} --reload",
+        "portBase": 400,
+        "url": "http://localhost:{port}/docs"
+      }
+    ]
+  },
+
+  "branch": {
+    "base": "main",
+    "pattern": "^(?:feat|fix|refactor|chore|docs)/(\\d+)-",
+    "prefixes": {
+      "feat": "enhancement",
+      "fix": "bug",
+      "refactor": "refactor",
+      "docs": "documentation",
+      "chore": null
+    }
+  },
+
+  "review": {
+    "commitGuard": true,
+    "largeDiffThreshold": 400,
+    "excludePattern": "^src/generated/|^CHANGELOG\\.md$|^(pnpm-lock\\.yaml|package-lock\\.json|yarn\\.lock)$",
+    "domainAxes": [
+      "REPLACE THESE. Architecture, duplication and durable context are already built into the reviewer — do not repeat them here. These axes are the things only your team knows. See the review.domainAxes section of docs/SETUP.md.",
+      "Money paths: anything touching price, tax or discount must keep the calculation in one place and record the inputs it used. A second copy of the formula is a defect even when it agrees today.",
+      "Offline-first. Users are on flaky connections — flag anything that assumes a request succeeds, or that loses local state on a failed sync.",
+      "Both themes. Dark mode is the common case for our users, not an afterthought; any visual change has to be checked in both."
+    ]
+  },
+
+  "tests": {
+    "framework": "vitest",
+    "expertiseDoc": null,
+    "locationRule": "Co-located as <name>.test.ts next to the unit under test."
+  },
+
+  "architect": {
+    "issueProvider": "github",
+    "specSections": ["Problem", "Constraints", "Approach", "Contract", "Out of scope", "Acceptance"],
+    "challengeSpec": true
+  }
+}
