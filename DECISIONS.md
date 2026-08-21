@@ -16,6 +16,12 @@ to make room.
 
 ---
 
+## D22 — `worktreesDir` resolves a gitignored per-machine override before the committed default
+`product` · 2026-08 · `.claude/agent-system.local.json` · #1
+Two developers may want their lanes in different places; a single committed
+value can't satisfy both — `lanes adopt` now writes it locally. Full design: #1.
+Rejected: an env var — invisible to `lanes doctor`, unlike the `lanes color` file.
+
 ## D21 — `planCreate` creates a missing `worktreesDir` itself, but only if its parent already exists
 `core` · 2026-08 · `lib/worktrees.mjs:124`
 `list`/`doctor`/`ui` must stay read-only, but `new` is itself an act of creation —
