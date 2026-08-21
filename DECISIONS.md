@@ -16,6 +16,15 @@ to make room.
 
 ---
 
+## D21 — `planCreate` creates a missing `worktreesDir` itself, but only if its parent already exists
+`core` · 2026-08 · `lib/worktrees.mjs:124`
+`list`/`doctor`/`ui` must stay read-only, but `new` is itself an act of creation —
+refusing a path `adopt` just proposed is a dead end. The parent check stops it
+from silently creating a stale or mistyped path instead of reporting it.
+Rejected: routing through the read-only `worktreesDir()` accessor — the obvious
+cleanup, but it reintroduces the refusal this exists to avoid, or makes
+list/doctor/ui create directories as a side effect of reading state.
+
 ## D15 — The quality gates run only in `/gate` Phase 5, never in the reviewer
 `product` · 2026-08 · `skills/gate/SKILL.md`, `agents/code-reviewer.md`
 Phases 3-4 modify the tree, so anything validated earlier validated a state that

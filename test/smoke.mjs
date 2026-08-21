@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -301,6 +301,38 @@ test('planCreate refuses duplicates and unsafe names', () => {
   assert.match(worktrees.planCreate(wtCfg, 'a b').error, /invalid worktree name/);
 });
 
+test('planCreate creates worktreesDir itself when configured but missing', () => {
+  const freshDir = join(TMP, 'fresh-wts');
+  assert.equal(existsSync(freshDir), false, 'precondition: not created yet');
+  const plan = worktrees.planCreate({ worktreesDir: freshDir }, 'first');
+  assert.equal(plan.error, undefined);
+  assert.equal(existsSync(freshDir), true);
+  assert.equal(plan.createdDir, freshDir);
+  assert.equal(plan.lane, 1);
+  assert.equal(plan.path, join(freshDir, 'first'));
+
+  const again = worktrees.planCreate({ worktreesDir: freshDir }, 'second');
+  assert.equal(again.createdDir, null, 'does not report a re-creation once the dir exists');
+});
+
+test('planCreate refuses a name when worktreesDir was never configured', () => {
+  assert.match(worktrees.planCreate({}, 'x').error, /not configured/);
+});
+
+test('planCreate validates the name before touching the filesystem', () => {
+  const notYet = join(TMP, 'not-yet-wts');
+  assert.equal(existsSync(notYet), false);
+  assert.match(worktrees.planCreate({ worktreesDir: notYet }, 'a b').error, /invalid worktree name/);
+  assert.equal(existsSync(notYet), false, 'a rejected name must not create the directory as a side effect');
+});
+
+test('planCreate refuses to create worktreesDir when its parent is also missing', () => {
+  const orphan = join(TMP, 'no-such-parent', 'wts');
+  const plan = worktrees.planCreate({ worktreesDir: orphan }, 'first');
+  assert.match(plan.error, /does not exist, and neither does its parent/);
+  assert.equal(existsSync(orphan), false);
+});
+
 test('lane selectors cover every form and report the unknown ones', () => {
   const all = worktrees.enumerateLanes(wtCfg);
   const pick = (sel, cwd) => worktrees.parseSelector(sel, all, cwd).lanes.map((l) => l.lane);
@@ -423,6 +455,34 @@ test('the wrapper resolves correctly when invoked through a symlink', () => {
   const linked = join(TMP, 'lanes');
   execFileSync('ln', ['-s', join(ROOT, 'bin', 'lanes'), linked]);
   assert.ok(execFileSync(linked, { encoding: 'utf8' }).includes('lanes doctor'));
+});
+
+test('lanes doctor warns (not blocks) when worktreesDir is missing but its parent exists', () => {
+  const missingButHealable = join(TMP, 'doctor-healable');
+  mkdirSync(missingButHealable);
+  git(missingButHealable, 'init', '-q');
+  mkdirSync(join(missingButHealable, '.claude'));
+  writeFileSync(
+    join(missingButHealable, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'doctor-healable', worktreesDir: join(missingButHealable, 'not-yet') }),
+  );
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: missingButHealable, encoding: 'utf8' });
+  assert.match(output, /worktrees\s+.*not-yet.*does not exist yet.*will create it/);
+  assert.doesNotMatch(output, /does not exist, and neither does its parent/);
+});
+
+test('lanes doctor blocks when worktreesDir is missing and so is its parent', () => {
+  const orphanParent = join(TMP, 'doctor-orphan');
+  mkdirSync(orphanParent);
+  git(orphanParent, 'init', '-q');
+  mkdirSync(join(orphanParent, '.claude'));
+  writeFileSync(
+    join(orphanParent, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'doctor-orphan', worktreesDir: join(TMP, 'no-such-parent-dir', 'wts') }),
+  );
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: orphanParent, encoding: 'utf8' });
+  assert.match(output, /worktrees\s+.*does not exist, and neither does its parent/);
+  assert.doesNotMatch(output, /will create it/);
 });
 
 test('lanes adopt writes a config a fresh repo can be verified against', () => {

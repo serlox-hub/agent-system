@@ -61,6 +61,13 @@ Writes `.claude/agent-system.json`, auto-detecting the package manager and the
 worktrees directory if there is one. Won't overwrite an existing config without
 `--force`.
 
+If no worktrees convention is detected and you're running this from a real
+terminal, it offers to create a sibling `<project>-lanes` directory and use
+that — answer `n` to keep lanes disabled. This prompt only fires when there's
+a TTY to ask on: a non-interactive run (scripts, CI, an agent driving `lanes
+adopt` through a tool without a terminal) always skips it and leaves
+`worktreesDir` unset, same as before — set it by hand in that case.
+
 **Now open the generated file and fill it in.** It ships with `"$schema"` already
 pointing at this install, so every field shows its own documentation on hover in
 your editor — that's the full field reference, no separate doc page to keep in
