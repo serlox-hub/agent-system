@@ -285,6 +285,79 @@ test('render shows a declared lane with no events at all as offline', () => {
   assert.ok(frame.includes('offline'));
 });
 
+test('MARKS renders ? when the base ref cannot be resolved — never free, never a bare —', () => {
+  // The fixture repo has no `origin` remote, so `enumerateLanes` can never
+  // resolve `origin/main...HEAD` — every lane's baseKnown is false.
+  const frame = render(resolveContext(lane2), createState());
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.includes('demo-3'));
+  assert.ok(row, 'demo-3 must have a row');
+  // Column order: # (3) WORKTREE (20) BRANCH (40) MARKS (12) ...
+  const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
+  assert.equal(marks, '?', 'unknown divergence must render as ?, distinct from both free and —');
+});
+
+test('MARKS renders dirty, ahead and behind together through the laneInfo seam, without shifting ISSUE', () => {
+  // Fabricated laneInfo, bypassing the real `enumerateLanes` git read — this
+  // is the only way to exercise the coloured, non-"?" formatting path, since
+  // the fixture repo (no `origin`) always makes the real read baseKnown: false.
+  const fabricated = [{
+    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'feat/9-x',
+    isBase: false, dirty: true, dirtyCount: 3, ahead: 2, behind: 1, baseKnown: true,
+  }];
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  assert.ok(row, 'demo-1 must have a row');
+  const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
+  assert.equal(marks, '~3 +2 -1', 'dirty, ahead and behind must all render together when the base is known');
+  // The ANSI codes wrapped around each token must not shift where ISSUE
+  // starts — the regression the pad-then-colour ordering in marksCell guards
+  // against — and the issue must follow the fabricated branch, not be blank.
+  const issue = row.slice(3 + 20 + 40 + 12, 3 + 20 + 40 + 12 + 8).trim();
+  assert.equal(issue, '#9', 'ISSUE must read correctly right after a coloured MARKS cell');
+});
+
+test('MARKS renders free for a clean lane on base once the base ref actually resolves', () => {
+  const fabricated = [{
+    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'main',
+    isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
+  assert.equal(marks, 'free', 'clean and on base, with a resolvable base ref, must render free — never ?');
+});
+
+test('rowsFor clears a stale issue once the branch is read and encodes none, rather than keeping an event-log leftover', () => {
+  const state = applyEvents(createState(), [ev(1, 'session_start', { issue: '402' })]);
+  // The branch read succeeded and the lane is back on `main` — no issue
+  // number in it, which must win over the stale '402' from the event log.
+  const backOnBase = [{
+    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'main',
+    isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const frame = render(resolveContext(lane2), state, Date.now(), backOnBase);
+  const row = frame.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  assert.ok(row, 'demo-1 must have a row');
+  assert.ok(!row.includes('#402'), 'a resolved branch with no issue in it must clear the stale one, not keep displaying it');
+});
+
+test('rowsFor keeps the last known issue when the branch read itself fails', () => {
+  const state = applyEvents(createState(), [ev(1, 'session_start', { issue: '402' })]);
+  // `branch: null` is how a failed git read is represented — must not be
+  // treated the same as a successful read that found no issue in the branch.
+  const failedRead = [{
+    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: null,
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: false,
+  }];
+  const frame = render(resolveContext(lane2), state, Date.now(), failedRead);
+  const row = frame.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  assert.ok(row, 'demo-1 must have a row');
+  assert.ok(row.includes('#402'), 'a failed branch read must not blank a previously known issue');
+});
+
 test('notifyTitle falls back to worktree, never to an unidentified "lane ?"', () => {
   assert.equal(notifyTitle(ev(1, 'idle', { lane: null, issue: '12' })), 'demo · demo-1 · #12');
   assert.equal(notifyTitle(ev(1, 'idle')), 'demo · lane 1');
@@ -360,6 +433,47 @@ test('a lane is free only when nothing would be lost', () => {
   assert.equal(worktrees.isFree(two), false, 'dirty tree is never free');
   assert.equal(worktrees.isFree({ dirty: false, isBase: false, ahead: 2 }), false, 'unpushed commits are not free');
   assert.equal(worktrees.isFree({ dirty: false, isBase: true, ahead: 5 }), true, 'the base branch itself is free');
+});
+
+test('laneMarks: dirty is measured independently of baseKnown — a dirty lane with an unresolvable base still gets ~N, not just ?', () => {
+  const marks = worktrees.laneMarks({ dirty: true, dirtyCount: 4, baseKnown: false, ahead: 9, behind: 9, isBase: false });
+  assert.deepEqual(marks, [
+    { text: '~4', tone: 'dirty' },
+    { text: '?', tone: 'unknown' },
+  ], 'ahead/behind are dropped in favour of one ? token once the base is unresolvable, but the dirty token survives');
+});
+
+test('laneMarks: ahead and behind render as their own tokens once the base is known', () => {
+  const marks = worktrees.laneMarks({ dirty: false, dirtyCount: 0, baseKnown: true, ahead: 2, behind: 1, isBase: false });
+  assert.deepEqual(marks, [
+    { text: '+2', tone: 'ahead' },
+    { text: '-1', tone: 'behind' },
+  ]);
+});
+
+test('laneMarks: a clean lane level with a known base renders a single free token', () => {
+  assert.deepEqual(
+    worktrees.laneMarks({ dirty: false, dirtyCount: 0, baseKnown: true, ahead: 0, behind: 0, isBase: false }),
+    [{ text: 'free', tone: 'free' }],
+  );
+});
+
+test('laneMarks: a lane with no git data at all stays empty — it must not claim free or ? for a measurement never attempted', () => {
+  // No `baseKnown` field at all (as opposed to `baseKnown: false`, which means
+  // "attempted and failed") must not be treated as an unresolvable base.
+  assert.deepEqual(worktrees.laneMarks({}), []);
+});
+
+test('lanes list shows a dirty lane as ~N and documents the new ? token in its legend', () => {
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: repo, encoding: 'utf8' });
+  const row = output.split('\n').find((l) => l.includes('demo-2'));
+  assert.ok(row, 'demo-2 must have a row');
+  assert.match(row, /~\d+/, 'demo-2 has real uncommitted changes from earlier tests, so ~N must still show in `lanes list`');
+  assert.match(
+    output,
+    /\? = origin\/main could not be resolved/,
+    'the legend must document the ? token, alongside the pre-existing ~n/+n/-n/svc! ones',
+  );
 });
 
 test('planCreate detects the lanes a new name would renumber', () => {

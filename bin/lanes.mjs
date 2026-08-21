@@ -451,15 +451,12 @@ switch (cmd) {
                 : `${DIM}${s.name}:${port}${RESET}`;
             }).join('  ')
           : `${DIM}none declared${RESET}`;
-        const marks = [
-          l.dirty ? `\x1b[33m~${l.dirtyCount}\x1b[0m` : '',
-          l.ahead ? `\x1b[32m+${l.ahead}\x1b[0m` : '',
-          l.behind ? `\x1b[31m-${l.behind}\x1b[0m` : '',
-        ].filter(Boolean).join(' ') || (worktrees.isFree(l) ? `${DIM}free${RESET}` : '');
+        const TONE = { dirty: '\x1b[33m', ahead: '\x1b[32m', behind: '\x1b[31m', unknown: '\x1b[33m', free: DIM };
+        const marks = worktrees.laneMarks(l).map((t) => `${TONE[t.tone]}${t.text}${RESET}`).join(' ');
         out(`${w(l.lane, 3)}${w(l.name, 16)}${w(l.branch, 28)}${marks.padEnd(14 + 9)}${rendered}`);
       }
       out();
-      out(`${DIM}~n uncommitted · +n ahead of origin/${worktrees.baseBranch(ctx.config)} · -n behind · svc! = running on a port from before a renumber${RESET}`);
+      out(`${DIM}~n uncommitted · +n ahead of origin/${worktrees.baseBranch(ctx.config)} · -n behind · ? = origin/${worktrees.baseBranch(ctx.config)} could not be resolved · svc! = running on a port from before a renumber${RESET}`);
       break;
     }
 
