@@ -255,6 +255,14 @@ test('notifyTitle falls back to worktree, never to an unidentified "lane ?"', ()
   assert.equal(notifyTitle(ev(1, 'idle')), 'demo · lane 1');
 });
 
+test('RECENT rows fall back to worktree too — a lane-less event must still say which one', () => {
+  const frame = render(
+    resolveContext(lane2),
+    applyEvents(createState(), [ev(1, 'idle', { lane: null, worktree: 'demo-7' })]),
+  );
+  assert.ok(frame.includes('demo-7'), 'the worktree name must appear somewhere, not just a bare "·"');
+});
+
 // ── Lane lifecycle ──────────────────────────────────────────────────
 const wtCfg = { project: 'demo', worktreesDir: wtDir, basePort: 300, branch: { base: 'main' } };
 

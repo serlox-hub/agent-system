@@ -260,8 +260,13 @@ export function render(ctx, state, now = Date.now()) {
   if (state.history.length === 0) out.push(`${C.dim}  (nothing yet)${C.reset}`);
   for (const e of state.history.slice().reverse()) {
     const s = stateOf(e.ev);
+    // Fall back to worktree name when there is no lane number — same fallback
+    // as the main table's WORKTREE column and notifyTitle, so a row is never
+    // reduced to the bare `·` placeholder with nothing to identify it by.
+    const who = e.lane ?? e.worktree ?? '·';
+    const whoColor = e.lane != null ? colorFor(e.lane) : C.dim;
     out.push(
-      `${C.dim}${fmtClock(e.ts)}${C.reset}  ${pad(e.lane ?? '·', 3)}${s.color}${s.icon} ${pad(s.label(e), 30)}${C.reset}${C.dim}${e.detail || ''}${C.reset}`,
+      `${C.dim}${fmtClock(e.ts)}${C.reset}  ${whoColor}${pad(who, 13)}${C.reset}${s.color}${s.icon} ${pad(s.label(e), 30)}${C.reset}${C.dim}${e.detail || ''}${C.reset}`,
     );
   }
   return out.join('\n');
