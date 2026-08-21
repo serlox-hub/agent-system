@@ -1,6 +1,7 @@
 {
   "$schema": "/Users/sergio/MyProjects/agent-system/config/agent-system.schema.json",
   "project": "agent-system",
+  "worktreesDir": "/Users/sergio/MyProjects/agent-system-lanes",
   "commands": {
     "install": "npm install",
     "lint": null,
