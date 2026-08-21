@@ -1,4 +1,5 @@
 {
+  "$schema": "./agent-system.schema.json",
   "project": "my-app",
 
   "worktreesDir": "~/Projects/my-app-worktrees",

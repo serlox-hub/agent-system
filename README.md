@@ -51,9 +51,10 @@ $EDITOR .claude/agent-system.json
 lanes doctor                                  # verify
 ```
 
-**Full walkthrough, including how to configure a repo: [`docs/SETUP.md`](docs/SETUP.md).**
-Read the `review.domainAxes` section — it is the field that decides whether the
-reviewer is worth running at all.
+**Full walkthrough: [`docs/SETUP.md`](docs/SETUP.md).** The generated config
+ships with `$schema` wired in, so every field — starting with `review.domainAxes`,
+the one that decides whether the reviewer is worth running at all — documents
+itself on hover in your editor.
 
 A repo participates only if it has `.claude/agent-system.json` at its root. No
 file means no events, no commit guard, no warnings — the right default for every

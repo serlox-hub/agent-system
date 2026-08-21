@@ -14,11 +14,11 @@
     },
     "worktreesDir": {
       "type": "string",
-      "description": "Directory holding the fixed worktrees. Lane numbers are the 1-based alphabetical position of each subdirectory — stable across worktree add/remove. Supports ~ expansion."
+      "description": "Directory holding the fixed worktrees. Lane numbers are the 1-based alphabetical position of each subdirectory — stable across worktree add/remove, because git's own worktree ordering shifts when you remove and re-add one. Supports ~ expansion. Omit this (and basePort) if the repo does not use worktrees: lanes are disabled, `lanes ui` falls back to whatever sessions appear in the log, and everything else still works."
     },
     "basePort": {
       "type": "integer",
-      "description": "Dev-server port prefix, purely informational. Lane N is shown as serving on `${basePort}${N}` (basePort 300 -> lane 2 is 3002)."
+      "description": "Dev-server port prefix, purely informational — nothing starts a server for you. Lane N is shown as serving on `${basePort}${N}` (basePort 300 -> lane 2 is 3002)."
     },
     "commands": {
       "type": "object",
@@ -102,7 +102,7 @@
       "properties": {
         "commitGuard": {
           "type": "boolean",
-          "description": "When false, `git commit` is never blocked for lack of review. Default true."
+          "description": "Default true: blocks `git commit` when the current diff has not been through /review. It does not just fail — it hands the agent a reason, the agent asks you whether to review first or commit anyway, and 'anyway' arms a one-shot bypass (`lanes allow-commit`). Set false to disable; /review still works when invoked directly."
         },
         "largeDiffThreshold": {
           "type": "integer",
@@ -117,7 +117,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Project-specific judgment axes for the reviewer. This is the field that makes the reviewer worth running: a generic 'best practices' reviewer finds nothing useful."
+          "description": "THE field that decides whether the reviewer is worth running. Judgment axes on top of architecture/duplication, which the reviewer already checks for free — leave this empty and you get a reviewer that finds only what your linter already found. Test for an axis: a linter could not check it; if a rule can be mechanised, put it in lint config instead, where it runs in milliseconds. How to find yours: read the last 10-20 real review comments your team left on PRs, discard everything about formatting/naming — what's left, the comments that needed someone who knows this product, is your list. Write 3-4 sharp axes in your team's own words; each vague one dilutes the rest. Bad: 'Follow best practices', 'Code should be readable'. Good: 'Money paths: anything touching price, tax or discount must keep the calculation in one place and record the inputs it used. A second copy of the formula is a defect even when it agrees today.'"
         }
       }
     },
@@ -125,7 +125,8 @@
       "type": "object",
       "properties": {
         "framework": {
-          "type": "string"
+          "type": "string",
+          "description": "Test framework name (e.g. \"vitest\", \"pytest\"), shown to the test-writer agent for context."
         },
         "expertiseDoc": {
           "type": [
@@ -135,7 +136,8 @@
           "description": "Repo-relative path to the project's testing conventions doc, read by the test agent before writing anything."
         },
         "locationRule": {
-          "type": "string"
+          "type": "string",
+          "description": "Where new test files belong, in your own words (e.g. \"Co-located as <name>.test.ts next to the unit under test.\")."
         }
       }
     },
@@ -147,13 +149,15 @@
           "enum": [
             "github",
             "none"
-          ]
+          ],
+          "description": "\"github\" needs `gh` authenticated (check with `gh auth status`) — /architect creates an issue and its linked branch. \"none\" skips that: /architect hands you the finished spec instead, and you file it wherever you actually track work."
         },
         "specSections": {
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "description": "Section headings /architect fills in, in order, when writing the spec."
         },
         "challengeSpec": {
           "type": "boolean",
@@ -163,7 +167,7 @@
     },
     "dev": {
       "type": "object",
-      "description": "Per-lane dev services. Every project declares its own: no two stacks start the same way, and one repo can have several services (e.g. a React client and a Python API) with different commands, directories and port series.",
+      "description": "Per-lane dev services. Every project declares its own: no two stacks start the same way, and one repo can have several services (e.g. a React client and a Python API) with different commands, directories and port series. Started detached as process-group leaders, so `lanes stop` kills the whole tree. Omit this entirely and `lanes dev` just tells you nothing is declared — everything else still works.",
       "properties": {
         "services": {
           "type": "array",
