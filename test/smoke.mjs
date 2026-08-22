@@ -660,6 +660,14 @@ const svcCfg = {
   ] },
 };
 
+// A single declared service with no `url` template — isolates the dashboard's
+// "no url" rendering branch, which svcCfg's own first service (`web`) never
+// exercises since it always has one.
+const svcCfgNoUrl = {
+  ...wtCfg,
+  dev: { services: [{ name: 'api', cwd: 'src', command: 'echo api {port} && sleep 30', portBase: 400 }] },
+};
+
 test('ports concatenate base and lane, so services with close bases cannot collide', () => {
   // Surprising on purpose, and pinned here: base 300 lane 2 is 3002, not 302.
   assert.equal(sv.portFor(300, 2), '3002');
@@ -690,6 +698,37 @@ test('a project with no dev.services declared resolves to none', () => {
   assert.deepEqual(sv.resolveServices(wtCfg, worktrees.enumerateLanes(wtCfg)[0]), []);
 });
 
+// boundPort is the shared helper `lanes list` (bin/lanes.mjs) and the
+// dashboard's serviceCell (ui/dashboard.mjs) both now consume, so its own
+// branches — not running, running-and-matching, running-and-diverged, and a
+// pidfile that never recorded a port — get direct coverage here rather than
+// only indirectly through the two callers.
+test('boundPort: stopped or running-with-a-matching-port returns the fresh port with no ! marker', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, demo-2 — web.port is '3002'
+  const [web] = sv.resolveServices(svcCfg, lane);
+  assert.deepEqual(sv.boundPort(web, { running: false, pid: null, port: null }), { port: '3002', moved: '' });
+  assert.deepEqual(
+    sv.boundPort(web, { running: true, pid: 123, port: '3002' }),
+    { port: '3002', moved: '' },
+    'bound port agrees with the fresh computation — nothing to flag',
+  );
+});
+
+test('boundPort: a diverged bound port wins and is marked !; a pidfile with no recorded port falls back to the fresh one, unmarked', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, demo-2 — web.port is '3002'
+  const [web] = sv.resolveServices(svcCfg, lane);
+  assert.deepEqual(
+    sv.boundPort(web, { running: true, pid: 123, port: '3009' }),
+    { port: '3009', moved: '!' },
+    'the actually-bound port is shown, not the freshly computed one, and flagged as moved',
+  );
+  assert.deepEqual(
+    sv.boundPort(web, { running: true, pid: 123, port: null }),
+    { port: '3002', moved: '' },
+    'a pre-existing pidfile that never recorded a port falls back to the fresh computation, not treated as moved',
+  );
+});
+
 test('start records pid and port, and stop kills the whole process group', () => {
   const lane = worktrees.enumerateLanes(svcCfg)[0];
   const [web] = sv.resolveServices(svcCfg, lane);
@@ -716,6 +755,147 @@ test('start records pid and port, and stop kills the whole process group', () =>
   assert.equal(sv.status(web).running, false, 'the pid file is cleared');
   assert.equal(grandchildren().length, 0, 'no orphaned grandchild survived stop');
   assert.equal(sv.stop(web).notRunning, true);
+});
+
+// ── Dashboard: service cell (second line) ────────────────────────────
+const stripAnsi = (s) => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+
+/** The service line directly under a lane's own row, with the stable 3-space prefix stripped. */
+function serviceLineFor(frame, laneName) {
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.includes(laneName));
+  assert.ok(idx !== -1, `${laneName} must have a row`);
+  return lines[idx + 1].slice(3).trimEnd();
+}
+
+test('dashboard: no dev.services declared shows — on the second line', () => {
+  const lane = worktrees.enumerateLanes(wtCfg)[0];
+  const ctx = { ...resolveContext(lane2), config: wtCfg };
+  const frame = render(ctx, createState(), Date.now(), [lane]);
+  assert.equal(serviceLineFor(frame, lane.name), '—');
+});
+
+test('dashboard: services declared but none running shows —, still with the count of the rest', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[0]; // demo-1
+  // Precondition, not an assumption: an earlier test (`start records pid and
+  // port…`) starts and stops `web` on this exact lane, with no try/finally —
+  // if its own assertions ever throw between start and stop, this test would
+  // otherwise fail on a leftover running process and blame the wrong code.
+  assert.equal(sv.status(sv.resolveServices(svcCfg, lane)[0]).running, false, 'precondition: no service left running on demo-1 by an earlier test');
+  const ctx = { ...resolveContext(lane2), config: svcCfg };
+  const frame = render(ctx, createState(), Date.now(), [lane]);
+  // The count suffix applies to "whichever of the above is shown" — including
+  // the placeholder, per the spec's rendering table — not only a live value.
+  assert.equal(serviceLineFor(frame, lane.name), '— (+1 more)');
+});
+
+test('dashboard: first declared service running with a url template shows the resolved URL, plus a count of the rest', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // demo-2, lane 2
+  const [web] = sv.resolveServices(svcCfg, lane);
+  const started = sv.start(web);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const ctx = { ...resolveContext(lane2), config: svcCfg };
+    const frame = render(ctx, createState(), Date.now(), [lane]);
+    assert.equal(serviceLineFor(frame, lane.name), 'http://localhost:3002 (+1 more)');
+  } finally {
+    sv.stop(web);
+  }
+});
+
+test('dashboard: a url-template service also gets marked ! after a renumber — the regression the boundPort extraction fixed', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[0]; // demo-1, lane 1
+  const [web] = sv.resolveServices(svcCfg, lane); // bound at http://localhost:3001
+  const started = sv.start(web);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const ctx = { ...resolveContext(lane2), config: svcCfg };
+    // Same worktree, renumbered lane: bookkeeping is keyed by name, so the pid
+    // file (and the real bound port, 3001) survives, but the freshly computed
+    // port — and therefore the filled url template — moves to 3005. Before the
+    // boundPort extraction this branch never appended '!', so a URL nobody was
+    // listening on rendered with zero indication it was stale.
+    const renumbered = { ...lane, lane: 5 };
+    const frame = render(ctx, createState(), Date.now(), [renumbered]);
+    assert.equal(serviceLineFor(frame, lane.name), 'http://localhost:3005! (+1 more)');
+  } finally {
+    sv.stop(web);
+  }
+});
+
+test('dashboard: first declared service running with no url template shows localhost:<bound-port>, with ! after a renumber', () => {
+  const lane = worktrees.enumerateLanes(svcCfgNoUrl)[2]; // demo-3, lane 3
+  const [api] = sv.resolveServices(svcCfgNoUrl, lane);
+  const started = sv.start(api);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const ctx = { ...resolveContext(lane2), config: svcCfgNoUrl };
+    const frame = render(ctx, createState(), Date.now(), [lane]);
+    assert.equal(serviceLineFor(frame, lane.name), 'localhost:4003');
+
+    // Same worktree, renumbered lane: bookkeeping is keyed by name (D18-style),
+    // so the pid file survives, but the freshly computed port moves — the cell
+    // must show the port the process actually bound to, marked with !.
+    const renumbered = { ...lane, lane: 5 };
+    const frameMoved = render(ctx, createState(), Date.now(), [renumbered]);
+    assert.equal(serviceLineFor(frameMoved, lane.name), 'localhost:4003!');
+  } finally {
+    sv.stop(api);
+  }
+});
+
+test('dashboard: a row with no .name (foreign project or vanished lane) is never passed into resolveServices', () => {
+  const state = createState();
+  state.lanes.set('demo#demo-ghost-2', { project: 'demo', worktree: 'demo-ghost-2', ev: 'idle', since: 1 });
+  const ctx = { ...resolveContext(lane2), config: svcCfg };
+  const frame = render(ctx, state, Date.now(), []);
+  assert.equal(
+    serviceLineFor(frame, 'demo-ghost-2'),
+    '—',
+    'no .name must never reach resolveServices, regardless of what the project declares',
+  );
+});
+
+test('lanes list SERVICES column: boundPort wiring is unchanged after the extraction — same port, same ! marker, same colours', () => {
+  // A dedicated fixture, not svcCfg/wtDir: this needs dev.services in the
+  // *committed* config the real `lanes list` CLI reads from `cwd`, which the
+  // shared repo/wtDir fixture deliberately does not declare.
+  const main = join(TMP, 'list-services');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  git(main, 'config', 'user.email', 'test@test.test');
+  git(main, 'config', 'user.name', 'test');
+  mkdirSync(join(main, '.claude'));
+  const svcWtDir = join(TMP, 'list-services-wts');
+  const cfg = {
+    project: 'list-services',
+    worktreesDir: svcWtDir,
+    basePort: 300,
+    dev: { services: [{ name: 'web', command: 'echo web {port} && sleep 30', portBase: 300 }] },
+  };
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  writeFileSync(join(main, 'f.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'init');
+  git(main, 'worktree', 'add', '-q', join(svcWtDir, 'one'), '-b', 'feat/1-one');
+
+  const lane = worktrees.enumerateLanes(cfg)[0]; // 'one', lane 1
+  const [web] = sv.resolveServices(cfg, lane);
+  const started = sv.start(web);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const before = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: main, encoding: 'utf8' });
+    assert.match(before, /\x1b\[32mweb:3001\x1b\[0m/, 'running, matching port: green, no ! marker');
+
+    // An earlier-sorting worktree shifts 'one' from lane 1 to lane 2. Bookkeeping
+    // is keyed by worktree name, so the same pid file — and its recorded port,
+    // 3001 — still applies, but a fresh computation now disagrees (3002).
+    git(main, 'worktree', 'add', '-q', join(svcWtDir, 'aaa'), '-b', 'feat/2-aaa');
+    const after = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: main, encoding: 'utf8' });
+    assert.match(after, /\x1b\[32mweb:3001!\x1b\[0m/, 'the bound port is shown, marked !, once a renumber makes it stale');
+  } finally {
+    sv.stop(web);
+  }
 });
 
 // ── Lane colours ────────────────────────────────────────────────────

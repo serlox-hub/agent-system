@@ -591,10 +591,7 @@ switch (cmd) {
         const rendered = svcs.length
           ? svcs.map((s) => {
               const st = sv.status(s);
-              // Show the port it actually bound to when running: a lane can be
-              // renumbered while a service is up, moving its computed port.
-              const port = st.running ? st.port ?? s.port : s.port;
-              const moved = st.running && st.port && st.port !== s.port ? '!' : '';
+              const { port, moved } = sv.boundPort(s, st);
               return st.running
                 ? `\x1b[32m${s.name}:${port}${moved}\x1b[0m`
                 : `${DIM}${s.name}:${port}${RESET}`;
