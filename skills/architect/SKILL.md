@@ -159,9 +159,10 @@ lanes free      # tab-separated: lane, name, path, branch. Exit 1 when none.
   has uncommitted changes or unpushed commits, so there is nowhere to put this
   work. The user decides what to land, park or discard. Do not stash, do not
   force, do not pick a dirty lane.
-- **If the project declares no `worktreesDir`** (`lanes free` errors about it),
-  there are no lanes: fall back to the current worktree and require a clean tree
-  there, exactly as before.
+- **If no `worktreesDir` resolves for this repo** — committed default or this
+  machine's local override alike (`lanes free` errors about it) — there are no
+  lanes: fall back to the current worktree and require a clean tree there,
+  exactly as before.
 
 When the current worktree is dirty but you are placing the branch elsewhere, do
 **not** touch the current one. And when local changes are the *subject* of the
