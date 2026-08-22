@@ -10,6 +10,9 @@ no config file means no events, no commit guard, nothing). Everything reversible
 | Install on this machine | `./install.sh` |
 | Put `lanes` on your PATH | `echo 'export PATH="$PWD/bin:$PATH"' >> ~/.zshrc && exec zsh` |
 | Opt a repo in | `lanes adopt` (from inside the repo) |
+| Set this machine's lanes directory | `lanes worktrees-dir <path>` |
+| Set this machine's port prefix | `lanes base-port <n>` |
+| Set this machine's port for one service | `lanes service-port <name> <n>` |
 | Check everything is wired correctly | `lanes doctor` |
 | Watch the live lane dashboard | `lanes ui` |
 | Uninstall | `./install.sh --uninstall` |
@@ -57,16 +60,27 @@ lanes adopt
 ```
 
 Writes `.claude/agent-system.json`, auto-detecting the package manager and the
-`lint`/`typecheck`/`test`/`build` commands from `package.json`, plus the
-worktrees directory if there is one. Won't overwrite an existing config without
-`--force`.
+`lint`/`typecheck`/`test`/`build` commands from `package.json`. Won't overwrite
+an existing config without `--force`.
+
+If a worktrees convention is detected, or you accept the prompt below, `adopt`
+sets `worktreesDir` and `basePort` too — but never in the committed file.
+They're per-machine by nature (two developers may want their lanes on
+different disks, naming conventions, or port ranges), so they always go into
+the gitignored `.claude/agent-system.local.json` at the repo root, via `lanes
+worktrees-dir`/`base-port` under the hood. `adopt` also adds that filename to
+`.gitignore` if the repo has one, and warns if it couldn't (no `.gitignore` at
+all, for instance). A team can still hand-write `worktreesDir` or `basePort`
+into the committed config to mandate a shared convention — the local file just
+wins whenever it's present.
 
 If no worktrees convention is detected and you're running this from a real
 terminal, it offers to create a sibling `<project>-lanes` directory and use
 that — answer `n` to keep lanes disabled. This prompt only fires when there's
 a TTY to ask on: a non-interactive run (scripts, CI, an agent driving `lanes
 adopt` through a tool without a terminal) always skips it and leaves
-`worktreesDir` unset, same as before — set it by hand in that case.
+`worktreesDir` unset, same as before — set it later with `lanes worktrees-dir
+<path>` in that case.
 
 **Now open the generated file and fill it in.** It ships with `"$schema"` already
 pointing at this install, so every field shows its own documentation on hover in
@@ -138,6 +152,9 @@ lanes dev 2      # start lane 2's services      (selector: 1 · 1,3 · 2-4 · . 
 lanes stop       # stop everything
 lanes logs 2 web -f
 lanes color 2 832561                # per-machine lane colour, not committed
+lanes worktrees-dir ~/proj-lanes    # per-machine worktreesDir override, not committed
+lanes base-port 400                 # per-machine basePort override, not committed
+lanes service-port api 450          # per-machine, per-service portBase override
 ```
 
 Lanes are long-lived infrastructure — create once, cycle branches through them.
@@ -184,3 +201,10 @@ entry in your shell profile, every `.claude/agent-system.json` in your repos.
   (`N=hex`, one per machine), deliberately *not* in the committed config: lane
   numbers come from your own worktree names, so lane 3 is a different branch on
   a different machine.
+- **`worktreesDir`, `basePort` and per-service `portBase` overrides** — `lanes
+  worktrees-dir`, `lanes base-port` and `lanes service-port` — live in the same
+  gitignored `.claude/agent-system.local.json` at the repo's main worktree
+  root, shared by every lane of that repo. Each wins over its committed
+  counterpart, same reasoning as lane colours: two developers may want their
+  lanes, their port range, or one service's port, somewhere different from
+  each other.

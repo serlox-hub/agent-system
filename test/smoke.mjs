@@ -35,6 +35,9 @@ mkdirSync(join(TMP, '.claude'));
 
 const { resolveContext, issueFromBranch, resolveLane, findProject, LANES_DIR } =
   await import(`${ROOT}/lib/context.mjs`);
+const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } = await import(
+  `${ROOT}/lib/local-config.mjs`
+);
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK } = await import(`${ROOT}/lib/marks.mjs`);
 const { createState, applyEvents, render, notifyTitle } = await import(`${ROOT}/ui/dashboard.mjs`);
 const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE } = await import(`${ROOT}/lib/colors.mjs`);
@@ -122,6 +125,115 @@ test('resolveContext ties worktree, lane, port, branch and issue together', () =
   // the point: adopting the system is a commit, not per-machine setup.
   assert.equal(ctx.configPath, join(lane2, '.claude', 'agent-system.json'));
   assert.equal(ctx.configError, null);
+});
+
+// ── Per-machine worktreesDir override (D22) ──────────────────────────
+test('readLocalOverride returns {} when the file is missing or malformed', () => {
+  const fresh = join(TMP, 'lc-empty');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  assert.deepEqual(readLocalOverride(fresh), {});
+
+  mkdirSync(join(fresh, '.claude'));
+  writeFileSync(join(fresh, '.claude', 'agent-system.local.json'), '{ not json');
+  assert.deepEqual(readLocalOverride(fresh), {});
+});
+
+test('writeLocalOverride shallow-merges, and every lane of the same repo shares the file', () => {
+  const main = join(TMP, 'lc-main');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  git(main, 'config', 'user.email', 'test@test.test');
+  git(main, 'config', 'user.name', 'test');
+  writeFileSync(join(main, 'f.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'init');
+  const linked = join(TMP, 'lc-main-linked');
+  git(main, 'worktree', 'add', '-q', linked, '-b', 'lc-linked');
+
+  assert.equal(mainWorktreeRoot(linked), main, 'resolves the MAIN worktree root, not the linked one');
+
+  const written = writeLocalOverride(linked, { worktreesDir: '/somewhere' });
+  assert.deepEqual(written, { worktreesDir: '/somewhere' });
+  assert.equal(existsSync(join(main, '.claude', 'agent-system.local.json')), true);
+  assert.equal(
+    existsSync(join(linked, '.claude', 'agent-system.local.json')),
+    false,
+    'lives at the shared root, not per-worktree',
+  );
+  assert.deepEqual(readLocalOverride(main), { worktreesDir: '/somewhere' }, 'the other lane sees it too');
+
+  writeLocalOverride(main, { extra: 'kept' });
+  assert.deepEqual(
+    readLocalOverride(linked),
+    { worktreesDir: '/somewhere', extra: 'kept' },
+    'shallow merge, not overwrite',
+  );
+});
+
+test('mainWorktreeRoot resolves correctly from a subdirectory, not just the worktree root', () => {
+  // `--git-common-dir` prints relative to CWD, not to `--show-toplevel` — a
+  // regression here silently climbs out of the repo from any subdirectory.
+  const main = join(TMP, 'lc-subdir-main');
+  mkdirSync(join(main, 'src', 'deep'), { recursive: true });
+  git(main, 'init', '-q');
+  assert.equal(mainWorktreeRoot(main), main, 'from the root itself');
+  assert.equal(mainWorktreeRoot(join(main, 'src')), main, 'one level down');
+  assert.equal(mainWorktreeRoot(join(main, 'src', 'deep')), main, 'two levels down');
+});
+
+test('findProject: no local override present, the committed worktreesDir behaves exactly as today', () => {
+  const solo = join(TMP, 'merge-none');
+  mkdirSync(solo);
+  git(solo, 'init', '-q');
+  mkdirSync(join(solo, '.claude'));
+  writeFileSync(
+    join(solo, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'merge-none', worktreesDir: '/committed/path' }),
+  );
+  assert.equal(findProject(solo).config.worktreesDir, '/committed/path');
+});
+
+test('findProject: a local override wins over the committed worktreesDir, from every lane', () => {
+  const main = join(TMP, 'merge-main');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  git(main, 'config', 'user.email', 'test@test.test');
+  git(main, 'config', 'user.name', 'test');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'merge-main', worktreesDir: '/committed/path' }),
+  );
+  writeFileSync(join(main, 'f.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'init');
+  const linked = join(TMP, 'merge-main-linked');
+  git(main, 'worktree', 'add', '-q', linked, '-b', 'merge-linked');
+
+  writeLocalOverride(main, { worktreesDir: '/override/path' });
+
+  assert.equal(findProject(main).config.worktreesDir, '/override/path');
+  assert.equal(
+    findProject(linked).config.worktreesDir,
+    '/override/path',
+    'the linked worktree sees the same override',
+  );
+});
+
+test('findProject: a local basePort override wins over the committed default too', () => {
+  const main = join(TMP, 'merge-baseport');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'merge-baseport', basePort: 300 }),
+  );
+  assert.equal(findProject(main).config.basePort, 300, 'no override present, committed default behaves as before');
+
+  writeLocalOverride(main, { basePort: 400 });
+  assert.equal(findProject(main).config.basePort, 400);
 });
 
 // ── Review markers ──────────────────────────────────────────────────
@@ -741,6 +853,350 @@ test('emitWithContext fills path from ctx.worktreeRoot too, not just the two dir
   assert.ok(staged, 'lanes stage must emit a stage event');
   assert.equal(staged.path, lane2, 'emitWithContext must carry the real worktree root, same as the direct emit() calls');
   assert.ok(existsSync(staged.path), 'the recorded path must be a real, currently-existing directory');
+});
+
+test('lanes adopt writes an auto-detected worktreesDir to the local override, never the committed config', () => {
+  const parent = join(TMP, 'adopt-siblings');
+  mkdirSync(parent);
+  const src = join(parent, 'adopt-src');
+  mkdirSync(src);
+  git(src, 'init', '-q');
+  git(src, 'config', 'user.email', 'test@test.test');
+  git(src, 'config', 'user.name', 'test');
+  writeFileSync(join(src, 'f.txt'), 'x');
+  git(src, 'add', '-A');
+  git(src, 'commit', '-qm', 'init');
+  writeFileSync(join(src, '.gitignore'), 'node_modules/\n');
+  git(src, 'worktree', 'add', '-q', join(parent, 'adopt-src-2'), '-b', 'adopt-sibling');
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: src, encoding: 'utf8' });
+
+  const cfg = JSON.parse(readFileSync(join(src, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.worktreesDir, undefined, 'never written into the committed config');
+  assert.equal(cfg.basePort, undefined, 'basePort is per-machine too — same as worktreesDir (D22)');
+  assert.deepEqual(
+    readLocalOverride(src),
+    { worktreesDir: parent, basePort: 300 },
+    'both go to the local override instead',
+  );
+
+  const gitignore = readFileSync(join(src, '.gitignore'), 'utf8');
+  assert.ok(gitignore.includes('.claude/agent-system.local.json'), 'adopt appends the ignore entry');
+});
+
+test('lanes adopt appends the .gitignore entry once, and does nothing when there is no .gitignore', () => {
+  const noIgnore = join(TMP, 'adopt-no-gitignore');
+  mkdirSync(noIgnore);
+  git(noIgnore, 'init', '-q');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: noIgnore, encoding: 'utf8' });
+  assert.equal(existsSync(join(noIgnore, '.gitignore')), false, 'adopt never creates one from scratch');
+
+  const withIgnore = join(TMP, 'adopt-dup-gitignore');
+  mkdirSync(withIgnore);
+  git(withIgnore, 'init', '-q');
+  writeFileSync(join(withIgnore, '.gitignore'), '.claude/agent-system.local.json\n');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: withIgnore, encoding: 'utf8' });
+  const occurrences = readFileSync(join(withIgnore, '.gitignore'), 'utf8')
+    .split('\n')
+    .filter((l) => l.trim() === '.claude/agent-system.local.json');
+  assert.equal(occurrences.length, 1, 'does not duplicate an entry that is already there');
+});
+
+test('lanes adopt warns instead of falsely claiming "not committed" when there is no .gitignore to append to', () => {
+  const parent = join(TMP, 'adopt-siblings-no-ignore');
+  mkdirSync(parent);
+  const src = join(parent, 'adopt-src');
+  mkdirSync(src);
+  git(src, 'init', '-q');
+  git(src, 'config', 'user.email', 'test@test.test');
+  git(src, 'config', 'user.name', 'test');
+  writeFileSync(join(src, 'f.txt'), 'x');
+  git(src, 'add', '-A');
+  git(src, 'commit', '-qm', 'init');
+  // Deliberately no .gitignore, unlike the sibling-detection test above.
+  git(src, 'worktree', 'add', '-q', join(parent, 'adopt-src-2'), '-b', 'adopt-sibling-no-ignore');
+
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: src, encoding: 'utf8' });
+  assert.deepEqual(
+    readLocalOverride(src),
+    { worktreesDir: parent, basePort: 300 },
+    'the override is written regardless',
+  );
+  assert.match(output, /not gitignored here/, 'warns rather than staying silent about the risk');
+  assert.doesNotMatch(output, /not committed/, 'must not claim a guarantee it cannot back up');
+});
+
+test('lanes worktrees-dir sets a local override and reports its source, distinct from the committed default', () => {
+  const main = join(TMP, 'wtd-main');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  git(main, 'config', 'user.email', 'test@test.test');
+  git(main, 'config', 'user.name', 'test');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'wtd-main', worktreesDir: join(TMP, 'wtd-committed') }),
+  );
+  writeFileSync(join(main, 'f.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'init');
+
+  const before = execFileSync(join(ROOT, 'bin', 'lanes'), ['worktrees-dir'], { cwd: main, encoding: 'utf8' });
+  assert.ok(before.includes('wtd-committed') && before.includes('committed default'));
+
+  const target = join(TMP, 'wtd-override');
+  const setOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['worktrees-dir', target], { cwd: main, encoding: 'utf8' });
+  assert.equal(existsSync(target), true, 'creates it, same parent-must-exist boundary as planCreate (D21)');
+  assert.deepEqual(readLocalOverride(main), { worktreesDir: target });
+  // No .gitignore in this fixture — the centralised guard (rc-1) must warn here
+  // too, not just from `adopt`.
+  assert.match(setOut, /not gitignored here/);
+
+  const after = execFileSync(join(ROOT, 'bin', 'lanes'), ['worktrees-dir'], { cwd: main, encoding: 'utf8' });
+  assert.ok(after.includes(target) && after.includes('local override'), 'now reports the override, not the committed value');
+
+  const doctorOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: main, encoding: 'utf8' });
+  assert.match(doctorOut, /worktrees\s+.*local override/);
+
+  // Same D21 boundary planCreate enforces: refuse a mistyped path rather than
+  // silently materializing an arbitrary directory tree.
+  const orphan = join(TMP, 'no-such-parent-wtd', 'wts');
+  assert.throws(() => execFileSync(join(ROOT, 'bin', 'lanes'), ['worktrees-dir', orphan], { cwd: main, stdio: 'pipe' }));
+  assert.equal(existsSync(orphan), false);
+
+  // The override is set from the MAIN worktree; resolving it from a subdirectory
+  // of that same worktree must not climb outside the repo (the mainWorktreeRoot bug).
+  mkdirSync(join(main, 'sub'));
+  const fromSubdir = execFileSync(join(ROOT, 'bin', 'lanes'), ['worktrees-dir'], { cwd: join(main, 'sub'), encoding: 'utf8' });
+  assert.ok(fromSubdir.includes(target) && fromSubdir.includes('local override'));
+});
+
+test('lanes worktrees-dir reports "not configured" when neither a committed default nor a local override exists', () => {
+  const fresh = join(TMP, 'wtd-none');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['worktrees-dir'], { cwd: fresh, encoding: 'utf8' });
+  assert.match(output, /not configured/, 'a repo with no worktrees convention at all gets its own message');
+  assert.doesNotMatch(output, /committed default|local override/);
+});
+
+test('lanes base-port sets a local override and reports its source, distinct from the committed default', () => {
+  const main = join(TMP, 'bp-main');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'bp-main', basePort: 300 }),
+  );
+
+  const before = execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port'], { cwd: main, encoding: 'utf8' });
+  assert.ok(before.includes('300') && before.includes('committed default'));
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port', '400'], { cwd: main, encoding: 'utf8' });
+  assert.deepEqual(readLocalOverride(main), { basePort: 400 });
+
+  const after = execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port'], { cwd: main, encoding: 'utf8' });
+  assert.ok(after.includes('400') && after.includes('local override'), 'now reports the override, not the committed value');
+
+  const doctorOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: main, encoding: 'utf8' });
+  assert.match(doctorOut, /basePort\s+.*local override/);
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port', 'not-a-number'], { cwd: main, stdio: 'pipe' }),
+    /prefix, not a port/,
+  );
+  // A port typed by mistake (e.g. 8080) would concatenate with the lane number
+  // into something out of range — rejected before it ever reaches a service.
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port', '8080'], { cwd: main, stdio: 'pipe' }),
+    /prefix, not a port/,
+  );
+  assert.equal(readLocalOverride(main).basePort, 400, 'the rejected value must not have overwritten the good one');
+});
+
+test('lanes base-port reports "not configured" when neither a committed default nor a local override exists', () => {
+  const fresh = join(TMP, 'bp-none');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port'], { cwd: fresh, encoding: 'utf8' });
+  assert.match(output, /not configured/);
+  assert.doesNotMatch(output, /committed default|local override/);
+});
+
+test('findProject: a local servicePortBase override applies to the matching dev.services[] entry only', () => {
+  const main = join(TMP, 'merge-serviceport');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({
+      project: 'merge-serviceport',
+      dev: { services: [{ name: 'web', command: 'x', portBase: 300 }, { name: 'api', command: 'y', portBase: 400 }] },
+    }),
+  );
+  writeLocalOverride(main, { servicePortBase: { api: 450 } });
+
+  const services = findProject(main).config.dev.services;
+  assert.equal(services.find((s) => s.name === 'web').portBase, 300, 'untouched — no override for this name');
+  assert.equal(services.find((s) => s.name === 'api').portBase, 450, 'overridden by name');
+});
+
+test('lanes service-port lists declared services with their source, and sets a per-service override', () => {
+  const main = join(TMP, 'sp-main');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  git(main, 'config', 'user.email', 'test@test.test');
+  git(main, 'config', 'user.name', 'test');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({
+      project: 'sp-main',
+      dev: { services: [{ name: 'web', command: 'x', portBase: 300 }, { name: 'api', command: 'y', portBase: 400 }] },
+    }),
+  );
+  writeFileSync(join(main, 'f.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'init');
+
+  const before = execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port'], { cwd: main, encoding: 'utf8' });
+  assert.match(before, /web\s+300\s+.*committed default/);
+  assert.match(before, /api\s+400\s+.*committed default/);
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port', 'api', '450'], { cwd: main, encoding: 'utf8' });
+  assert.deepEqual(readLocalOverride(main), { servicePortBase: { api: 450 } });
+
+  const after = execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port'], { cwd: main, encoding: 'utf8' });
+  assert.match(after, /web\s+300\s+.*committed default/, 'web is untouched');
+  assert.match(after, /api\s+450\s+.*local override/, 'api now reports the override');
+
+  const doctorOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: main, encoding: 'utf8' });
+  assert.match(doctorOut, /service ports\s+2 declared, 1 local override/);
+
+  // A typo'd service name still writes (it's just a JSON key, and the service
+  // might be declared later) but warns instead of pretending it matched.
+  const typo = execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port', 'wbe', '350'], { cwd: main, encoding: 'utf8' });
+  assert.match(typo, /no dev\.services entry named "wbe"/);
+  assert.equal(readLocalOverride(main).servicePortBase.wbe, 350);
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port', 'api', '8080'], { cwd: main, stdio: 'pipe' }),
+    /prefix, not a port/,
+  );
+});
+
+test('lanes service-port reports nothing declared when the project has no dev.services', () => {
+  const fresh = join(TMP, 'sp-none');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port'], { cwd: fresh, encoding: 'utf8' });
+  assert.match(output, /no dev\.services declared/);
+});
+
+test('lanes service-port dies with a usage message when a name is given but no port', () => {
+  const main = join(TMP, 'sp-missing-n');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({
+      project: 'sp-missing-n',
+      dev: { services: [{ name: 'web', command: 'x', portBase: 300 }] },
+    }),
+  );
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port', 'web'], { cwd: main, stdio: 'pipe' }),
+    /Usage: lanes service-port <name> <n>/,
+    'a bare name alone must not be read as "list", only no args at all does that',
+  );
+  assert.equal(readLocalOverride(main).servicePortBase, undefined, 'nothing written on the usage error');
+});
+
+// isGitignored/ensureIgnored were centralised into local-config.mjs so every
+// writer (adopt, worktrees-dir, base-port, service-port) warns consistently —
+// the tests above only ever exercise the "not protected, so warn" branch; this
+// covers the exact-match rule itself, and the "already protected, stay silent"
+// branch across all three per-machine `lanes` setters.
+test('isGitignored matches the entry as a whole trimmed line, not a substring or a missing file', () => {
+  const fresh = join(TMP, 'ig-unit');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  assert.equal(isGitignored(fresh), false, 'no .gitignore at all');
+
+  writeFileSync(join(fresh, '.gitignore'), 'node_modules/\n');
+  assert.equal(isGitignored(fresh), false, '.gitignore exists but lacks the entry');
+
+  writeFileSync(join(fresh, '.gitignore'), '#.claude/agent-system.local.json\n');
+  assert.equal(isGitignored(fresh), false, 'commented out is not protection');
+
+  writeFileSync(join(fresh, '.gitignore'), 'node_modules/\n  .claude/agent-system.local.json  \n');
+  assert.equal(isGitignored(fresh), true, 'exact line present, surrounding whitespace trimmed');
+});
+
+test('warnIfNotIgnored stays silent once the entry is already protected — worktrees-dir, base-port and service-port alike', () => {
+  const main = join(TMP, 'already-ignored');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'already-ignored', dev: { services: [{ name: 'web', command: 'x' }] } }),
+  );
+  // Pre-existing, correct .gitignore — not one `lanes` wrote itself, so this
+  // proves the read side (isGitignored), not just ensureIgnored's own append.
+  writeFileSync(join(main, '.gitignore'), '.claude/agent-system.local.json\n');
+
+  const wtdOut = execFileSync(
+    join(ROOT, 'bin', 'lanes'),
+    ['worktrees-dir', join(TMP, 'already-ignored-wt')],
+    { cwd: main, encoding: 'utf8' },
+  );
+  assert.doesNotMatch(wtdOut, /not gitignored here/);
+
+  const bpOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port', '500'], { cwd: main, encoding: 'utf8' });
+  assert.doesNotMatch(bpOut, /not gitignored here/);
+
+  const spOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port', 'web', '550'], {
+    cwd: main,
+    encoding: 'utf8',
+  });
+  assert.doesNotMatch(spOut, /not gitignored here/);
+});
+
+test('base-port and service-port accept the cap itself (999) and reject one past it (1000)', () => {
+  const main = join(TMP, 'bp-boundary');
+  mkdirSync(main);
+  git(main, 'init', '-q');
+  mkdirSync(join(main, '.claude'));
+  writeFileSync(
+    join(main, '.claude', 'agent-system.json'),
+    JSON.stringify({
+      project: 'bp-boundary',
+      dev: { services: [{ name: 'web', command: 'x' }] },
+    }),
+  );
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port', '999'], { cwd: main, encoding: 'utf8' });
+  assert.equal(readLocalOverride(main).basePort, 999, 'the cap itself is a valid prefix, not off-by-one excluded');
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['base-port', '1000'], { cwd: main, stdio: 'pipe' }),
+    /prefix, not a port/,
+  );
+  assert.equal(readLocalOverride(main).basePort, 999, 'the rejected value must not overwrite the good one');
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port', 'web', '999'], { cwd: main, encoding: 'utf8' });
+  assert.equal(readLocalOverride(main).servicePortBase.web, 999);
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['service-port', 'web', '1000'], { cwd: main, stdio: 'pipe' }),
+    /prefix, not a port/,
+  );
 });
 
 test('the suite writes its events inside the sandbox, not the real home', () => {

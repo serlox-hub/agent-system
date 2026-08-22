@@ -11,7 +11,7 @@
  */
 
 import { fileURLToPath } from 'node:url';
-import { dirname, join, basename } from 'node:path';
+import { dirname, join, basename, resolve as resolvePath } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
@@ -28,6 +28,8 @@ const { git, gitLine } = await import(join(ROOT, 'lib', 'git.mjs'));
 const { readColors, setColor, ansi, DEFAULT_PALETTE, COLORS_FILE } = await import(
   join(ROOT, 'lib', 'colors.mjs')
 );
+const { mainWorktreeRoot, localConfigPath, readLocalOverride, writeLocalOverride, isGitignored, LOCAL_CONFIG_REL } =
+  await import(join(ROOT, 'lib', 'local-config.mjs'));
 
 const [, , cmd, ...rest] = process.argv;
 
@@ -51,6 +53,30 @@ function requireProject(ctx) {
         `Run \`lanes adopt\` here to scaffold ${CONFIG_REL}, then \`lanes doctor\`.`,
     );
   }
+}
+
+/** After writing a local override: warn if it is not actually gitignored here. */
+function warnIfNotIgnored() {
+  if (!isGitignored(process.cwd())) {
+    out(`${WARN} ${LOCAL_CONFIG_REL} is not gitignored here — add it, or it will be committed with this machine's values.`);
+  }
+}
+
+// A port PREFIX, concatenated with the lane number (portFor in lib/services.mjs)
+// — every example in this repo is 1-3 digits (300, 400). Capping here teaches
+// that semantics at the point of entry, rather than letting e.g. 8080 through
+// to become an out-of-range port (80802) that fails silently in a detached
+// process's log file.
+const MAX_PORT_BASE = 999;
+function parsePortBase(raw) {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > MAX_PORT_BASE) {
+    die(
+      `basePort is a prefix, not a port — lane N is served on the prefix and N ` +
+        `concatenated (300 → lane 2 is 3002). Use ${MAX_PORT_BASE} or below, got: ${raw}`,
+    );
+  }
+  return n;
 }
 
 /**
@@ -81,14 +107,9 @@ function detectProjectName(cwd) {
   const fromUrl = /([^/:]+?)(?:\.git)?$/.exec(url);
   if (fromUrl) return fromUrl[1];
 
-  // `--git-common-dir` is the MAIN worktree's .git, even from a linked worktree.
-  const common = gitLine(cwd, ['rev-parse', '--git-common-dir']);
-  if (common) {
-    const abs = common.startsWith('/')
-      ? common
-      : join(gitLine(cwd, ['rev-parse', '--show-toplevel']), common);
-    return basename(dirname(abs));
-  }
+  // The MAIN worktree's directory name, even from a linked worktree.
+  const root = mainWorktreeRoot(cwd);
+  if (root) return basename(root);
   return basename(gitLine(cwd, ['rev-parse', '--show-toplevel']));
 }
 
@@ -196,6 +217,109 @@ switch (cmd) {
     break;
   }
 
+  case 'worktrees-dir': {
+    const ctx = resolveContext(process.cwd());
+    requireProject(ctx);
+    const raw = rest.find((a) => !a.startsWith('-'));
+
+    if (!raw) {
+      const local = readLocalOverride(process.cwd()).worktreesDir;
+      let committed = null;
+      try {
+        committed = JSON.parse(readFileSync(ctx.configPath, 'utf8')).worktreesDir || null;
+      } catch { /* config parse errors are reported by `lanes doctor`, not here */ }
+      if (local) out(`${expandHome(local)}  ${DIM}(local override — ${localConfigPath(process.cwd())})${RESET}`);
+      else if (committed) out(`${expandHome(committed)}  ${DIM}(committed default — ${CONFIG_REL})${RESET}`);
+      else out(`${DIM}not configured — lanes disabled${RESET}`);
+      out();
+      out(`  lanes worktrees-dir <path>   set this machine's override, e.g. lanes worktrees-dir ~/proj-lanes`);
+      break;
+    }
+
+    const target = resolvePath(process.cwd(), expandHome(raw));
+    // Same boundary as planCreate (D21): refusing a stale or mistyped path
+    // instead of silently materializing it wherever it happens to point.
+    if (!existsSync(target)) {
+      if (!existsSync(dirname(target))) {
+        die(`${dirname(target)} does not exist — check the path`);
+      }
+      try {
+        mkdirSync(target);
+      } catch (err) {
+        die(`could not create ${target}: ${err.message}`);
+      }
+    }
+    const written = writeLocalOverride(process.cwd(), { worktreesDir: target });
+    if (!written) die('Could not resolve this repo — worktreesDir override not written.');
+    out(`${OK} worktreesDir → ${target}`);
+    out(`${DIM}written to ${localConfigPath(process.cwd())}${RESET}`);
+    warnIfNotIgnored();
+    break;
+  }
+
+  case 'base-port': {
+    const ctx = resolveContext(process.cwd());
+    requireProject(ctx);
+    const raw = rest.find((a) => !a.startsWith('-'));
+
+    if (!raw) {
+      const local = readLocalOverride(process.cwd()).basePort;
+      let committed = null;
+      try {
+        committed = JSON.parse(readFileSync(ctx.configPath, 'utf8')).basePort ?? null;
+      } catch { /* config parse errors are reported by `lanes doctor`, not here */ }
+      if (local != null) out(`${local}  ${DIM}(local override — ${localConfigPath(process.cwd())})${RESET}`);
+      else if (committed != null) out(`${committed}  ${DIM}(committed default — ${CONFIG_REL})${RESET}`);
+      else out(`${DIM}not configured${RESET}`);
+      out();
+      out(`  lanes base-port <n>   set this machine's override, e.g. lanes base-port 400`);
+      break;
+    }
+
+    const n = parsePortBase(raw);
+    const written = writeLocalOverride(process.cwd(), { basePort: n });
+    if (!written) die('Could not resolve this repo — basePort override not written.');
+    out(`${OK} basePort → ${n}`);
+    out(`${DIM}written to ${localConfigPath(process.cwd())}${RESET}`);
+    warnIfNotIgnored();
+    break;
+  }
+
+  case 'service-port': {
+    const ctx = resolveContext(process.cwd());
+    requireProject(ctx);
+    const [name, raw] = rest.filter((a) => !a.startsWith('-'));
+    const services = ctx.config?.dev?.services || [];
+
+    if (!name) {
+      if (!services.length) {
+        out(`${DIM}no dev.services declared${RESET}`);
+        break;
+      }
+      const local = readLocalOverride(process.cwd()).servicePortBase || {};
+      for (const svc of services) {
+        const overridden = local[svc.name] != null;
+        out(`  ${svc.name.padEnd(12)} ${svc.portBase ?? `${DIM}(none)${RESET}`}  ${DIM}(${overridden ? 'local override' : 'committed default'})${RESET}`);
+      }
+      out();
+      out(`  lanes service-port <name> <n>   set this machine's override for one service`);
+      break;
+    }
+
+    if (raw === undefined) die('Usage: lanes service-port <name> <n>');
+    if (services.length && !services.some((s) => s.name === name)) {
+      out(`${WARN} no dev.services entry named "${name}" — the override is written anyway, in case it's added later.`);
+    }
+    const n = parsePortBase(raw);
+    const current = readLocalOverride(process.cwd()).servicePortBase || {};
+    const written = writeLocalOverride(process.cwd(), { servicePortBase: { ...current, [name]: n } });
+    if (!written) die('Could not resolve this repo — service-port override not written.');
+    out(`${OK} ${name}.portBase → ${n}`);
+    out(`${DIM}written to ${localConfigPath(process.cwd())}${RESET}`);
+    warnIfNotIgnored();
+    break;
+  }
+
   case 'adopt': {
     const root = gitLine(process.cwd(), ['rev-parse', '--show-toplevel']);
     if (!root) die('Not inside a git repository.');
@@ -236,7 +360,6 @@ switch (cmd) {
       // doc page to keep in sync. Absolute, since it must resolve from any repo.
       $schema: join(ROOT, 'config', 'agent-system.schema.json'),
       project: projectName,
-      ...(worktreesDir ? { worktreesDir, basePort: 300 } : {}),
       commands,
       // A guess, and flagged as one below: `--port` is right for Vite and Next
       // but wrong for plenty of runners, and a monorepo usually has more than
@@ -265,16 +388,42 @@ switch (cmd) {
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, `${JSON.stringify(config, null, 2)}\n`);
     out(`${OK} wrote ${dest}`);
+
+    // worktreesDir and basePort are both per-machine (D22): never into the
+    // committed config, always the gitignored local override — every lane of
+    // this repo picks them up. Both are conditioned on worktreesDir: no lanes
+    // means basePort has nothing to prefix (lib/context.mjs's ctx.port needs
+    // both a lane and a basePort), so seeding one without the other is noise.
+    if (worktreesDir) writeLocalOverride(process.cwd(), { worktreesDir, basePort: 300 });
+
+    // A repo without a .gitignore, or one this can't write to, just keeps
+    // working — but then the override file is NOT guaranteed to stay untracked,
+    // so the summary below must not claim otherwise. writeLocalOverride already
+    // attempted to add the entry; this only reports whether that held.
+    const gitignored = worktreesDir ? isGitignored(process.cwd()) : false;
+
     out();
     out(`  project        ${config.project}`);
     out(`  package mgr    ${pm || 'not detected'}`);
     out(
       `  worktrees      ${
         createdWorktreesDir
-          ? `${worktreesDir} ${DIM}(created)${RESET}`
-          : worktreesDir || `${DIM}none detected — lanes disabled, everything else works${RESET}`
+          ? `${worktreesDir} ${DIM}(created; local override${gitignored ? ', not committed' : ''})${RESET}`
+          : worktreesDir
+          ? `${worktreesDir} ${DIM}(local override${gitignored ? ', not committed' : ''})${RESET}`
+          : `${DIM}none detected — lanes disabled, everything else works${RESET}`
       }`,
     );
+    out(
+      `  basePort       ${
+        worktreesDir
+          ? `300 ${DIM}(local override${gitignored ? ', not committed' : ''})${RESET}`
+          : `${DIM}not configured — no lanes, no port hint${RESET}`
+      }`,
+    );
+    if (worktreesDir && !gitignored) {
+      out(`${WARN} ${LOCAL_CONFIG_REL} is not gitignored here — add it, or it will be committed with this machine's values.`);
+    }
     for (const [k, v] of Object.entries(commands)) {
       out(`  ${k.padEnd(14)} ${v || `${DIM}not detected${RESET}`}`);
     }
@@ -314,7 +463,7 @@ switch (cmd) {
     const lanes = worktrees.enumerateLanes(ctx.config);
     if (!lanes.length && cmd !== 'new') {
       die(
-        'No lanes found. Set `worktreesDir` in .claude/agent-system.json, or create one:\n' +
+        'No lanes found. Set worktreesDir with `lanes worktrees-dir <path>`, or create one:\n' +
           '  lanes new <name> --branch <branch>',
       );
     }
@@ -553,16 +702,38 @@ switch (cmd) {
         : warn('review.domainAxes', 'empty — the reviewer will only find what your linter finds');
 
       const wtDir = expandHome(ctx.config?.worktreesDir);
+      // The single merge point (lib/context.mjs#findProject) already resolved
+      // the effective value; this just labels which source won (D22).
+      const wtSource = readLocalOverride(process.cwd()).worktreesDir ? 'local override' : 'committed default';
       if (!wtDir) {
         row(DIM + '·' + RESET, 'worktrees', 'not configured — lanes disabled, rest works');
       } else if (!existsSync(wtDir)) {
         // `lanes new` self-heals this exact state (creates wtDir) as long as its
         // parent exists — matches the same boundary in worktrees.mjs#planCreate.
         existsSync(dirname(wtDir))
-          ? warn('worktrees', `${wtDir} does not exist yet — \`lanes new\` will create it`)
-          : bad('worktrees', `${wtDir} does not exist, and neither does its parent`);
+          ? warn('worktrees', `${wtDir} does not exist yet — \`lanes new\` will create it ${DIM}(${wtSource})${RESET}`)
+          : bad('worktrees', `${wtDir} does not exist, and neither does its parent ${DIM}(${wtSource})${RESET}`);
       } else {
-        row(OK, 'worktrees', wtDir);
+        row(OK, 'worktrees', `${wtDir}  ${DIM}(${wtSource})${RESET}`);
+      }
+
+      const basePort = ctx.config?.basePort;
+      if (basePort != null) {
+        const bpSource = readLocalOverride(process.cwd()).basePort != null ? 'local override' : 'committed default';
+        row(OK, 'basePort', `${basePort}  ${DIM}(${bpSource})${RESET}`);
+      } else {
+        row(DIM + '·' + RESET, 'basePort', 'not configured — port hint disabled, rest works');
+      }
+
+      const services = ctx.config?.dev?.services || [];
+      if (services.length) {
+        const localPorts = readLocalOverride(process.cwd()).servicePortBase || {};
+        const overridden = services.filter((s) => localPorts[s.name] != null).length;
+        row(
+          OK,
+          'service ports',
+          `${services.length} declared${overridden ? `, ${overridden} local override(s)` : ''}`,
+        );
       }
     }
 
@@ -609,6 +780,9 @@ switch (cmd) {
         '',
         'Setup and gates',
         '  lanes adopt [--force]          Scaffold .claude/agent-system.json',
+        '  lanes worktrees-dir [<path>]   Show or set this machine\'s worktreesDir override',
+        '  lanes base-port [<n>]          Show or set this machine\'s basePort override',
+        '  lanes service-port [<svc> <n>] Show or set a per-service portBase override',
         '  lanes doctor                   Verify the install and this repo config',
         '  lanes stage <name> [detail]    Emit a pipeline stage event',
         '  lanes reviewed                 Mark the current diff reviewed',

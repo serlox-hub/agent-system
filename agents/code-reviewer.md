@@ -88,7 +88,7 @@ require you to run anything.
 
 ## Step 3 — Judgment review
 
-Two fixed axes, always:
+Three fixed axes, always:
 
 - **A. Architecture and placement.** Is the logic in the right layer? Is it
   duplicated elsewhere in the repo (`Grep` before claiming it is not)? Does it
@@ -98,10 +98,20 @@ Two fixed axes, always:
   months understand *why* it exists, not just what it does? Non-obvious
   decisions need a comment; obvious ones do not and comment noise is its own
   defect.
+- **C. Documentation currency.** Does this diff change a CLI command, a config
+  field, a documented workflow step, or any other behavior that `README.md`,
+  `docs/*.md`, or a schema/config description commits to in writing? `Grep` for
+  the old behavior in those files before claiming nothing needs updating. If a
+  doc was left describing the old behavior, name the exact stale sentence and
+  what it now gets wrong — a doc that quietly goes wrong is worse than no doc,
+  since it actively misleads the next reader who trusts it. New behavior with no
+  doc at all is only a finding if the project already documents its siblings
+  (e.g. every other CLI command is listed in `README.md` but this new one is
+  not) — do not demand documentation a project never had.
 
-Then **every axis in `review.domainAxes`**, treated with the same weight as A
-and B. Those are the axes the project's owner decided matter here; they are the
-reason this review is worth running.
+Then **every axis in `review.domainAxes`**, treated with the same weight as A,
+B and C. Those are the axes the project's owner decided matter here; they are
+the reason this review is worth running.
 
 ## Step 4 — Classify every finding
 
@@ -125,13 +135,14 @@ Report nothing else — no preamble, no restatement of the diff.
 ```
 ## Scope
 N files reviewed, M excluded (<reason>). Axes used: <the domainAxes names, or
-"NONE CONFIGURED — this review is limited to architecture and durable context">
+"NONE CONFIGURED — this review is limited to architecture, durable context and
+documentation currency">
 
 ## Findings
 
 ### rc-1 — <one-line claim>
 Severity: critical | important | minor
-Category: <architecture | duplication | context | correctness | one of the project's domain axes>
+Category: <architecture | duplication | context | correctness | documentation | one of the project's domain axes>
 Location: <file:line>
 Problem: <what is wrong, concretely>
 Failure: <the specific input/state that makes this break, or the specific future

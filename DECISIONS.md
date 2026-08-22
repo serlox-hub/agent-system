@@ -16,11 +16,16 @@ to make room.
 
 ---
 
-## D22 — `worktreesDir` resolves a gitignored per-machine override before the committed default
+## D22 — `worktreesDir`, `basePort` and per-service `portBase` all resolve a gitignored per-machine override before the committed default
 `product` · 2026-08 · `.claude/agent-system.local.json` · #1
-Two developers may want their lanes in different places; a single committed
-value can't satisfy both — `lanes adopt` now writes it locally. Full design: #1.
+Two developers may want their lanes, port range or per-service ports different
+from each other; a single committed value can't satisfy all three — `lanes
+adopt` and `lanes worktrees-dir`/`base-port`/`service-port` write these
+locally, never committed. Full design: #1.
 Rejected: an env var — invisible to `lanes doctor`, unlike the `lanes color` file.
+Rejected: resolving the file at each lane's own root — `findProject` has that
+directory in hand, but a linked worktree's root isn't shared; every lane would
+need its own copy. Resolved at the MAIN worktree's root instead (`--git-common-dir`).
 
 ## D21 — `planCreate` creates a missing `worktreesDir` itself, but only if its parent already exists
 `core` · 2026-08 · `lib/worktrees.mjs:124`

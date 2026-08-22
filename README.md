@@ -71,6 +71,9 @@ lanes dev / stop / logs  This project's services, per lane
 lanes ui                 Live dashboard (leave it running in a terminal)
 lanes status             One-shot snapshot
 lanes adopt              Scaffold .claude/agent-system.json for this repo
+lanes worktrees-dir      Show or set this machine's worktreesDir override
+lanes base-port          Show or set this machine's basePort override
+lanes service-port       Show or set a per-service portBase override
 lanes doctor             Verify the install, the repo config and this worktree
 lanes reviewed           Mark the current diff reviewed (the /gate skill does this)
 lanes allow-commit       One-shot bypass of the commit guard
@@ -83,11 +86,24 @@ shifts when you remove and re-add one, and a lane number that moves is worse tha
 no lane number. `lanes new` warns before creating a lane that would renumber the
 others.
 
+`worktreesDir`, `basePort` and each service's own `portBase` are all
+per-machine-overridable: `lanes worktrees-dir <path>`, `lanes base-port <n>`
+and `lanes service-port <name> <n>` set gitignored overrides that win over
+whatever the committed config says, so two developers can point their lanes,
+port range, or one specific service's port, somewhere different from each
+other. `lanes adopt` routes what it detects or creates straight there — it
+never writes any of these into the committed config on its own. A team can
+still hand-write a value into the committed file to mandate a shared
+convention; the local override just wins whenever it's present.
+
 Each lane can run the project's own services — a React client and a Python API in
 one repo are two entries in `dev.services`, with their own commands, directories
 and port series. They start detached as process-group leaders so `lanes stop`
 kills the whole tree, and their bookkeeping is keyed by worktree name rather than
-lane number, which is the part that moves.
+lane number, which is the part that moves. A service's own `portBase` wins over
+the top-level `basePort` when both are set — `lanes base-port` moves the
+informational lane-port hint, `lanes service-port` moves where a service
+actually binds.
 
 Colours come from a built-in palette. Set your own with `lanes color 2 832561` —
 stored per machine in `~/.claude/lanes/colors`, deliberately **not** in the
