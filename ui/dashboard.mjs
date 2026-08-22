@@ -387,23 +387,40 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
 
   const title = `agent-system${ctx?.project ? ` · ${ctx.project}` : ''}`;
   const clock = fmtClock(now);
+  const headerRow = `${pad('#', 3)}${pad('WORKTREE', 20)}${pad('BRANCH', 40)}${pad('MARKS', MARKS_WIDTH)}${pad('ISSUE', 8)}${pad('STAGE', 18)}${pad('STATE', 32)}FOR`;
   // Wide and fixed on purpose: a narrower adaptive layout would have to hide
   // columns as more get added over time, and STAGE next to STATE is exactly
   // that first addition. Assumes a wide-enough terminal; a split pane wraps.
-  const barWidth = Math.min(width, 152);
-  const gap = Math.max(1, barWidth - title.length - clock.length);
+  const titleWidth = Math.min(width, 152);
+  // The rule under the header must never render narrower than the header
+  // itself, or its tail (STATE, FOR) hangs past the rule with nothing
+  // underlining it. Measured from the real string rather than a hand-kept
+  // constant, so widening a column can never silently reopen that gap.
+  // The title bar keeps its own, unfloored width — it has no columns to
+  // underline, and flooring it too would wrap the clock onto its own line
+  // on any terminal narrower than the header.
+  const barWidth = Math.max(headerRow.length, titleWidth);
+  const gap = Math.max(1, titleWidth - title.length - clock.length);
   out.push(`${C.bold}${title}${C.reset}${C.dim}${' '.repeat(gap)}${clock}${C.reset}`);
   out.push('');
-  out.push(
-    `${C.bold}${pad('#', 3)}${pad('WORKTREE', 20)}${pad('BRANCH', 40)}${pad('MARKS', MARKS_WIDTH)}${pad('ISSUE', 8)}${pad('STAGE', 18)}${pad('STATE', 32)}FOR${C.reset}`,
-  );
+  out.push(`${C.bold}${headerRow}${C.reset}`);
+  // Sub-header, dim: labels the second line's otherwise-unmarked service/ctx
+  // cells, aligned to the exact same columns `secondLine` renders them at —
+  // without it, that row reads as stray text under STAGE/STATE rather than as
+  // its own labelled data.
+  out.push(`${C.dim}${pad('', 3)}${pad('SERVICE', SERVICE_CELL_WIDTH)}CTX${C.reset}`);
   out.push(`${C.dim}${'─'.repeat(barWidth)}${C.reset}`);
 
   if (rows.length === 0) {
     out.push(`${C.dim}  No lanes yet. Start a Claude Code session in a configured worktree.${C.reset}`);
   }
 
-  for (const r of rows) {
+  // Blank between lanes, not after every one — keeps the visual grouping
+  // this loop exists for while costing one line per lane instead of two, and
+  // leaves the trailing `out.push('')` below as the single, unconditional
+  // separator before RECENT, in both the populated and empty-lanes cases.
+  rows.forEach((r, i) => {
+    if (i > 0) out.push('');
     const s = stateOf(r.ev);
     const laneColor = colorFor(r.lane);
     out.push(
@@ -417,7 +434,7 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
         (r.ev === 'idle' ? C.yellow : C.dim) + (r.since ? fmtElapsed(now - r.since) : '—') + C.reset,
     );
     out.push(secondLine(ctx, r, ctxInfo));
-  }
+  });
 
   out.push('');
   out.push(`${C.bold}RECENT${C.reset}`);
