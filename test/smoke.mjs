@@ -905,6 +905,104 @@ test('lanes list SERVICES column: boundPort wiring is unchanged after the extrac
   }
 });
 
+// ── Dashboard: sub-header, rule width and lane spacing (#4) ──────────
+test('the SERVICE/CTX sub-header lines up with the real service/ctx columns on the row below', () => {
+  const ctxInfo = new Map([['/tmp/aligned.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);
+  const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/tmp/aligned.jsonl' })]);
+  const lane = worktrees.enumerateLanes(wtCfg)[0]; // demo-1, no dev.services declared under wtCfg
+  const ctx = { ...resolveContext(lane2), config: wtCfg };
+  const frame = render(ctx, state, Date.now(), [lane], ctxInfo);
+  const lines = stripAnsi(frame).split('\n');
+
+  const headerIdx = lines.findIndex((l) => l.includes('WORKTREE'));
+  const subHeader = lines[headerIdx + 1];
+  assert.equal(subHeader.slice(3, 3 + SERVICE_CELL_WIDTH).trim(), 'SERVICE');
+  assert.equal(subHeader.slice(3 + SERVICE_CELL_WIDTH).trim(), 'CTX');
+
+  // Same fixed offset applied to the real second line below it — if the two
+  // ever used a different width, the labels would sit over the wrong cells.
+  const dataIdx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const secondLineText = lines[dataIdx + 1];
+  assert.equal(secondLineText.slice(3, 3 + SERVICE_CELL_WIDTH).trim(), '—', 'SERVICE lines up over the service cell');
+  assert.equal(
+    secondLineText.slice(3 + SERVICE_CELL_WIDTH).trim(),
+    '2K ctx · sonnet-5',
+    'CTX lines up exactly where the ctx cell starts, with no gap or overlap',
+  );
+});
+
+test('the rule under the header is never shorter than the header row, even on a terminal narrower than it', () => {
+  const originalColumns = process.stdout.columns;
+  try {
+    process.stdout.columns = 60; // far narrower than the ~136-char fixed header
+    const frame = render(resolveContext(lane2), createState());
+    const lines = stripAnsi(frame).split('\n');
+    const headerIdx = lines.findIndex((l) => l.includes('WORKTREE'));
+    const headerLine = lines[headerIdx];
+    const sepLine = lines[headerIdx + 2]; // header, sub-header, then the rule
+    assert.ok(/^─+$/.test(sepLine) && sepLine.length > 0, 'the line two below the header must be the rule');
+    assert.equal(
+      sepLine.length,
+      headerLine.length,
+      'the rule must stretch to cover the header exactly, not stop short at the narrower terminal width',
+    );
+  } finally {
+    process.stdout.columns = originalColumns;
+  }
+});
+
+test('the title bar keeps its own narrower width instead of being pulled out to match the wider header rule', () => {
+  const originalColumns = process.stdout.columns;
+  try {
+    process.stdout.columns = 60;
+    const frame = render(resolveContext(lane2), createState());
+    const lines = stripAnsi(frame).split('\n');
+    const titleLine = lines[0];
+    const headerLine = lines.find((l) => l.includes('WORKTREE'));
+    assert.ok(titleLine.length < headerLine.length, 'the title/clock line must not be padded out to the header/rule width');
+    assert.equal(titleLine.length, 60, 'the title bar follows the floored terminal width, not the wider header');
+  } finally {
+    process.stdout.columns = originalColumns;
+  }
+});
+
+test('render omits the leading blank before the first lane, but still leaves one before RECENT with zero lanes', () => {
+  const frame = render(resolveContext(lane2), createState(), Date.now(), []);
+  const lines = frame.split('\n');
+  const placeholderIdx = lines.findIndex((l) => l.includes('No lanes yet'));
+  assert.ok(placeholderIdx !== -1, 'the empty-lanes placeholder must still show');
+  assert.equal(lines[placeholderIdx + 1], '', 'a blank line must separate the placeholder from RECENT even with zero lanes');
+  assert.ok(lines[placeholderIdx + 2].includes('RECENT'), 'RECENT must follow directly after that one blank line');
+});
+
+test('render puts no blank line before a single lane\'s block, and exactly one blank before RECENT after it', () => {
+  const single = [{
+    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'main',
+    isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const frame = render(resolveContext(lane2), createState(), Date.now(), single);
+  const lines = stripAnsi(frame).split('\n');
+  const sepIdx = lines.findIndex((l) => /^─+$/.test(l));
+  assert.ok(lines[sepIdx + 1].includes('demo-1'), 'the only lane\'s row must start right after the rule, with no leading blank');
+  assert.equal(lines[sepIdx + 3], '', 'exactly one blank line must separate the only lane\'s block from RECENT');
+  assert.ok(lines[sepIdx + 4].includes('RECENT'));
+});
+
+test('render inserts exactly one blank line between two lanes, and one more before RECENT after the last', () => {
+  const two = [
+    { lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'main', isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true },
+    { lane: 2, name: 'demo-2', path: join(wtDir, 'demo-2'), branch: 'main', isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true },
+  ];
+  const frame = render(resolveContext(lane2), createState(), Date.now(), two);
+  const lines = stripAnsi(frame).split('\n');
+  const sepIdx = lines.findIndex((l) => /^─+$/.test(l));
+  assert.ok(lines[sepIdx + 1].includes('demo-1'), 'no leading blank before the first lane');
+  assert.equal(lines[sepIdx + 3], '', 'exactly one blank line between the first lane\'s block and the second\'s');
+  assert.ok(lines[sepIdx + 4].includes('demo-2'), 'the second lane follows right after that single blank');
+  assert.equal(lines[sepIdx + 6], '', 'one blank line before RECENT after the last lane');
+  assert.ok(lines[sepIdx + 7].includes('RECENT'));
+});
+
 // ── Lane colours ────────────────────────────────────────────────────
 test('lane colours fall back to the built-in palette and cycle past its end', () => {
   const colorFor = laneColorFor({});
