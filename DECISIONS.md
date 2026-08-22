@@ -16,6 +16,13 @@ to make room.
 
 ---
 
+## D23 — agent-system never installs a `statusLine` hook, only merges into `hooks`
+`product` · 2026-08 · `install.mjs`, `hooks/emit.mjs` · #4
+StatusLine is a single slot in `settings.json` a target project may already own —
+clobbering it on install is a silent regression. #4 reads `transcript_path` at render
+time instead. Rejected: a statusLine script exposing the precomputed
+`context_window.used_percentage` — more accurate, not worth the collision risk.
+
 ## D22 — `worktreesDir`, `basePort` and per-service `portBase` all resolve a gitignored per-machine override before the committed default
 `product` · 2026-08 · `.claude/agent-system.local.json` · #1
 Two developers may want their lanes, port range or per-service ports different
