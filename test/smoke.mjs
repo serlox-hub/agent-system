@@ -260,6 +260,100 @@ test('untracked files are part of the fingerprint', () => {
   assert.notEqual(diffFingerprint(lane2), before);
 });
 
+test('staging a reviewed change must not change its fingerprint — git add alone is not an edit', () => {
+  // The regression this guards: the fingerprint used to be built from
+  // `git diff --cached` + `git diff` concatenated in that order, so the same
+  // edit's text moved from the second slot to the first the moment it was
+  // staged — changing the fingerprint for a diff that had not actually
+  // changed, and blocking a commit right after /gate had just reviewed it.
+  appendFileSync(join(lane2, 'src', 'a.ts'), 'export const g = 7;\n');
+  writeFileSync(join(lane2, 'src', 'also-new.ts'), 'export const h = 8;\n');
+  const unstaged = diffFingerprint(lane2);
+  git(lane2, 'add', 'src/a.ts', 'src/also-new.ts');
+  assert.equal(diffFingerprint(lane2), unstaged, 'git add must be a no-op for the fingerprint');
+});
+
+test('deleting a tracked file produces the same fingerprint staged or not', () => {
+  git(lane2, 'add', 'src/a.ts', 'src/also-new.ts');
+  git(lane2, 'commit', '-m', 'seed for delete test');
+  rmSync(join(lane2, 'src', 'also-new.ts'));
+  const unstaged = diffFingerprint(lane2);
+  git(lane2, 'add', '-A');
+  assert.equal(diffFingerprint(lane2), unstaged, 'a staged deletion must fingerprint the same as an unstaged one');
+});
+
+test('a staged delete-and-recreate-elsewhere (the shape git\'s default rename detection pairs up) must not hide the deletion, even when the new path was already reviewed as a plain addition', () => {
+  writeFileSync(join(lane2, 'src', 'rename-src.ts'), 'export const same = 123;\n');
+  git(lane2, 'add', 'src/rename-src.ts');
+  git(lane2, 'commit', '-m', 'seed rename-src');
+
+  // "Reviewed" state: rename-src.ts untouched, only an unrelated-looking
+  // addition with the exact same content sitting at a new path.
+  writeFileSync(join(lane2, 'src', 'rename-dst.ts'), 'export const same = 123;\n');
+  const reviewedFp = diffFingerprint(lane2);
+  writeMark(lane2, REVIEW_MARK, reviewedFp);
+
+  // Now actually delete rename-src.ts too. Identical content reappearing at a
+  // new path, with the old path gone, is exactly what `git diff --name-status`
+  // collapses into a single `R100 old new` record by default — the collapse
+  // `--no-renames` exists to prevent.
+  rmSync(join(lane2, 'src', 'rename-src.ts'));
+  const unstagedFp = diffFingerprint(lane2);
+  assert.notEqual(unstagedFp, reviewedFp, 'the unreviewed deletion must invalidate the mark, unstaged');
+
+  git(lane2, 'add', '-A');
+  const stagedFp = diffFingerprint(lane2);
+  assert.equal(stagedFp, unstagedFp, 'staging the rename-shaped pair must not itself change the fingerprint');
+  assert.notEqual(
+    stagedFp, reviewedFp,
+    'and the deletion must still invalidate the mark once staged — not be hidden by rename pairing',
+  );
+});
+
+test('a unicode filename\'s edits keep changing the fingerprint — core.quotePath must not freeze it as a constant "unreadable"', () => {
+  // Untracked, exercised via `git ls-files -z --others`: without -z the quoted,
+  // octal-escaped name that `core.quotePath` produces fails `git hash-object`
+  // and used to fall back to the fixed string 'unreadable' for every edit.
+  const p = join(lane2, 'src', 'café.ts');
+  writeFileSync(p, 'export const a = 1;\n');
+  const untrackedFirst = diffFingerprint(lane2);
+  appendFileSync(p, 'export const b = 2;\n');
+  const untrackedSecond = diffFingerprint(lane2);
+  assert.notEqual(untrackedSecond, untrackedFirst, 'a second edit to an untracked unicode-named file must still change the fingerprint');
+
+  // Tracked and modified, exercised via `git diff -z --name-status`: same
+  // quoting problem, different git call.
+  git(lane2, 'add', '-A');
+  git(lane2, 'commit', '-m', 'seed unicode file');
+  appendFileSync(p, 'export const c = 3;\n');
+  const trackedFirst = diffFingerprint(lane2);
+  appendFileSync(p, 'export const d = 4;\n');
+  const trackedSecond = diffFingerprint(lane2);
+  assert.notEqual(trackedSecond, trackedFirst, 'a second edit to a tracked unicode-named file must still change the fingerprint too');
+});
+
+test('an unborn-HEAD repo (no commits yet) fingerprints what is actually staged, not a constant', () => {
+  const unborn = join(TMP, 'unborn');
+  mkdirSync(unborn);
+  git(unborn, 'init', '-q');
+  const empty = diffFingerprint(unborn);
+
+  writeFileSync(join(unborn, 'x.ts'), 'export const x = 1;\n');
+  const withUntracked = diffFingerprint(unborn);
+  assert.notEqual(withUntracked, empty, 'a brand-new untracked file must change the fingerprint before any commit exists');
+
+  git(unborn, 'add', 'x.ts');
+  const staged = diffFingerprint(unborn);
+  assert.equal(staged, withUntracked, 'staging must be a no-op here too, same invariant as in a repo with commits');
+
+  writeFileSync(join(unborn, 'y.ts'), 'export const y = 2;\n');
+  const withSecondFile = diffFingerprint(unborn);
+  assert.notEqual(
+    withSecondFile, staged,
+    'a second staged file must further change the fingerprint — not stuck at a constant just because HEAD is unborn',
+  );
+});
+
 // ── Commit guard, every branch ──────────────────────────────────────
 const guard = (cwd, command) => {
   const payload = JSON.stringify({ cwd, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } });

@@ -152,11 +152,17 @@ dropped. Rejected: flock, SQLite, file-per-session — no such problem exists he
 blocks and returns a reason for the agent to ask about. Rejected: running the full
 review from the hook, and a read-only reviewer at commit time (loses fix application).
 
-## D5 — Review markers are keyed to a hash of the diff
-`core` · 2026-08 · `lib/marks.mjs:diffFingerprint`
-Staged + unstaged + untracked. Edit one line after reviewing and the marker goes
-stale, so approval cannot outlive the code it approved. Rejected: a timestamp or
-HEAD-based marker — both survive edits.
+## D5 — Review markers are keyed to per-path blob hashes, and staging is a no-op
+`core` · 2026-08 · `lib/marks.mjs:diffFingerprint` · #4
+Every path differing from HEAD or untracked, as `path:blobHash` (`path:D` when
+deleted), sorted and hashed. Edit one line after reviewing and the marker goes
+stale, so approval cannot outlive the code it approved — but `git add` alone is
+not an edit and must not invalidate it.
+Rejected: `git diff --cached` + `git diff` concatenated — the simpler shape, and
+the one this was reverted from: the same edit's text moves between the two
+slots the moment it is staged, so staging alone changed the fingerprint and
+blocked a commit /gate had just reviewed.
+Rejected: a timestamp or HEAD-based marker — both survive edits.
 
 ## D4 — The commit guard blocks and offers a choice, rather than warning
 `product` · 2026-08 · `hooks/commit-guard.mjs`
