@@ -196,7 +196,7 @@
               },
               "url": {
                 "type": "string",
-                "description": "Optional URL shown when the service starts. Same placeholders."
+                "description": "Optional URL for this service. Printed by `lanes dev` when it starts, and shown on the `lanes ui` / `lanes status` dashboard while it is running. Same placeholders."
               }
             },
             "additionalProperties": false

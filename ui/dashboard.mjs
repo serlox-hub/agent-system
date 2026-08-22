@@ -18,6 +18,7 @@ import { spawn } from 'node:child_process';
 import { EVENTS_FILE, resolveContext, issueFromBranch } from '../lib/context.mjs';
 import { laneColorFor } from '../lib/colors.mjs';
 import { enumerateLanes, laneMarks } from '../lib/worktrees.mjs';
+import { resolveServices, status as serviceStatus, boundPort } from '../lib/services.mjs';
 
 const HISTORY_LIMIT = 12;
 
@@ -282,6 +283,37 @@ function marksCell(r) {
   return colored + trailing;
 }
 
+/**
+ * Only the first declared service is shown, plus a trailing count — the header
+ * row already fills most of the 152-column cap, leaving no room for a full
+ * list. A row with no `.name` is a foreign project's or a vanished lane's
+ * (see rowsFor): it never carries the live `.path`/`.lane` resolveServices
+ * needs, and `.name` never resolves against any config but the current
+ * project's, so it is never passed in at all.
+ *
+ * `serviceStatus` (`lib/services.mjs`'s `status`) deletes the pidfile of a
+ * confirmed-dead process, so calling this — and therefore `render()` — is not
+ * side-effect-free. Pre-existing self-healing already exercised by `lanes
+ * list` (`bin/lanes.mjs:593`), not introduced here.
+ */
+function serviceCell(ctx, r) {
+  if (!r.name) return '—';
+  const svcs = resolveServices(ctx?.config, r);
+  if (!svcs.length) return '—';
+  const first = svcs[0];
+  const st = serviceStatus(first);
+  let text = '—';
+  if (st.running) {
+    // The bound port, not the freshly computed one — a lane can be
+    // renumbered while the service stays up, same as `lanes list`. The `!`
+    // marker applies to the URL too: a url template is filled with the
+    // freshly computed port, which can just as easily be stale.
+    const { port, moved } = boundPort(first, st);
+    text = first.url ? `${first.url}${moved}` : `localhost:${port}${moved}`;
+  }
+  return svcs.length > 1 ? `${text} (+${svcs.length - 1} more)` : text;
+}
+
 /** Build the frame as a string. Callers decide whether to clear the screen. */
 export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config)) {
   const rows = rowsFor(ctx, state.lanes, laneInfo);
@@ -320,6 +352,10 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
         s.color + pad(`${s.icon} ${s.label(r)}`, 32) + C.reset +
         (r.ev === 'idle' ? C.yellow : C.dim) + (r.since ? fmtElapsed(now - r.since) : '—') + C.reset,
     );
+    // Second line, always present (never collapses back to 1 line): a fixed
+    // 3-space indent under the `#` column is the stable prefix a byte-offset
+    // test can target, matching marksCell's own pad-then-slice convention.
+    out.push(`${' '.repeat(3)}${C.dim}${pad(serviceCell(ctx, r), barWidth - 3)}${C.reset}`);
   }
 
   out.push('');
