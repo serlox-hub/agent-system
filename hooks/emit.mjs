@@ -28,10 +28,18 @@ function labelFrom(input) {
 const HOOK_MAP = {
   // The main agent finished its turn: nobody is working, the user is the
   // blocker. This is the single most useful signal in the whole UI.
-  Stop: () => ({ ev: 'idle' }),
+  // `transcript_path` rides here and on SessionStart only — it is constant
+  // for a session's lifetime, so every other event carrying it would only
+  // grow the log for no benefit (measured: +64% per event on UserPromptSubmit,
+  // which fires on every message).
+  Stop: (input) => ({ ev: 'idle', transcript: input?.transcript_path || null }),
   // The user replied: the lane is live again.
   UserPromptSubmit: () => ({ ev: 'busy' }),
-  SessionStart: (input) => ({ ev: 'session_start', detail: input?.source || null }),
+  SessionStart: (input) => ({
+    ev: 'session_start',
+    detail: input?.source || null,
+    transcript: input?.transcript_path || null,
+  }),
   SessionEnd: (input) => ({ ev: 'session_end', detail: input?.reason || null }),
 };
 
@@ -53,8 +61,10 @@ async function main() {
 
   const mapper = HOOK_MAP[hook];
   if (!mapper) return;
-  const { ev, detail } = mapper(input);
-  emitWithContext(ev, cwd, { session, detail: detail ?? null });
+  const { ev, detail, transcript } = mapper(input);
+  const extra = { session, detail: detail ?? null };
+  if (transcript !== undefined) extra.transcript = transcript;
+  emitWithContext(ev, cwd, extra);
 }
 
 main()

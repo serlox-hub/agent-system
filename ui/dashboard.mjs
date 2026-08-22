@@ -19,6 +19,7 @@ import { EVENTS_FILE, resolveContext, issueFromBranch } from '../lib/context.mjs
 import { laneColorFor } from '../lib/colors.mjs';
 import { enumerateLanes, laneMarks } from '../lib/worktrees.mjs';
 import { resolveServices, status as serviceStatus, boundPort } from '../lib/services.mjs';
+import { readContext } from '../lib/transcript.mjs';
 
 const HISTORY_LIMIT = 12;
 
@@ -196,6 +197,12 @@ export function applyEvents(state, events) {
         branch: e.branch ?? prev.branch,
         issue: e.issue ?? prev.issue,
         path: e.path ?? prev.path,
+        // A new session start is authoritative for transcript, like
+        // lane_created is for the whole row: without this, a session_start
+        // with no transcript_path of its own (payload omitted or empty) would
+        // silently inherit the OUTGOING session's transcript via `??`, and
+        // render it in live tone as if it belonged to the new one.
+        transcript: e.ev === 'session_start' ? (e.transcript ?? null) : (e.transcript ?? prev.transcript),
         // `stage` is a pipeline milestone, not a liveness signal — it must not
         // overwrite the last real session/agent state, or a lane goes cyan
         // "working" the moment a checkpoint fires and stays that way forever
@@ -314,8 +321,65 @@ function serviceCell(ctx, r) {
   return svcs.length > 1 ? `${text} (+${svcs.length - 1} more)` : text;
 }
 
+export function fmtTokens(n) {
+  if (n >= 1_000_000) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}K`;
+  return `${n}`;
+}
+
+/**
+ * "143K ctx · sonnet-5", or "—". The model tag rides alongside the count
+ * because the same number means different things on different models — a raw
+ * token count with no context-window-size table to compare it against.
+ *
+ * `ctxInfo`, when supplied, is a `Map<transcriptPath, {tokens,model}|null>`
+ * refreshed on the same ~20-tick cadence as `laneInfo` (see `runUi`) rather
+ * than read fresh every second — a real transcript's trailing line can run
+ * past the 256KB fast-path window, and the full-file fallback that follows
+ * measures 7-12ms on real multi-MB files, not the sub-millisecond figure a
+ * per-row-per-tick read assumed. `printStatus` has no tick loop to throttle
+ * against, so it omits `ctxInfo` and reads fresh — a one-shot snapshot.
+ */
+function ctxCell(r, ctxInfo) {
+  if (!r.transcript) return '—';
+  const info = ctxInfo ? ctxInfo.get(r.transcript) ?? null : readContext(r.transcript);
+  if (!info) return '—';
+  return `${fmtTokens(info.tokens)} ctx · ${info.model.replace(/^claude-/, '')}`;
+}
+
+/**
+ * Events that mean a Claude Code session is actually attached to the lane
+ * right now. An allow-list, not "everything but session_end": several events
+ * (lane_created, stage, reviewed, commit_*) come from the CLI or the commit
+ * guard, not from session liveness hooks, and can land long after — or with
+ * no session ever having existed. Failing closed (default: not live) only
+ * over-dims a real value; the deny-list this replaces defaulted to "live",
+ * which lies.
+ */
+const LIVE_EVENTS = new Set(['session_start', 'busy', 'idle', 'agent_start', 'agent_end']);
+
+/**
+ * The service cell owns the WORKTREE+BRANCH+MARKS+ISSUE width (room enough for
+ * a real URL) and stays dimmed unconditionally, matching #3's shipped design;
+ * the ctx cell follows immediately after, under STAGE+STATE+FOR, with its own
+ * independent live/dim tone — a closed session still has a real transcript on
+ * disk, so the value keeps showing, just de-emphasized, regardless of whether
+ * a service happens to still be running in the same lane.
+ */
+const SERVICE_CELL_WIDTH = 20 + 40 + MARKS_WIDTH + 8;
+
+/** Second line, always present — never collapses back to 1 line (#3's own decision). */
+function secondLine(ctx, r, ctxInfo) {
+  const live = LIVE_EVENTS.has(r.ev);
+  return (
+    pad('', 3) +
+    C.dim + pad(serviceCell(ctx, r), SERVICE_CELL_WIDTH) + C.reset +
+    (live ? '' : C.dim) + ctxCell(r, ctxInfo) + C.reset
+  );
+}
+
 /** Build the frame as a string. Callers decide whether to clear the screen. */
-export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config)) {
+export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config), ctxInfo = null) {
   const rows = rowsFor(ctx, state.lanes, laneInfo);
   const colorFor = laneColorFor();
   const width = Math.max(60, process.stdout.columns || 100);
@@ -352,10 +416,7 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
         s.color + pad(`${s.icon} ${s.label(r)}`, 32) + C.reset +
         (r.ev === 'idle' ? C.yellow : C.dim) + (r.since ? fmtElapsed(now - r.since) : '—') + C.reset,
     );
-    // Second line, always present (never collapses back to 1 line): a fixed
-    // 3-space indent under the `#` column is the stable prefix a byte-offset
-    // test can target, matching marksCell's own pad-then-slice convention.
-    out.push(`${' '.repeat(3)}${C.dim}${pad(serviceCell(ctx, r), barWidth - 3)}${C.reset}`);
+    out.push(secondLine(ctx, r, ctxInfo));
   }
 
   out.push('');
@@ -407,6 +468,12 @@ export async function runUi() {
   // on every tick.
   let tick = -1;
   let laneInfo;
+  // A real transcript's tail can miss the 256KB fast-path window and fall
+  // back to a full-file read+parse — measured at 7-12ms on real multi-MB
+  // files, not the sub-millisecond cost a per-row-per-second read assumed.
+  // Throttled on the same 20-tick cadence as laneInfo rather than read fresh
+  // every paint; only the transcript paths currently on screen are read.
+  let ctxInfo = new Map();
 
   const paint = () => {
     try {
@@ -419,11 +486,18 @@ export async function runUi() {
       }
       applyEvents(state, fresh);
       tick += 1;
-      if (tick % 20 === 0) laneInfo = enumerateLanes(ctx.config);
+      if (tick % 20 === 0) {
+        laneInfo = enumerateLanes(ctx.config);
+        const next = new Map();
+        for (const { transcript } of state.lanes.values()) {
+          if (transcript && !next.has(transcript)) next.set(transcript, readContext(transcript));
+        }
+        ctxInfo = next;
+      }
       // Full redraw: cheap at this size, and it avoids every partial-update
       // artefact that incremental cursor movement would introduce.
       process.stdout.write(
-        `\x1b[2J\x1b[H${render(ctx, state, Date.now(), laneInfo)}\n${C.dim}ctrl-c to quit${C.reset}\n`,
+        `\x1b[2J\x1b[H${render(ctx, state, Date.now(), laneInfo, ctxInfo)}\n${C.dim}ctrl-c to quit${C.reset}\n`,
       );
     } catch {
       /* never let a render bug kill the dashboard */

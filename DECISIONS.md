@@ -16,6 +16,16 @@ to make room.
 
 ---
 
+## D25 — The ctx cell shows a raw token count + model tag, never a percentage
+`core` · 2026-08 · `ui/dashboard.mjs:ctxCell` · #4
+A percentage needs a per-model context-window denominator; real transcripts on
+this machine show sonnet-5 past 350K and opus-5/opus-4-8 past 900K before
+auto-compaction, so any fixed denominator is wrong for most rows — the model
+tag lets the reader supply it instead.
+Rejected: a fixed-denominator percentage — an earlier draft used 200K and real
+sonnet-5 sessions hit 165% of it, a confident-looking number that is wrong on
+exactly the sessions this feature exists to warn about.
+
 ## D24 — `boundPort()` lives in `lib/services.mjs`, shared by `lanes list` and `lanes ui`
 `core` · 2026-08 · `lib/services.mjs:boundPort` · #3
 Both renderers computed the bound-port/`!`-divergence formula independently — the same
@@ -24,7 +34,7 @@ which issue #3's own Out of scope named — a two-screens-can-disagree formula o
 staying inside that line.
 
 ## D23 — agent-system never installs a `statusLine` hook, only merges into `hooks`
-`product` · 2026-08 · `install.mjs`, `hooks/emit.mjs` · #4
+`product` · 2026-08 · `install.mjs`, `hooks/emit.mjs`, `lib/transcript.mjs` · #4
 StatusLine is a single slot in `settings.json` a target project may already own —
 clobbering it on install is a silent regression. #4 reads `transcript_path` at render
 time instead. Rejected: a statusLine script exposing the precomputed
