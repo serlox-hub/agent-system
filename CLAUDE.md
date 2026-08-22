@@ -56,3 +56,10 @@ moment.
   more weight than the code. Edit them with the same care, and keep the
   adversarial posture — an agreeable reviewer is a broken reviewer.
 - **English** for everything committed: prompts, issues, specs, comments.
+- **Code files aim for ~150 lines, as a soft guideline, not a hard gate.** Not
+  retroactive — `bin/lanes.mjs`, `ui/dashboard.mjs` and others already exceed it,
+  and `test/smoke.mjs` has its own single-file convention (`tests.locationRule`
+  in `.claude/agent-system.json`) that overrides it entirely. Treat crossing it as
+  a prompt to consider splitting a *new or newly-touched* file, nothing more.
+  `.md` files are exempt outright — decision logs and specs need the room prose
+  takes.
