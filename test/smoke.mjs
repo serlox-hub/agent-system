@@ -39,7 +39,8 @@ const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } 
   `${ROOT}/lib/local-config.mjs`
 );
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK } = await import(`${ROOT}/lib/marks.mjs`);
-const { createState, applyEvents, render, notifyTitle } = await import(`${ROOT}/ui/dashboard.mjs`);
+const { createState, applyEvents, render, notifyTitle, fmtTokens } = await import(`${ROOT}/ui/dashboard.mjs`);
+const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
 const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE } = await import(`${ROOT}/lib/colors.mjs`);
 const worktrees = await import(`${ROOT}/lib/worktrees.mjs`);
 const sv = await import(`${ROOT}/lib/services.mjs`);
@@ -760,12 +761,18 @@ test('start records pid and port, and stop kills the whole process group', () =>
 // ── Dashboard: service cell (second line) ────────────────────────────
 const stripAnsi = (s) => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
 
+// Column order on the second line since #4: 3-space prefix, then the service
+// cell at a fixed width (WORKTREE+BRANCH+MARKS+ISSUE, matching the main row's
+// own column widths), then the ctx cell immediately after with no gap of its
+// own (see SERVICE_CELL_WIDTH in ui/dashboard.mjs).
+const SERVICE_CELL_WIDTH = 20 + 40 + 12 + 8;
+
 /** The service line directly under a lane's own row, with the stable 3-space prefix stripped. */
 function serviceLineFor(frame, laneName) {
   const lines = stripAnsi(frame).split('\n');
   const idx = lines.findIndex((l) => l.includes(laneName));
   assert.ok(idx !== -1, `${laneName} must have a row`);
-  return lines[idx + 1].slice(3).trimEnd();
+  return lines[idx + 1].slice(3, 3 + SERVICE_CELL_WIDTH).trimEnd();
 }
 
 test('dashboard: no dev.services declared shows — on the second line', () => {
@@ -1383,6 +1390,258 @@ test('the suite writes its events inside the sandbox, not the real home', () => 
   assert.ok(LANES_DIR.startsWith(TMP), `event log escaped the sandbox: ${LANES_DIR}`);
   // The guard tests above emit real events; prove they landed here.
   assert.match(readFileSync(join(LANES_DIR, 'events.jsonl'), 'utf8'), /"ev":"commit_blocked"/);
+});
+
+// ── Context tokens (#4) ─────────────────────────────────────────────
+const DIM = `${ESC}[2m`;
+const RESET = `${ESC}[0m`;
+const transcriptDir = join(TMP, 'transcripts');
+mkdirSync(transcriptDir);
+
+const assistantLine = (model, usage) => `${JSON.stringify({ type: 'assistant', message: { model, usage } })}\n`;
+const writeTranscript = (name, lines) => {
+  const p = join(transcriptDir, name);
+  writeFileSync(p, lines.join(''));
+  return p;
+};
+
+/**
+ * Since #3 shipped, a lane's second line carries the service cell (always
+ * dimmed) followed immediately by the ctx cell (its own independent tone) —
+ * see `secondLine` in ui/dashboard.mjs. The service cell always ends with a
+ * reset before the ctx cell begins, so that reset is the reliable place to
+ * split the raw line — a fixed-width slice would break the moment either
+ * cell's width changes.
+ */
+function ctxPortion(rawLine) {
+  const cut = rawLine.indexOf(RESET, 3);
+  assert.ok(cut !== -1, 'the service cell must end with a reset before the ctx cell begins');
+  return rawLine.slice(cut + RESET.length);
+}
+
+test('fmtTokens formats exactly at the K/M boundaries', () => {
+  assert.equal(fmtTokens(0), '0');
+  assert.equal(fmtTokens(999), '999');
+  assert.equal(fmtTokens(1000), '1K');
+  assert.equal(fmtTokens(1500), '2K', 'Math.round(1.5) rounds up');
+  assert.equal(fmtTokens(999999), '1000K', 'still below the M threshold, since that check is on the raw count');
+  assert.equal(fmtTokens(1_000_000), '1.0M');
+  assert.equal(fmtTokens(1_500_000), '1.5M');
+});
+
+test('readContext returns null for a missing file, a non-string path, or an empty file', () => {
+  assert.equal(readContext(join(transcriptDir, 'nope.jsonl')), null);
+  assert.equal(readContext(null), null);
+  assert.equal(readContext(undefined), null);
+  assert.equal(readContext(42), null);
+  const empty = writeTranscript('empty.jsonl', []);
+  assert.equal(readContext(empty), null);
+});
+
+test('readContext never throws on corrupt or binary content', () => {
+  const p = join(transcriptDir, 'binary.bin');
+  writeFileSync(p, Buffer.from([0, 1, 2, 255, 254, 253, 0x7b, 0x22, 0xff, 0x00]));
+  assert.doesNotThrow(() => readContext(p));
+  assert.equal(readContext(p), null);
+
+  const garbage = writeTranscript('garbage.jsonl', ['not json\n', '{ "type": "assistant"\n', '{}\n']);
+  assert.doesNotThrow(() => readContext(garbage));
+  assert.equal(readContext(garbage), null);
+});
+
+test('readContext scans backward and skips <synthetic> and all-zero-usage entries', () => {
+  const p = writeTranscript('scan.jsonl', [
+    assistantLine('claude-opus-4-8', { input_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }),
+    `${JSON.stringify({ type: 'user', message: { content: 'hi' } })}\n`,
+    assistantLine('claude-sonnet-5', { input_tokens: 43000, cache_creation_input_tokens: 100000, cache_read_input_tokens: 0 }),
+    assistantLine('claude-sonnet-5', { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }),
+    assistantLine('<synthetic>', { input_tokens: 999, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }),
+  ]);
+  assert.deepEqual(readContext(p), { tokens: 143000, model: 'claude-sonnet-5' });
+});
+
+test('readContext falls back to the full file when the last line alone exceeds the 256KB tail window', () => {
+  const bigLine = `${JSON.stringify({
+    type: 'assistant',
+    message: {
+      model: 'claude-sonnet-5',
+      usage: { input_tokens: 5000, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    },
+    _pad: 'x'.repeat(300 * 1024), // pushes this single line past the 256KB tail
+  })}\n`;
+  const p = writeTranscript('oversized-line.jsonl', [bigLine]);
+  assert.deepEqual(readContext(p), { tokens: 5000, model: 'claude-sonnet-5' });
+});
+
+test('applyEvents folds transcript like branch — carried forward, never cleared by an unrelated event', () => {
+  const s = applyEvents(createState(), [
+    ev(1, 'session_start', { transcript: '/tmp/a.jsonl' }),
+    ev(2, 'idle', { transcript: '/tmp/b.jsonl' }),
+    ev(3, 'busy'), // no transcript field on this event; must not clear the last known one
+    // The real hook always writes the key — `input?.transcript_path || null`
+    // — so `idle` with an explicit `null` (not merely absent) is the wire
+    // shape to test, not a hypothetical: `null ?? prev.transcript` must still
+    // carry the last known value forward for a non-`session_start` event.
+    ev(4, 'idle', { transcript: null }),
+  ]);
+  assert.equal(s.lanes.get('demo#demo-1').transcript, '/tmp/b.jsonl');
+});
+
+test('applyEvents resets transcript on session_start, so a new session never inherits the outgoing one\'s value', () => {
+  const s = applyEvents(createState(), [
+    ev(1, 'session_start', { transcript: '/tmp/old-session.jsonl' }),
+    ev(2, 'idle'),
+    // A fresh session in the same lane, with no transcript_path of its own —
+    // this must NOT fall back to the previous session's path via `??`.
+    ev(3, 'session_start', { transcript: null }),
+  ]);
+  assert.equal(s.lanes.get('demo#demo-1').transcript, null, 'must not inherit the outgoing session\'s transcript');
+
+  const withPath = applyEvents(createState(), [
+    ev(1, 'session_start', { transcript: '/tmp/old-session.jsonl' }),
+    ev(2, 'session_start', { transcript: '/tmp/new-session.jsonl' }),
+  ]);
+  assert.equal(withPath.lanes.get('demo#demo-1').transcript, '/tmp/new-session.jsonl');
+});
+
+test('render adds a ctx line under each lane row, live-toned while the session is active', () => {
+  const p = writeTranscript('live.jsonl', [
+    assistantLine('claude-sonnet-5', { input_tokens: 43000, cache_creation_input_tokens: 100000, cache_read_input_tokens: 0 }),
+  ]);
+  const state = applyEvents(createState(), [ev(1, 'idle', { transcript: p })]);
+  const lines = render(resolveContext(lane2), state).split('\n');
+  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  assert.ok(idx !== -1, 'demo-1 must have a row');
+  const ctxLine = ctxPortion(lines[idx + 1]);
+  assert.ok(!ctxLine.includes(DIM), 'must not be dimmed while the session is live');
+  assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '143K ctx · sonnet-5');
+});
+
+test('render dims the ctx line once the session has closed, but keeps showing the last known value', () => {
+  const p = writeTranscript('closed.jsonl', [
+    assistantLine('claude-opus-4-8', { input_tokens: 900000, cache_creation_input_tokens: 100000, cache_read_input_tokens: 0 }),
+  ]);
+  const state = applyEvents(createState(), [ev(1, 'session_start', { transcript: p }), ev(2, 'session_end')]);
+  const lines = render(resolveContext(lane2), state).split('\n');
+  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const ctxLine = ctxPortion(lines[idx + 1]);
+  assert.ok(ctxLine.includes(DIM), 'must be dimmed once the session has closed');
+  assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '1.0M ctx · opus-4-8');
+});
+
+test('render shows — in the ctx line when no transcript has ever been recorded for the lane', () => {
+  const lines = render(resolveContext(lane2), createState()).split('\n');
+  const idx = lines.findIndex((l) => l.includes('demo-3'));
+  assert.ok(idx !== -1, 'demo-3 must have a row');
+  const ctxLine = ctxPortion(lines[idx + 1]);
+  assert.ok(ctxLine.includes(DIM), 'no live session either, so dimmed');
+  assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '—');
+});
+
+test('render uses a supplied ctxInfo map instead of reading the transcript itself — the throttle runUi relies on', () => {
+  const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/never/actually/read.jsonl' })]);
+  const ctxInfo = new Map([['/never/actually/read.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);
+  const lines = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo).split('\n');
+  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  assert.ok(idx !== -1, 'demo-1 must have a row');
+  const stripped = ctxPortion(lines[idx + 1]).replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  assert.equal(stripped.trim(), '2K ctx · sonnet-5', 'must read the supplied map, never touch the (nonexistent) file on disk');
+});
+
+test('render treats a transcript missing from ctxInfo as unknown, not as licence to read it directly', () => {
+  const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/some/real/path.jsonl' })]);
+  const lines = render(resolveContext(lane2), state, Date.now(), undefined, new Map()).split('\n');
+  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const stripped = ctxPortion(lines[idx + 1]).replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  assert.equal(stripped.trim(), '—', 'a throttled cache miss shows — until the next refresh, not a fresh direct read');
+});
+
+test('the ctx line dims for CLI-driven events too — reviewed is not a liveness signal, same reasoning as stage', () => {
+  const state = applyEvents(createState(), [
+    ev(1, 'session_start', { transcript: '/tmp/x.jsonl' }),
+    ev(2, 'reviewed'), // /gate marked it clean — unrelated to whether a session is attached
+  ]);
+  const ctxInfo = new Map([['/tmp/x.jsonl', { tokens: 5000, model: 'claude-sonnet-5' }]]);
+  const lines = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo).split('\n');
+  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  assert.ok(ctxPortion(lines[idx + 1]).includes(DIM), '"reviewed" must not read as a live session, even right after one closed');
+});
+
+test('render never throws when a lane carries a transcript path that no longer resolves to anything readable', () => {
+  const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/nowhere/gone.jsonl' })]);
+  assert.doesNotThrow(() => render(resolveContext(lane2), state));
+});
+
+// ── hooks/emit.mjs: which hooks carry `transcript`, and which never do ──
+const runEmitHook = (payload) =>
+  execFileSync('node', [join(ROOT, 'hooks', 'emit.mjs')], { input: JSON.stringify(payload), encoding: 'utf8' });
+
+test('emit.mjs: SessionStart and Stop forward transcript_path onto the emitted event', () => {
+  runEmitHook({
+    hook_event_name: 'SessionStart',
+    cwd: lane2,
+    session_id: 'emit-session-start-with-path',
+    source: 'startup',
+    transcript_path: '/tmp/emit-a.jsonl',
+  });
+  const started = readEvents().findLast((e) => e.session === 'emit-session-start-with-path');
+  assert.ok(started, 'SessionStart must emit session_start');
+  assert.equal(started.ev, 'session_start');
+  assert.equal(started.detail, 'startup');
+  assert.equal(started.transcript, '/tmp/emit-a.jsonl');
+
+  runEmitHook({
+    hook_event_name: 'Stop',
+    cwd: lane2,
+    session_id: 'emit-stop-with-path',
+    transcript_path: '/tmp/emit-b.jsonl',
+  });
+  const stopped = readEvents().findLast((e) => e.session === 'emit-stop-with-path');
+  assert.ok(stopped, 'Stop must emit idle');
+  assert.equal(stopped.ev, 'idle');
+  assert.equal(stopped.transcript, '/tmp/emit-b.jsonl');
+});
+
+test('emit.mjs: Stop with no transcript_path in the payload still writes an explicit null, not a missing key', () => {
+  runEmitHook({ hook_event_name: 'Stop', cwd: lane2, session_id: 'emit-stop-no-path' });
+  const stopped = readEvents().findLast((e) => e.session === 'emit-stop-no-path');
+  assert.ok(stopped, 'Stop must still emit idle with no transcript_path in the payload');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(stopped, 'transcript'),
+    true,
+    'Stop always contributes a transcript key, even when the value is null',
+  );
+  assert.equal(stopped.transcript, null);
+});
+
+test('emit.mjs: UserPromptSubmit and SessionEnd never carry a transcript key, unlike Stop/SessionStart', () => {
+  runEmitHook({
+    hook_event_name: 'UserPromptSubmit',
+    cwd: lane2,
+    session_id: 'emit-user-prompt',
+    transcript_path: '/tmp/should-not-appear.jsonl',
+  });
+  const prompted = readEvents().findLast((e) => e.session === 'emit-user-prompt');
+  assert.ok(prompted, 'UserPromptSubmit must still emit busy');
+  assert.equal(prompted.ev, 'busy');
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(prompted, 'transcript'),
+    false,
+    'transcript_path must not leak onto every hook — only Stop/SessionStart carry it, to avoid growing the log on the highest-frequency hook',
+  );
+
+  runEmitHook({
+    hook_event_name: 'SessionEnd',
+    cwd: lane2,
+    session_id: 'emit-session-end',
+    reason: 'clear',
+    transcript_path: '/tmp/should-not-appear-either.jsonl',
+  });
+  const ended = readEvents().findLast((e) => e.session === 'emit-session-end');
+  assert.ok(ended, 'SessionEnd must still emit session_end');
+  assert.equal(ended.ev, 'session_end');
+  assert.equal(ended.detail, 'clear');
+  assert.equal(Object.prototype.hasOwnProperty.call(ended, 'transcript'), false);
 });
 
 // ── Run ─────────────────────────────────────────────────────────────

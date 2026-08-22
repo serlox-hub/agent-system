@@ -145,14 +145,19 @@ you cannot see is which one has been sitting waiting on you for twenty minutes.
 Appends are single-line JSON under 4KB, so POSIX `O_APPEND` keeps concurrent
 sessions from interleaving without any locking.
 
+`session_start` and `Stop`-driven `idle` events also carry `transcript`, the
+session's transcript file path — used by the dashboard to show live context
+(token count + model) on each lane's row, read fresh at render time rather
+than computed by the hook.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-23 assertions over a real throwaway git repo with real worktrees: issue
-extraction, lane numbering, event folding and its bounds,
+A single hand-rolled suite over a real throwaway git repo with real
+worktrees: issue extraction, lane numbering, event folding and its bounds,
 review-marker staleness, and every branch of the commit guard. No dependencies.
 
 Run it before publishing a change to `lib/`, `hooks/` or `ui/` — the guard's
