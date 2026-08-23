@@ -12,14 +12,14 @@
 
 import { fileURLToPath } from 'node:url';
 import { dirname, join, basename, resolve as resolvePath } from 'node:path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 
-const { resolveContext, emitWithContext, emit, expandHome, EVENTS_FILE, EVENTS_PREV, LANES_DIR, CONFIG_REL } =
+const { resolveContext, emitWithContext, emit, expandHome, EVENTS_FILE, EVENTS_PREV, LANES_DIR, CONFIG_REL, LANE_NAME_RE } =
   await import(join(ROOT, 'lib', 'context.mjs'));
 const { diffFingerprint, writeMark, REVIEW_MARK, BYPASS_MARK } = await import(
   join(ROOT, 'lib', 'marks.mjs')
@@ -451,6 +451,7 @@ switch (cmd) {
   case 'list':
   case 'new':
   case 'rm':
+  case 'reset':
   case 'switch':
   case 'dev':
   case 'stop':
@@ -462,9 +463,30 @@ switch (cmd) {
     const worktrees = await import(join(ROOT, 'lib', 'worktrees.mjs'));
     const lanes = worktrees.enumerateLanes(ctx.config);
     if (!lanes.length && cmd !== 'new') {
+      // worktreesDir can resolve correctly and still enumerate to zero lanes
+      // if every subdirectory predates D26 (this repo's own wt1/wt2, e.g.) —
+      // the generic "set worktreesDir" message is actively misleading there,
+      // since worktreesDir is not the thing that's wrong.
+      const wtDir = worktrees.worktreesDir(ctx.config);
+      let stray = [];
+      if (wtDir) {
+        try {
+          stray = readdirSync(wtDir, { withFileTypes: true })
+            .filter((d) => d.isDirectory() && !LANE_NAME_RE.test(d.name))
+            .map((d) => d.name);
+        } catch { /* unreadable — fall through to the generic message below */ }
+      }
+      if (stray.length) {
+        die(
+          `No lanes found under ${wtDir}, but it holds ${stray.join(', ')} — lanes are only ` +
+            `directories named lane<N> (D26, no auto-migration). Rename by hand, e.g.:\n` +
+            `  git worktree move ${join(wtDir, stray[0])} ${join(wtDir, 'lane1')}\n` +
+            'or see `lanes doctor` for the full list.',
+        );
+      }
       die(
         'No lanes found. Set worktreesDir with `lanes worktrees-dir <path>`, or create one:\n' +
-          '  lanes new <name> --branch <branch>',
+          '  lanes new',
       );
     }
 
@@ -486,63 +508,79 @@ switch (cmd) {
     }
 
     if (cmd === 'new') {
-      const name = rest.find((a) => !a.startsWith('-'));
-      if (!name) die('Usage: lanes new <name> [--branch <branch>] [--from <ref>]');
-      const branch = rest.includes('--branch') ? rest[rest.indexOf('--branch') + 1] : undefined;
       const from = rest.includes('--from') ? rest[rest.indexOf('--from') + 1] : undefined;
-      const plan = worktrees.planCreate(ctx.config, name);
-      if (plan.error) die(plan.error);
-      if (plan.createdDir) out(`${OK} created worktrees directory ${plan.createdDir}`);
-      if (plan.renumbered.length) {
-        out(`${WARN} creating "${name}" renumbers existing lanes, because lane numbers are`);
-        out('  the alphabetical position. Colours and ports move with the number:');
-        for (const r of plan.renumbered) out(`    ${r.name}: lane ${r.from} → ${r.to}`);
-        out(`  Name it so it sorts last (e.g. ${lanes[lanes.length - 1]?.name.replace(/\d+$/, (n) => Number(n) + 1) || 'x-5'}) to avoid this.`);
-        out();
-      }
-      const res = worktrees.createWorktree(ctx.config, name, branch, from);
+      const res = worktrees.createWorktree(ctx.config, from);
+      // Before the error check: createWorktree spreads `plan` (including a
+      // just-created worktreesDir) into its error return too, so a failed
+      // `git worktree add` must not hide that a directory was materialized.
+      if (res.createdDir) out(`${OK} created worktrees directory ${res.createdDir}`);
       if (res.error) die(res.error);
+      const worktree = basename(res.path);
       emit({
         ev: 'lane_created',
         project: ctx.project,
         lane: res.lane,
-        worktree: name,
-        // Without `--branch`, createWorktree checks out the base ref directly
-        // — a detached HEAD, not a branch named after `baseBranch` — so there
-        // is no real branch name to report yet, same as the line above.
-        branch: branch || null,
+        worktree,
+        // Always a detached checkout — there is no real branch name yet.
+        branch: null,
         path: res.path,
       });
-      out(`${OK} lane ${res.lane} — ${name}${branch ? ` on ${branch}` : ''}`);
+      out(`${OK} lane ${res.lane} — ${worktree}, detached at ${from || `origin/${worktrees.baseBranch(ctx.config)}`}`);
       out(`  ${res.path}`);
       break;
     }
 
     if (cmd === 'rm') {
       const force = rest.includes('--force');
-      const targets = select(rest.find((a) => !a.startsWith('-')));
-      if (!targets.length) die('Usage: lanes rm <lane|name> [--force]');
-      for (const l of targets) {
-        const res = worktrees.removeWorktree(ctx.config, l, { force });
-        if (res.error) {
-          out(`${BAD} ${res.error}`);
-          continue;
-        }
+      // A bare `lanes rm` must not default to "all": every lane detached at
+      // base (D26's resting state) is free, so an omitted selector could
+      // silently remove the whole stack. `all` is still available, explicitly.
+      const sel = rest.find((a) => !a.startsWith('-'));
+      if (!sel) die('Usage: lanes rm <lane|name|all> [--force]');
+      const targets = select(sel);
+      if (!targets.length) die('Usage: lanes rm <lane|name|all> [--force]');
+      const res = worktrees.removeWorktree(ctx.config, targets, { force });
+      for (const r of res.removed || []) {
         emit({
           ev: 'lane_removed',
           project: ctx.project,
-          lane: l.lane,
-          worktree: l.name,
-          branch: l.branch,
-          path: l.path,
-          detail: res.wasForced ? 'forced' : null,
+          lane: r.lane,
+          worktree: r.name,
+          branch: r.branch,
+          path: r.path,
+          detail: r.wasForced ? 'forced' : null,
         });
-        out(`${OK} removed lane ${l.lane} — ${res.removed}${res.wasForced ? ' (forced)' : ''}`);
-        if (res.branchKept) {
-          out(`${DIM}  branch ${res.branchKept} still exists — reusing this name needs`);
-          out(`  \`git branch -d ${res.branchKept}\` first, or \`lanes new ${res.removed} --branch <other>\`${RESET}`);
+        out(`${OK} removed lane ${r.lane} — ${r.name}${r.wasForced ? ' (forced)' : ''}`);
+        if (r.branchKept) {
+          out(`${DIM}  branch ${r.branchKept} still exists — reusing this number needs`);
+          out(`  \`git branch -d ${r.branchKept}\` first${RESET}`);
         }
       }
+      if (res.error) die(res.error);
+      break;
+    }
+
+    if (cmd === 'reset') {
+      const force = rest.includes('--force');
+      const sel = rest.find((a) => !a.startsWith('-'));
+      if (!sel) die('Usage: lanes reset <lane> [--force]');
+      const [target] = select(sel);
+      const res = worktrees.resetLane(ctx.config, target, { force });
+      if (res.error) die(res.error);
+      // A lane going idle-branch-free is as much a fresh start as `lanes new`
+      // — the dashboard row must not keep showing the just-finished task's
+      // stage/state/timer/context indefinitely (applyEvents treats lane_reset
+      // like lane_created).
+      emit({
+        ev: 'lane_reset',
+        project: ctx.project,
+        lane: res.lane,
+        worktree: res.name,
+        branch: null,
+        path: target.path,
+      });
+      out(`${OK} lane ${res.lane} (${res.name}) → detached at origin/${res.branch}`);
+      if (res.branchDeleted) out(`${DIM}  deleted merged branch ${res.branchDeleted}${RESET}`);
       break;
     }
 
@@ -602,7 +640,7 @@ switch (cmd) {
         out(`${w(l.lane, 3)}${w(l.name, 16)}${w(l.branch, 28)}${marks.padEnd(14 + 9)}${rendered}`);
       }
       out();
-      out(`${DIM}~n uncommitted · +n ahead of origin/${worktrees.baseBranch(ctx.config)} · -n behind · ? = origin/${worktrees.baseBranch(ctx.config)} could not be resolved · svc! = running on a port from before a renumber${RESET}`);
+      out(`${DIM}~n uncommitted · +n ahead of origin/${worktrees.baseBranch(ctx.config)} · -n behind · ? = origin/${worktrees.baseBranch(ctx.config)} could not be resolved · svc! = running on a port a fresh computation no longer agrees with (e.g. after editing portBase)${RESET}`);
       break;
     }
 
@@ -712,6 +750,18 @@ switch (cmd) {
           : bad('worktrees', `${wtDir} does not exist, and neither does its parent ${DIM}(${wtSource})${RESET}`);
       } else {
         row(OK, 'worktrees', `${wtDir}  ${DIM}(${wtSource})${RESET}`);
+        let stray = [];
+        try {
+          stray = readdirSync(wtDir, { withFileTypes: true })
+            .filter((d) => d.isDirectory() && !LANE_NAME_RE.test(d.name))
+            .map((d) => d.name);
+        } catch { /* unreadable — already reported by the row above */ }
+        if (stray.length) {
+          warn(
+            'lane naming',
+            `non-\`lane<N>\` director${stray.length > 1 ? 'ies' : 'y'} under worktreesDir, ignored by lanes: ${stray.join(', ')}`,
+          );
+        }
       }
 
       const basePort = ctx.config?.basePort;
@@ -759,8 +809,9 @@ switch (cmd) {
         '',
         'Lanes',
         '  lanes list                     Worktrees, branches, dirty state, services',
-        '  lanes new <name> [--branch b]  Create a lane (warns if it renumbers others)',
-        '  lanes rm <sel> [--force]       Remove a lane; refuses to lose work',
+        '  lanes new [--from <ref>]       Create the next lane, detached at base (or --from)',
+        '  lanes rm <sel> [--force]       Remove the top lane(s); refuses to lose work',
+        '  lanes reset <n> [--force]      Detach a lane back to a clean base state',
         '  lanes switch <n> <b> [--create]  Point a lane at another branch',
         '  lanes free                     Lanes safe to take over (used by /architect)',
         '  lanes each <cmd> [--lanes 1,3] Run a command in each lane',

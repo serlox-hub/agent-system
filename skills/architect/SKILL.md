@@ -190,9 +190,11 @@ fact.
    git fetch origin && git checkout -b <prefix>/<number>-<kebab-slug> origin/main
    ```
    **Never `git checkout main` first.** Git refuses to check out a branch that is
-   already checked out in another worktree, and with several lanes one of them
-   usually holds the base branch. Branching straight off `origin/<base>` is both
-   worktree-safe and fresher — no pull needed.
+   already checked out in another worktree, and the primary worktree (the repo's
+   own root, outside `worktreesDir`) almost always holds the base branch — lanes
+   themselves stay detached, never on a branch literally named after it.
+   Branching straight off `origin/<base>` is both worktree-safe and fresher — no
+   pull needed.
 4. Link the branch to the issue so GitHub shows the relationship:
    ```bash
    git push origin HEAD:refs/heads/$(git branch --show-current)

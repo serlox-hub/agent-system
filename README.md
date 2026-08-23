@@ -65,6 +65,7 @@ repo you have not thought about yet.
 ```
 lanes list               Worktrees, branches, dirty state, running services
 lanes new / rm / switch  Lane lifecycle; refuses to lose work
+lanes reset <n>          Detach a lane back to a clean base state
 lanes free               Lanes safe to take over (what /architect checks)
 lanes each <cmd>         Run a command in every lane
 lanes dev / stop / logs  This project's services, per lane
@@ -80,11 +81,13 @@ lanes allow-commit       One-shot bypass of the commit guard
 lanes stage <name>       Emit a pipeline stage event (the skills do this)
 ```
 
-Lane N is the Nth subdirectory of `worktreesDir` in alphabetical order.
-Alphabetical because the number has to stay stable: git's own worktree ordering
-shifts when you remove and re-add one, and a lane number that moves is worse than
-no lane number. `lanes new` warns before creating a lane that would renumber the
-others.
+Each lane is `lane<N>` under `worktreesDir` — `lanes new` picks `N` = max(existing) + 1
+and checks it out detached at `origin/<base>`, so the number is baked into the
+directory name and never shifts when another lane is added or removed. `lanes rm`
+only pops the top of the stack (a contiguous run ending at the highest lane
+number, refused otherwise), so the next `lanes new` reuses the number it just
+freed. `lanes reset <n>` returns a lane to that same clean, detached-at-base
+state without removing it — for after a task ends, with no lane to re-create.
 
 `worktreesDir`, `basePort` and each service's own `portBase` are all
 per-machine-overridable: `lanes worktrees-dir <path>`, `lanes base-port <n>`
@@ -138,6 +141,7 @@ dashboard costs zero tokens.
 | `reviewed` | `/gate` marked the diff clean |
 | `commit_blocked` / `commit_bypass` / `commit_reviewed` | commit guard outcomes |
 | `lane_created` / `lane_removed` | `lanes new` / `lanes rm` created or removed a lane |
+| `lane_reset` | `lanes reset` returned a lane to a clean base state — the dashboard row starts fresh, same as `lane_created` |
 
 `idle` is the one that earns the dashboard its keep: with four lanes, the thing
 you cannot see is which one has been sitting waiting on you for twenty minutes.
