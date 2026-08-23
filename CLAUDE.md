@@ -7,8 +7,10 @@ If you are about to "clean up", "simplify" or "fix" something that looks odd,
 check there first — most of what looks odd here is load-bearing, and the entry
 names the constraint you are about to break.
 
-It is kept under 150 lines on purpose, so always reading it is cheaper than the
-machinery of deciding whether to.
+No line-count budget — `.md` files are exempt outright, since decision logs need
+the room prose takes. Entries are pruned when their code is gone or their
+decision reversed, not against a line count, so it stays worth reading in full
+each time.
 
 ## Adding and pruning entries
 
@@ -22,8 +24,7 @@ being read, which costs more than the missing entry would.
 
 **Delete entries whose code is gone or whose decision was reversed.** Git keeps
 the history; this file keeps only what is still load-bearing. Prune when you touch
-the code an entry describes — never drop a live entry to make room, and never
-raise the budget to avoid pruning.
+the code an entry describes — never drop a live entry to make room.
 
 Scope definitions and entry format live in `DECISIONS.md`'s own header. The
 proposal mechanics live in the skills that do the proposing:

@@ -4,9 +4,10 @@
  * Design constraints:
  *   - Zero token cost. This is a plain Node process reading a file; the model
  *     is never involved and never sees any of it.
- *   - Lane numbers are stable: the alphabetical position under `worktreesDir`,
- *     not git's own worktree ordering, which shifts on add/remove. A lane number
- *     that moves is worse than no lane number.
+ *   - Lane numbers are stable: baked into the `lane<N>` directory name at
+ *     creation time (D26), never recomputed from position. `lanes rm` frees a
+ *     number back up for reuse by the next `lanes new`, so it can still repeat
+ *     across two different worktrees over time — see applyEvents below.
  *   - Bounded memory. It is meant to sit in a terminal for weeks, so state is
  *     folded incrementally and history is capped — nothing accumulates.
  *   - Never crash. A malformed line, a vanished directory or a resize must
@@ -121,6 +122,7 @@ const STATES = {
   session_end: { icon: '○', color: C.grey, label: () => 'offline' },
   lane_created: { icon: '+', color: C.green, label: () => 'lane created' },
   lane_removed: { icon: '−', color: C.grey, label: () => 'lane removed' },
+  lane_reset: { icon: '↺', color: C.grey, label: () => 'lane reset' },
 };
 
 function stateOf(ev) {
@@ -170,11 +172,13 @@ export function createState() {
  * since the last call, so cost is proportional to what arrived — not to how
  * long the dashboard has been running.
  *
- * Lane key is `${project}#${worktree}`, never the lane number: the number is
- * only the alphabetical position under `worktreesDir` right now (D9), so it is
- * reused as worktrees come and go. Keying by it — like the bug D18 already
- * fixed once for lib/services.mjs — makes a freshly created lane inherit a
- * removed one's stale state the moment it lands on the same position.
+ * Lane key is `${project}#${worktree}`, never the lane number: outside
+ * `worktreesDir` `lane` is `null`, so a numeric key isn't even available
+ * there. Under D26's `lane<N>` naming the two are otherwise the same value —
+ * `lanes rm` frees a number and the next `lanes new` deliberately reuses it —
+ * so it is this function, not the key, that stops a freshly created lane from
+ * inheriting a removed one's stale state (D18): `lane_removed` below deletes
+ * it outright, `lane_created` starts the row from `{}`.
  */
 export function applyEvents(state, events) {
   for (const e of events) {
@@ -187,9 +191,10 @@ export function applyEvents(state, events) {
     } else {
       // A fresh occupant starts from nothing — merging into the outgoing
       // lane's leftover state is exactly the name-reuse bug this guards
-      // against (lane numbers already had this fixed by keying on name; a
-      // recreated name needs the same reset lane numbers get automatically).
-      const prev = e.ev === 'lane_created' ? {} : (state.lanes.get(key) || {});
+      // against. `lane_reset` gets the same treatment as `lane_created`: a
+      // lane returned to a clean base state is a fresh start too, and must
+      // not keep showing the just-finished task's stage/state/timer/context.
+      const prev = (e.ev === 'lane_created' || e.ev === 'lane_reset') ? {} : (state.lanes.get(key) || {});
       state.lanes.set(key, {
         project: e.project ?? prev.project,
         lane: e.lane ?? prev.lane,
@@ -234,9 +239,8 @@ function rowsFor(ctx, lanes, laneInfo) {
     seen.add(key);
     const prev = lanes.get(key) || { ev: 'session_end' };
     // `lane`/`worktree`/`dirty`/`ahead`/`behind`/`baseKnown` always come from
-    // the live git read, never from the stored event — those are keyed by
-    // name but may carry a lane number recorded back when this name sat at a
-    // different position, and never carried divergence data at all.
+    // the live git read, never from the stored event — stored events never
+    // carried divergence data at all.
     rows.push({
       ...prev,
       ...l,
@@ -311,8 +315,8 @@ function serviceCell(ctx, r) {
   const st = serviceStatus(first);
   let text = '—';
   if (st.running) {
-    // The bound port, not the freshly computed one — a lane can be
-    // renumbered while the service stays up, same as `lanes list`. The `!`
+    // The bound port, not the freshly computed one — `portBase` can be
+    // edited while the service stays up, same as `lanes list`. The `!`
     // marker applies to the URL too: a url template is filled with the
     // freshly computed port, which can just as easily be stale.
     const { port, moved } = boundPort(first, st);

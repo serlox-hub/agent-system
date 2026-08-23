@@ -10,11 +10,19 @@ Each entry carries a metadata line: `scope · YYYY-MM · location [· #issue]`.
 - **`core`** — internal mechanics of this repo. Only matters to someone editing
   it; goes stale when the implementation is rewritten.
 
-Policy for adding, pruning and formatting: see `CLAUDE.md`. Budget: under 150
-lines, held by deleting entries whose code is gone — never by deleting a live one
-to make room.
+Policy for adding, pruning and formatting: see `CLAUDE.md`. No line-count
+budget — `.md` files are exempt outright, since decision logs need the room
+prose takes. Prune only entries whose code is gone or whose decision was
+reversed, never to make room.
 
 ---
+
+## D26 — `lanes new` no longer accepts a name; every lane is auto-numbered (`lane<N>`)
+`product` · 2026-08 · `lib/worktrees.mjs:planCreate` · #5
+Lane identity moves from user-chosen to tool-generated, so numbers stay stable
+across append/pop — a free-form name could still collide or reorder. Rejected:
+keeping free-form names — it either forces the same convention anyway, or
+tolerates the renumber-on-removal bug this exists to fix.
 
 ## D25 — The ctx cell shows a raw token count + model tag, never a percentage
 `core` · 2026-08 · `ui/dashboard.mjs:ctxCell` · #4
@@ -107,19 +115,24 @@ churns lane numbers, and lane numbers drive colour and port.
 killing the wrapper shell leaves the real dev server orphaned, and the failure is
 silent until you find the port still bound.
 
-## D18 — State keyed to a worktree is keyed by name, never by lane number
-`core` · 2026-08 · `lib/services.mjs:resolveServices`, `ui/dashboard.mjs:applyEvents`
-Lane numbers are positional and shift when a lane is added or removed, leaving
-service bookkeeping or the dashboard's folded state pointing at — or inheriting
-from — the wrong worktree; the bound port is recorded in the pid file likewise.
-Rejected: keying by lane — it's what the UI displays, but silently wrong on add/remove.
+## D18 — State keyed to a worktree is keyed by name; reuse is closed by explicit lifecycle handling, not by the key
+`core` · 2026-08 · `lib/services.mjs:resolveServices`, `ui/dashboard.mjs:applyEvents`, `lib/worktrees.mjs:removeWorktree`
+Keyed by name because `lane` is `null` for any worktree outside `worktreesDir`
+— keying by lane number there is not an option at all. Under D26's `lane<N>`
+naming, name and lane number are the same value, so the key alone no longer
+protects against a freed number's state leaking into its next occupant: what
+actually closes that is `removeWorktree` refusing while a declared service is
+still running, and `applyEvents` deleting folded state on `lane_removed` and
+resetting it on `lane_created`. Rejected: keying by lane — it's what the UI
+displays, but is `null` outside `worktreesDir` and buys nothing extra inside it.
 
 ## D17 — Lane colours live per machine, never in the project config
 `product` · 2026-08 · `lib/colors.mjs`, `lanes color`
-Rejected: a `laneColors` array in the committed config — lane numbers come from
-each developer's own worktree names, so lane 3 is a different branch per machine
-and a shared palette indexed by it is meaningless. File format is `N=hex` so a
-symlink from another tool's colour file syncs them with no code coupling.
+Rejected: a `laneColors` array in the committed config — lane numbers are
+auto-generated identically on every machine, but which branch actually sits in
+lane 3 is independent per machine and per work history, so a shared palette
+indexed by number is meaningless. File format is `N=hex` so a symlink from
+another tool's colour file syncs them with no code coupling.
 
 ## D16 — The CLI is not installed anywhere; PATH points at this repo's `bin/`
 `product` · 2026-08 · `install.mjs`, `docs/SETUP.md`
@@ -132,13 +145,6 @@ Rejected: copying the CLI — a stale copy is worse than no CLI.
 Rejected: an extensionless Node file with a shebang — its module type comes from
 the nearest `package.json`, which breaks as soon as anyone symlinks or copies the
 CLI out of the repo. The wrapper hands Node an explicit `.mjs` path instead.
-
-## D9 — Lane numbers are the alphabetical position under `worktreesDir`
-`core` · 2026-08 · `lib/context.mjs:resolveLane`
-The number is what the dashboard colour and the dev-server port hang off, so it
-has to be stable. Rejected: `git worktree list` order — it is roughly creation
-order, so removing and re-adding a worktree renumbers every lane after it, and a
-lane number that moves is worse than no lane number.
 
 ## D8 — One append-only JSONL for events, no locking
 `core` · 2026-08 · `lib/context.mjs:emit`

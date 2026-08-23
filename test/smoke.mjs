@@ -69,9 +69,9 @@ writeFileSync(
 git(repo, 'add', '-A');
 git(repo, 'commit', '-qm', 'init');
 for (const n of [1, 2, 3]) {
-  git(repo, 'worktree', 'add', '-q', join(wtDir, `demo-${n}`), '-b', `feat/${400 + n}-thing`);
+  git(repo, 'worktree', 'add', '-q', join(wtDir, `lane${n}`), '-b', `feat/${400 + n}-thing`);
 }
-const lane2 = join(wtDir, 'demo-2');
+const lane2 = join(wtDir, 'lane2');
 
 // ── Pure logic ──────────────────────────────────────────────────────
 test('issueFromBranch pulls the number out of the default pattern', () => {
@@ -90,12 +90,15 @@ test('issueFromBranch survives an invalid pattern instead of throwing', () => {
   assert.equal(issueFromBranch('feat/9-x', { branch: { pattern: '([' } }), '9');
 });
 
-test('lane numbers are the 1-based alphabetical position under worktreesDir', () => {
-  const cfg = { worktreesDir: wtDir };
-  assert.equal(resolveLane(join(wtDir, 'demo-1'), cfg).lane, 1);
-  assert.equal(resolveLane(join(wtDir, 'demo-3'), cfg).lane, 3);
-  assert.equal(resolveLane('/nowhere/demo-9', cfg).lane, null);
-  assert.equal(resolveLane(join(wtDir, 'demo-2'), {}).lane, null, 'no worktreesDir means no lanes');
+test('resolveLane parses the lane number straight out of the lane<N> directory name (D26)', () => {
+  // No filesystem read and no worktreesDir dependency at all — the number is
+  // baked into the name at creation time, so a nonexistent path still parses,
+  // and a missing/empty config changes nothing.
+  assert.equal(resolveLane(join(wtDir, 'lane1'), {}).lane, 1);
+  assert.equal(resolveLane('/nowhere/lane13', {}).lane, 13, 'no lexicographic-vs-numeric confusion past lane9');
+  assert.equal(resolveLane(join(wtDir, 'lane2'), { worktreesDir: wtDir }).lane, 2, 'config is accepted but unused');
+  assert.equal(resolveLane(join(wtDir, 'not-a-lane'), {}).lane, null, 'a non-conforming directory name is not a lane');
+  assert.equal(resolveLane('', {}).lane, null);
 });
 
 test('findProject walks up to the config and returns null outside a project', () => {
@@ -118,7 +121,7 @@ test('resolveContext ties worktree, lane, port, branch and issue together', () =
   assert.equal(ctx.optedIn, true);
   assert.equal(ctx.project, 'demo');
   assert.equal(ctx.lane, 2);
-  assert.equal(ctx.worktree, 'demo-2');
+  assert.equal(ctx.worktree, 'lane2');
   assert.equal(ctx.port, '3002');
   assert.equal(ctx.branch, 'feat/402-thing');
   assert.equal(ctx.issue, '402');
@@ -408,13 +411,13 @@ test('commitGuard: false disables the block entirely', () => {
 });
 
 // ── Dashboard state ─────────────────────────────────────────────────
-const ev = (ts, e, extra = {}) => ({ ts, ev: e, project: 'demo', lane: 1, worktree: 'demo-1', ...extra });
+const ev = (ts, e, extra = {}) => ({ ts, ev: e, project: 'demo', lane: 1, worktree: 'lane1', ...extra });
 
 test('applyEvents keeps only the latest state per lane', () => {
   const s = applyEvents(createState(), [ev(1, 'session_start'), ev(2, 'agent_start', { agent: 'code-reviewer' })]);
   assert.equal(s.lanes.size, 1);
-  assert.equal(s.lanes.get('demo#demo-1').ev, 'agent_start');
-  assert.equal(s.lanes.get('demo#demo-1').agent, 'code-reviewer');
+  assert.equal(s.lanes.get('demo#lane1').ev, 'agent_start');
+  assert.equal(s.lanes.get('demo#lane1').agent, 'code-reviewer');
 });
 
 test('agent_end clears the running agent; busy is kept out of history', () => {
@@ -423,7 +426,7 @@ test('agent_end clears the running agent; busy is kept out of history', () => {
     ev(2, 'agent_end'),
     ev(3, 'busy'),
   ]);
-  assert.equal(s.lanes.get('demo#demo-1').agent, null);
+  assert.equal(s.lanes.get('demo#lane1').agent, null);
   assert.equal(s.history.length, 2, 'busy is noise, it fires on every message');
 });
 
@@ -433,30 +436,47 @@ test('lane_removed deletes the lane outright, so a same-named lane never inherit
     ev(2, 'stage', { stage: 'review' }),
     ev(3, 'lane_removed'),
   ]);
-  assert.equal(s.lanes.has('demo#demo-1'), false, 'the removed lane must leave no trace to inherit from');
+  assert.equal(s.lanes.has('demo#lane1'), false, 'the removed lane must leave no trace to inherit from');
 
   const recreated = applyEvents(s, [ev(4, 'lane_created', { branch: 'feat/999-other' })]);
-  const row = recreated.lanes.get('demo#demo-1');
+  const row = recreated.lanes.get('demo#lane1');
   assert.equal(row.issue, undefined, 'a fresh lane must not inherit the old occupant\'s issue');
   assert.equal(row.stage, undefined, 'nor its stage');
   assert.equal(row.branch, 'feat/999-other');
+});
+
+test('lane_reset is treated like lane_created — the row starts fresh instead of keeping the finished task\'s state', () => {
+  const s = applyEvents(createState(), [
+    ev(1, 'session_start', { issue: '402' }),
+    ev(2, 'stage', { stage: 'gate' }),
+    ev(3, 'idle'),
+  ]);
+  const before = s.lanes.get('demo#lane1');
+  assert.equal(before.stage, 'gate');
+  assert.equal(before.ev, 'idle');
+
+  const reset = applyEvents(s, [ev(4, 'lane_reset')]);
+  const row = reset.lanes.get('demo#lane1');
+  assert.equal(row.issue, undefined, 'a reset lane must not keep the finished task\'s issue');
+  assert.equal(row.stage, undefined, 'nor its stage');
+  assert.equal(row.ev, 'lane_reset', 'the row itself reflects the reset, not the last session event');
 });
 
 test('applyEvents is incremental — folding twice equals folding once', () => {
   const events = [ev(1, 'session_start'), ev(2, 'stage', { stage: 'review' })];
   const once = applyEvents(createState(), events);
   const twice = applyEvents(applyEvents(createState(), [events[0]]), [events[1]]);
-  assert.deepEqual(twice.lanes.get('demo#demo-1'), once.lanes.get('demo#demo-1'));
+  assert.deepEqual(twice.lanes.get('demo#lane1'), once.lanes.get('demo#lane1'));
 });
 
 test('a stage event is a milestone, not a liveness signal — it must not overwrite the lane state', () => {
   const onlyStage = applyEvents(createState(), [ev(1, 'stage', { stage: 'implement' })]);
-  const row = onlyStage.lanes.get('demo#demo-1');
+  const row = onlyStage.lanes.get('demo#lane1');
   assert.equal(row.ev, null, 'no session/agent event was ever seen for this lane');
   assert.equal(row.stage, 'implement');
 
   const withSession = applyEvents(createState(), [ev(1, 'session_start'), ev(2, 'stage', { stage: 'review' })]);
-  const row2 = withSession.lanes.get('demo#demo-1');
+  const row2 = withSession.lanes.get('demo#lane1');
   assert.equal(row2.ev, 'session_start', 'the stage marker must not clobber the last real state');
   assert.equal(row2.stage, 'review');
 });
@@ -483,12 +503,12 @@ test('render emits no clear-screen — that is the caller’s choice', () => {
   const ctx = resolveContext(lane2);
   const frame = render(ctx, applyEvents(createState(), [ev(1, 'idle')]));
   assert.ok(!frame.includes(`${ESC}[2J`), 'lanes status must not wipe the terminal');
-  assert.ok(frame.includes('demo-2'), 'declared lanes appear even with no events of their own');
+  assert.ok(frame.includes('lane2'), 'declared lanes appear even with no events of their own');
 });
 
 test('render shows a declared lane with no events at all as offline', () => {
   const frame = render(resolveContext(lane2), createState());
-  assert.ok(frame.includes('demo-3'));
+  assert.ok(frame.includes('lane3'));
   assert.ok(frame.includes('offline'));
 });
 
@@ -497,8 +517,8 @@ test('MARKS renders ? when the base ref cannot be resolved — never free, never
   // resolve `origin/main...HEAD` — every lane's baseKnown is false.
   const frame = render(resolveContext(lane2), createState());
   const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
-  const row = stripped.split('\n').find((l) => l.includes('demo-3'));
-  assert.ok(row, 'demo-3 must have a row');
+  const row = stripped.split('\n').find((l) => l.includes('lane3'));
+  assert.ok(row, 'lane3 must have a row');
   // Column order: # (3) WORKTREE (20) BRANCH (40) MARKS (12) ...
   const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
   assert.equal(marks, '?', 'unknown divergence must render as ?, distinct from both free and —');
@@ -509,13 +529,13 @@ test('MARKS renders dirty, ahead and behind together through the laneInfo seam, 
   // is the only way to exercise the coloured, non-"?" formatting path, since
   // the fixture repo (no `origin`) always makes the real read baseKnown: false.
   const fabricated = [{
-    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'feat/9-x',
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/9-x',
     isBase: false, dirty: true, dirtyCount: 3, ahead: 2, behind: 1, baseKnown: true,
   }];
   const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated);
   const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
-  const row = stripped.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
-  assert.ok(row, 'demo-1 must have a row');
+  const row = stripped.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
+  assert.ok(row, 'lane1 must have a row');
   const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
   assert.equal(marks, '~3 +2 -1', 'dirty, ahead and behind must all render together when the base is known');
   // The ANSI codes wrapped around each token must not shift where ISSUE
@@ -527,12 +547,12 @@ test('MARKS renders dirty, ahead and behind together through the laneInfo seam, 
 
 test('MARKS renders free for a clean lane on base once the base ref actually resolves', () => {
   const fabricated = [{
-    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'main',
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'main',
     isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
   }];
   const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated);
   const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
-  const row = stripped.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const row = stripped.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
   const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
   assert.equal(marks, 'free', 'clean and on base, with a resolvable base ref, must render free — never ?');
 });
@@ -542,12 +562,12 @@ test('rowsFor clears a stale issue once the branch is read and encodes none, rat
   // The branch read succeeded and the lane is back on `main` — no issue
   // number in it, which must win over the stale '402' from the event log.
   const backOnBase = [{
-    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'main',
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'main',
     isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
   }];
   const frame = render(resolveContext(lane2), state, Date.now(), backOnBase);
-  const row = frame.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
-  assert.ok(row, 'demo-1 must have a row');
+  const row = frame.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
+  assert.ok(row, 'lane1 must have a row');
   assert.ok(!row.includes('#402'), 'a resolved branch with no issue in it must clear the stale one, not keep displaying it');
 });
 
@@ -556,26 +576,26 @@ test('rowsFor keeps the last known issue when the branch read itself fails', () 
   // `branch: null` is how a failed git read is represented — must not be
   // treated the same as a successful read that found no issue in the branch.
   const failedRead = [{
-    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: null,
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: null,
     isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: false,
   }];
   const frame = render(resolveContext(lane2), state, Date.now(), failedRead);
-  const row = frame.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
-  assert.ok(row, 'demo-1 must have a row');
+  const row = frame.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
+  assert.ok(row, 'lane1 must have a row');
   assert.ok(row.includes('#402'), 'a failed branch read must not blank a previously known issue');
 });
 
 test('notifyTitle falls back to worktree, never to an unidentified "lane ?"', () => {
-  assert.equal(notifyTitle(ev(1, 'idle', { lane: null, issue: '12' })), 'demo · demo-1 · #12');
+  assert.equal(notifyTitle(ev(1, 'idle', { lane: null, issue: '12' })), 'demo · lane1 · #12');
   assert.equal(notifyTitle(ev(1, 'idle')), 'demo · lane 1');
 });
 
 test('RECENT rows fall back to worktree too — a lane-less event must still say which one', () => {
   const frame = render(
     resolveContext(lane2),
-    applyEvents(createState(), [ev(1, 'idle', { lane: null, worktree: 'demo-7' })]),
+    applyEvents(createState(), [ev(1, 'idle', { lane: null, worktree: 'lane7' })]),
   );
-  assert.ok(frame.includes('demo-7'), 'the worktree name must appear somewhere, not just a bare "·"');
+  assert.ok(frame.includes('lane7'), 'the worktree name must appear somewhere, not just a bare "·"');
 });
 
 test('a lane whose worktree was removed outside the dashboard is dropped, not stuck forever', () => {
@@ -607,16 +627,16 @@ test('a ghost row with no recorded path fails open — events written before tha
 
 test('a currently-declared lane bypasses the existsSync liveness check entirely, even with a stale path', () => {
   const state = createState();
-  state.lanes.set('demo#demo-1', {
-    project: 'demo', worktree: 'demo-1', ev: 'idle', since: 1,
+  state.lanes.set('demo#lane1', {
+    project: 'demo', worktree: 'lane1', ev: 'idle', since: 1,
     // A path left over from before a rename, say — must never be consulted:
     // declared lanes are matched by name against the live directory listing,
     // not verified against a path recorded in a past event.
-    path: join(wtDir, 'demo-1-stale-path-from-before-a-rename'),
+    path: join(wtDir, 'lane1-stale-path-from-before-a-rename'),
   });
   const frame = render(resolveContext(lane2), state);
-  const row = frame.split('\n').find((l) => l.includes('demo-1') && !l.includes('demo-10'));
-  assert.ok(row, 'demo-1 must still get a row');
+  const row = frame.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
+  assert.ok(row, 'lane1 must still get a row');
   assert.ok(row.includes('waiting for you'), 'a declared lane must keep its real state regardless of a stale path');
   assert.ok(!row.includes('offline'), 'it must not fall back to the no-events default either');
 });
@@ -627,10 +647,10 @@ const wtCfg = { project: 'demo', worktreesDir: wtDir, basePort: 300, branch: { b
 test('enumerateLanes reports branch, dirty state and position', () => {
   const all = worktrees.enumerateLanes(wtCfg);
   assert.equal(all.length, 3);
-  assert.deepEqual(all.map((l) => l.name), ['demo-1', 'demo-2', 'demo-3']);
+  assert.deepEqual(all.map((l) => l.name), ['lane1', 'lane2', 'lane3']);
   assert.equal(all[1].lane, 2);
   assert.equal(all[1].branch, 'feat/402-thing');
-  assert.equal(all[1].dirty, true, 'earlier tests left changes in demo-2');
+  assert.equal(all[1].dirty, true, 'earlier tests left changes in lane2');
   assert.equal(all[0].dirty, false);
 });
 
@@ -673,9 +693,9 @@ test('laneMarks: a lane with no git data at all stays empty — it must not clai
 
 test('lanes list shows a dirty lane as ~N and documents the new ? token in its legend', () => {
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: repo, encoding: 'utf8' });
-  const row = output.split('\n').find((l) => l.includes('demo-2'));
-  assert.ok(row, 'demo-2 must have a row');
-  assert.match(row, /~\d+/, 'demo-2 has real uncommitted changes from earlier tests, so ~N must still show in `lanes list`');
+  const row = output.split('\n').find((l) => l.includes('lane2'));
+  assert.ok(row, 'lane2 must have a row');
+  assert.match(row, /~\d+/, 'lane2 has real uncommitted changes from earlier tests, so ~N must still show in `lanes list`');
   assert.match(
     output,
     /\? = origin\/main could not be resolved/,
@@ -683,51 +703,54 @@ test('lanes list shows a dirty lane as ~N and documents the new ? token in its l
   );
 });
 
-test('planCreate detects the lanes a new name would renumber', () => {
-  const early = worktrees.planCreate(wtCfg, 'aaa');
-  assert.equal(early.lane, 1);
-  assert.deepEqual(early.renumbered.map((r) => `${r.name}:${r.from}->${r.to}`), [
-    'demo-1:1->2', 'demo-2:2->3', 'demo-3:3->4',
-  ]);
-  const late = worktrees.planCreate(wtCfg, 'demo-4');
-  assert.equal(late.lane, 4);
-  assert.deepEqual(late.renumbered, [], 'a name that sorts last disturbs nothing');
+test('planCreate picks max(existing lane numbers) + 1, never a plain count — a gap does not get backfilled', () => {
+  const gappedDir = join(TMP, 'gapped-wts');
+  mkdirSync(join(gappedDir, 'lane1'), { recursive: true });
+  mkdirSync(join(gappedDir, 'lane3'), { recursive: true }); // lane2 missing — a partial hand-migration
+  const plan = worktrees.planCreate({ worktreesDir: gappedDir });
+  assert.equal(plan.lane, 4, 'max(1,3)+1 = 4, not count(2)+1 = 3');
+  assert.equal(plan.path, join(gappedDir, 'lane4'));
 });
 
-test('planCreate refuses duplicates and unsafe names', () => {
-  assert.match(worktrees.planCreate(wtCfg, 'demo-1').error, /already exists/);
-  assert.match(worktrees.planCreate(wtCfg, '../escape').error, /invalid worktree name/);
-  assert.match(worktrees.planCreate(wtCfg, 'a b').error, /invalid worktree name/);
+test('planCreate starts at lane1 in an empty worktreesDir, and continues past real lanes otherwise', () => {
+  const emptyDir = join(TMP, 'empty-wts');
+  mkdirSync(emptyDir);
+  assert.equal(worktrees.planCreate({ worktreesDir: emptyDir }).lane, 1);
+  assert.equal(worktrees.planCreate(wtCfg).lane, 4, 'wtCfg already has lane1..lane3');
+});
+
+test('planCreate refuses when the computed path already exists', () => {
+  const clashDir = join(TMP, 'clash-wts');
+  mkdirSync(join(clashDir, 'lane1'), { recursive: true });
+  // Not a real lane directory — laneNames only counts directories matching
+  // lane<N>, so this file is invisible to the max() scan yet still occupies
+  // exactly the path max()+1 would compute.
+  writeFileSync(join(clashDir, 'lane2'), 'not a worktree');
+  assert.match(worktrees.planCreate({ worktreesDir: clashDir }).error, /already exists/);
 });
 
 test('planCreate creates worktreesDir itself when configured but missing', () => {
   const freshDir = join(TMP, 'fresh-wts');
   assert.equal(existsSync(freshDir), false, 'precondition: not created yet');
-  const plan = worktrees.planCreate({ worktreesDir: freshDir }, 'first');
+  const plan = worktrees.planCreate({ worktreesDir: freshDir });
   assert.equal(plan.error, undefined);
   assert.equal(existsSync(freshDir), true);
   assert.equal(plan.createdDir, freshDir);
   assert.equal(plan.lane, 1);
-  assert.equal(plan.path, join(freshDir, 'first'));
+  assert.equal(plan.path, join(freshDir, 'lane1'));
 
-  const again = worktrees.planCreate({ worktreesDir: freshDir }, 'second');
+  const again = worktrees.planCreate({ worktreesDir: freshDir });
   assert.equal(again.createdDir, null, 'does not report a re-creation once the dir exists');
+  assert.equal(again.lane, 1, 'planCreate only proposes a path — it never creates the worktree itself, so nothing changed on disk');
 });
 
-test('planCreate refuses a name when worktreesDir was never configured', () => {
-  assert.match(worktrees.planCreate({}, 'x').error, /not configured/);
-});
-
-test('planCreate validates the name before touching the filesystem', () => {
-  const notYet = join(TMP, 'not-yet-wts');
-  assert.equal(existsSync(notYet), false);
-  assert.match(worktrees.planCreate({ worktreesDir: notYet }, 'a b').error, /invalid worktree name/);
-  assert.equal(existsSync(notYet), false, 'a rejected name must not create the directory as a side effect');
+test('planCreate refuses when worktreesDir was never configured', () => {
+  assert.match(worktrees.planCreate({}).error, /not configured/);
 });
 
 test('planCreate refuses to create worktreesDir when its parent is also missing', () => {
   const orphan = join(TMP, 'no-such-parent', 'wts');
-  const plan = worktrees.planCreate({ worktreesDir: orphan }, 'first');
+  const plan = worktrees.planCreate({ worktreesDir: orphan });
   assert.match(plan.error, /does not exist, and neither does its parent/);
   assert.equal(existsSync(orphan), false);
 });
@@ -740,9 +763,279 @@ test('lane selectors cover every form and report the unknown ones', () => {
   assert.deepEqual(pick('2'), [2]);
   assert.deepEqual(pick('3,1'), [1, 3], 'normalised to lane order');
   assert.deepEqual(pick('1-2'), [1, 2]);
-  assert.deepEqual(pick('demo-3'), [3], 'by name');
+  assert.deepEqual(pick('lane3'), [3], 'by name');
   assert.deepEqual(pick('.', join(lane2, 'src')), [2], 'a subdirectory still resolves');
   assert.deepEqual(worktrees.parseSelector('9,nope', all).unknown, ['nope', '9']);
+});
+
+// ── Lane lifecycle (#5): removeWorktree's contiguous-suffix/running-service
+// blockers and resetLane need real git (fetch, checkout --detach, branch -d)
+// against a real remote, which the shared repo/wtDir fixture deliberately
+// does not have (see the MARKS '?' test above). Each test below gets its own
+// throwaway repo, bare origin and N lanes, each detached at origin/main —
+// the exact state `lanes new` itself produces — so removals in one test can
+// never leave stale state for another.
+function makeLanesFixture(name, laneCount = 1) {
+  const main = join(TMP, `lc-${name}`);
+  mkdirSync(main);
+  git(main, 'init', '-q', '-b', 'main');
+  git(main, 'config', 'user.email', 'test@test.test');
+  git(main, 'config', 'user.name', 'test');
+  writeFileSync(join(main, 'f.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'init');
+  const origin = join(TMP, `lc-${name}-origin.git`);
+  git(TMP, 'init', '-q', '--bare', origin);
+  git(main, 'remote', 'add', 'origin', origin);
+  git(main, 'push', '-q', 'origin', 'main');
+  const wtd = join(TMP, `lc-${name}-wts`);
+  mkdirSync(wtd);
+  const cfg = { project: `lc-${name}`, worktreesDir: wtd, basePort: 300, branch: { base: 'main' } };
+  for (let n = 1; n <= laneCount; n += 1) {
+    git(main, 'worktree', 'add', '-q', '--detach', join(wtd, `lane${n}`), 'origin/main');
+  }
+  return { main, wtd, cfg, origin };
+}
+
+test('enumerateLanes normalizes a detached-at-base lane: branch reads as the base name, isBase true, MARKS free', () => {
+  const { cfg } = makeLanesFixture('detached-base', 1);
+  const lane = worktrees.enumerateLanes(cfg)[0];
+  assert.equal(lane.branch, 'main', 'not the literal "HEAD"');
+  assert.equal(lane.isBase, true);
+  assert.deepEqual(worktrees.laneMarks(lane), [{ text: 'free', tone: 'free' }]);
+});
+
+test('removeWorktree refuses a non-top selection, naming the real top', () => {
+  const { cfg } = makeLanesFixture('rm-nontop', 3);
+  const lanes = worktrees.enumerateLanes(cfg);
+  const middle = lanes.find((l) => l.lane === 2);
+  const res = worktrees.removeWorktree(cfg, [middle]);
+  assert.match(res.error, /top is lane 3/);
+  assert.match(res.error, /lanes rm 3/);
+  assert.equal(existsSync(middle.path), true, 'refused — nothing removed');
+});
+
+test('removeWorktree refuses a lane with a running declared service, even at the contiguous top', () => {
+  const { cfg } = makeLanesFixture('rm-service', 3);
+  const svcCfgLc = { ...cfg, dev: { services: [{ name: 'web', command: 'echo web {port} && sleep 30', portBase: 300 }] } };
+  const lanes = worktrees.enumerateLanes(svcCfgLc);
+  const top = lanes[lanes.length - 1]; // lane3
+  const [web] = sv.resolveServices(svcCfgLc, top);
+  const started = sv.start(web);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const res = worktrees.removeWorktree(svcCfgLc, [top]);
+    assert.match(res.error, /lane 3 \(lane3\).*web.*still running.*lanes stop 3/s);
+    assert.equal(existsSync(top.path), true, 'refused — nothing removed');
+  } finally {
+    sv.stop(web);
+  }
+});
+
+test('removeWorktree removes a multi-lane top suffix in one call, descending, freeing the numbers for reuse', () => {
+  const { cfg } = makeLanesFixture('rm-multi', 3);
+  const [, two, three] = worktrees.enumerateLanes(cfg);
+  const res = worktrees.removeWorktree(cfg, [two, three]);
+  assert.equal(res.error, undefined, res.error);
+  assert.deepEqual(res.removed.map((r) => r.lane), [3, 2], 'removed in descending order');
+  assert.equal(existsSync(two.path), false);
+  assert.equal(existsSync(three.path), false);
+  assert.equal(worktrees.enumerateLanes(cfg).length, 1);
+
+  // max(existing) is now 1, so the next lane reuses 2 rather than jumping to 4.
+  assert.equal(worktrees.planCreate(cfg).lane, 2);
+});
+
+test('resetLane refuses a non-free lane unless --force', () => {
+  const { wtd, cfg } = makeLanesFixture('reset-dirty', 1);
+  writeFileSync(join(wtd, 'lane1', 'dirty.txt'), 'x');
+  const lane = worktrees.enumerateLanes(cfg)[0];
+  assert.equal(worktrees.isFree(lane), false);
+
+  const refused = worktrees.resetLane(cfg, lane);
+  assert.match(refused.error, /not free/);
+
+  const forced = worktrees.resetLane(cfg, lane, { force: true });
+  assert.equal(forced.error, undefined, forced.error);
+  assert.equal(forced.branch, 'main');
+});
+
+test('resetLane detaches a lane back to origin/<base>, deleting a fully-merged outgoing branch', () => {
+  const { wtd, cfg } = makeLanesFixture('reset-merged', 1);
+  const lanePath = join(wtd, 'lane1');
+  // A plain checkout -b with no new commits is trivially fully merged already.
+  git(lanePath, 'checkout', '-b', 'feat/1-x');
+  let lane = worktrees.enumerateLanes(cfg)[0];
+  assert.equal(lane.branch, 'feat/1-x');
+  assert.equal(lane.isBase, false);
+
+  const res = worktrees.resetLane(cfg, lane);
+  assert.equal(res.error, undefined, res.error);
+  assert.equal(res.branch, 'main');
+  assert.equal(res.branchDeleted, 'feat/1-x', 'fully merged into origin/main, so `branch -d` succeeds');
+
+  lane = worktrees.enumerateLanes(cfg)[0];
+  assert.equal(lane.branch, 'main', 'reports the base name, not the literal HEAD, once detached at its commit');
+  assert.equal(lane.isBase, true);
+  assert.equal(worktrees.isFree(lane), true);
+});
+
+test('resetLane keeps an outgoing branch that is not fully merged into base', () => {
+  const { wtd, cfg } = makeLanesFixture('reset-unmerged', 1);
+  const lanePath = join(wtd, 'lane1');
+  git(lanePath, 'checkout', '-b', 'feat/2-y');
+  writeFileSync(join(lanePath, 'new.txt'), 'x');
+  git(lanePath, 'add', '-A');
+  git(lanePath, 'commit', '-qm', 'unmerged work');
+  const lane = worktrees.enumerateLanes(cfg)[0];
+
+  const res = worktrees.resetLane(cfg, lane, { force: true }); // ahead of base, needs force
+  assert.equal(res.error, undefined, res.error);
+  assert.equal(res.branchDeleted, null, '`branch -d` refuses an unmerged branch, so it is kept');
+  assert.match(git(lanePath, 'branch', '--list', 'feat/2-y'), /feat\/2-y/, 'the branch itself must still exist');
+});
+
+test('resetLane surfaces a failed fetch as an error, never a silent stale reset', () => {
+  const { main, wtd, cfg } = makeLanesFixture('reset-fetch-fail', 1);
+  const lanePath = join(wtd, 'lane1');
+  git(main, 'remote', 'set-url', 'origin', join(TMP, 'nonexistent-origin.git'));
+  const lane = worktrees.enumerateLanes(cfg)[0];
+  const before = git(lanePath, 'rev-parse', 'HEAD').trim();
+
+  const res = worktrees.resetLane(cfg, lane);
+  assert.ok(res.error, 'a failed fetch must be reported, not swallowed');
+  assert.equal(git(lanePath, 'rev-parse', 'HEAD').trim(), before, 'HEAD must not move on a failed fetch');
+});
+
+test('enumerateLanes lists lane directories in numeric order, not lexicographic — lane10 must not sort before lane2', () => {
+  // No real git repos needed: laneNames()'s sort only reads directory names,
+  // and enumerateLanes' per-lane git calls fail harmlessly on a non-repo path
+  // (lib/git.mjs never throws), same tolerance the D26 rewrite relies on for
+  // any stray directory. Isolates the `laneNumber(a) - laneNumber(b)` sort
+  // this diff replaced a plain alphabetical `.sort()` with — lexicographic
+  // order would put lane10 and lane9 ahead of lane2.
+  const dir = join(TMP, 'numeric-sort-wts');
+  mkdirSync(dir);
+  for (const n of [10, 2, 9]) mkdirSync(join(dir, `lane${n}`));
+  const names = worktrees.enumerateLanes({ worktreesDir: dir }).map((l) => l.name);
+  assert.deepEqual(names, ['lane2', 'lane9', 'lane10']);
+});
+
+test('createWorktree passes --detach explicitly, so an unqualified --from matching exactly one remote branch does not trigger git\'s own DWIM checkout', () => {
+  // The exact regression the explicit --detach flag (added in this diff) guards
+  // against: `git worktree add <path> <name>` with no --detach, where <name>
+  // matches exactly one remote-tracking branch, makes git create AND check out
+  // a same-named local branch instead of landing detached — verified directly
+  // against the installed git in the setup above this test file's own fixture.
+  const { main, wtd, cfg } = makeLanesFixture('dwim-detach', 1);
+  git(main, 'checkout', '-qb', 'other-branch');
+  writeFileSync(join(main, 'extra.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'other work');
+  git(main, 'push', '-q', 'origin', 'other-branch');
+  git(main, 'checkout', '-q', 'main');
+
+  const res = worktrees.createWorktree(cfg, 'other-branch');
+  assert.equal(res.error, undefined, res.error);
+  assert.equal(res.path, join(wtd, 'lane2'));
+  assert.equal(
+    git(res.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim(),
+    'HEAD',
+    'must land detached, not on a local "other-branch" git DWIM\'d into existence',
+  );
+});
+
+test('createWorktree keeps createdDir in its error result — a failed git worktree add must not hide that worktreesDir was just materialized', () => {
+  const parent = join(TMP, 'cw-createddir-parent');
+  mkdirSync(parent);
+  const main = join(parent, 'main');
+  mkdirSync(main);
+  git(main, 'init', '-q', '-b', 'main');
+  git(main, 'config', 'user.email', 'test@test.test');
+  git(main, 'config', 'user.name', 'test');
+  writeFileSync(join(main, 'f.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'init');
+  const origin = join(parent, 'origin.git');
+  git(TMP, 'init', '-q', '--bare', origin);
+  git(main, 'remote', 'add', 'origin', origin);
+  git(main, 'push', '-q', 'origin', 'main');
+
+  // No lane exists yet, so createWorktree falls back to running git from
+  // process.cwd() (its own comment: "an existing worktree so it knows which
+  // repo we mean") — the real shape of the very first `lanes new` in a
+  // project, invoked from the repo root. chdir replicates that faithfully.
+  const freshDir = join(parent, 'wts');
+  const cfg = { worktreesDir: freshDir, branch: { base: 'main' } };
+  const originalCwd = process.cwd();
+  process.chdir(main);
+  try {
+    const res = worktrees.createWorktree(cfg, 'no-such-ref-at-all');
+    assert.ok(res.error, 'the bad ref must surface as an error');
+    assert.equal(existsSync(freshDir), true, 'worktreesDir was created before the failing git call');
+    assert.equal(res.createdDir, freshDir, 'the error result must not hide that a directory was materialized');
+    assert.equal(existsSync(res.path), false, 'the worktree itself must not exist after a failed add');
+  } finally {
+    process.chdir(originalCwd);
+  }
+});
+
+test('removeWorktree never reports the literal "HEAD" as a kept branch for a lane detached at a non-base ref (possible via `new --from <ref>`)', () => {
+  const { main, wtd, cfg } = makeLanesFixture('rm-detached-nonbase', 1);
+  git(main, 'checkout', '-qb', 'feat/9-x');
+  writeFileSync(join(main, 'extra.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'extra work');
+  git(main, 'push', '-q', 'origin', 'feat/9-x');
+  git(main, 'checkout', '-q', 'main');
+  // Detached straight at a non-base ref — not the "checked out exactly at
+  // origin/<base>" case enumerateLanes normalizes to the base name, so branch
+  // must stay the literal 'HEAD' and isBase must stay false.
+  git(main, 'worktree', 'add', '-q', '--detach', join(wtd, 'lane2'), 'origin/feat/9-x');
+
+  const lane = worktrees.enumerateLanes(cfg).find((l) => l.lane === 2);
+  assert.equal(lane.branch, 'HEAD', 'precondition: genuinely detached at a non-base ref, not normalized to it');
+  assert.equal(lane.isBase, false);
+
+  const res = worktrees.removeWorktree(cfg, [lane], { force: true }); // ahead of base, needs force
+  assert.equal(res.error, undefined, res.error);
+  assert.equal(res.removed[0].branchKept, null, 'a detached HEAD carries no branch to leave — must not be misreported as "HEAD" itself');
+});
+
+test('resetLane computes no outgoing branch to delete for a lane detached at a non-base ref', () => {
+  const { main, wtd, cfg } = makeLanesFixture('reset-detached-nonbase', 1);
+  git(main, 'checkout', '-qb', 'feat/8-y');
+  writeFileSync(join(main, 'extra.txt'), 'x');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'extra work');
+  git(main, 'push', '-q', 'origin', 'feat/8-y');
+  git(main, 'checkout', '-q', 'main');
+  git(main, 'worktree', 'add', '-q', '--detach', join(wtd, 'lane2'), 'origin/feat/8-y');
+
+  const lane = worktrees.enumerateLanes(cfg).find((l) => l.lane === 2);
+  assert.equal(lane.branch, 'HEAD', 'precondition: genuinely detached at a non-base ref');
+
+  const res = worktrees.resetLane(cfg, lane, { force: true }); // ahead of base, needs force
+  assert.equal(res.error, undefined, res.error);
+  assert.equal(res.branchDeleted, null, 'nothing to delete — a literal HEAD is not a real branch name');
+  assert.equal(res.branch, 'main');
+
+  const after = worktrees.enumerateLanes(cfg).find((l) => l.lane === 2);
+  assert.equal(after.isBase, true);
+});
+
+test('removeWorktree checks every selected lane before removing any — a dirty lane blocks the whole contiguous batch, not just itself', () => {
+  const { wtd, cfg } = makeLanesFixture('rm-multi-dirty', 3);
+  writeFileSync(join(wtd, 'lane2', 'dirty.txt'), 'x'); // lane2 only, not lane3
+  const [, two, three] = worktrees.enumerateLanes(cfg);
+  assert.equal(two.dirty, true);
+  assert.equal(three.dirty, false);
+
+  const res = worktrees.removeWorktree(cfg, [two, three]);
+  assert.match(res.error, /lane 2 \(lane2\)/, 'must name the actual blocked lane');
+  assert.match(res.error, /uncommitted/);
+  assert.equal(existsSync(two.path), true, 'nothing removed — everything is checked before anything is touched');
+  assert.equal(existsSync(three.path), true, 'lane3 was itself clean, but must not be removed ahead of the blocked lane2');
 });
 
 // ── Dev services ────────────────────────────────────────────────────
@@ -771,22 +1064,22 @@ test('ports concatenate base and lane, so services with close bases cannot colli
 });
 
 test('services resolve placeholders, cwd and their own port series', () => {
-  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, demo-2
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, lane2
   const svcs = sv.resolveServices(svcCfg, lane);
   assert.deepEqual(svcs.map((s) => s.name), ['web', 'api'], 'a service with no command is skipped');
   assert.equal(svcs[0].port, '3002');
   assert.equal(svcs[1].port, '4002', 'each service has its own base');
-  assert.match(svcs[0].command, /echo web 3002 in demo-2/);
+  assert.match(svcs[0].command, /echo web 3002 in lane2/);
   assert.equal(svcs[0].cwd, lane.path);
   assert.equal(svcs[1].cwd, join(lane.path, 'src'), 'cwd is relative to the worktree');
   assert.equal(svcs[0].url, 'http://localhost:3002');
 });
 
 test('service bookkeeping is keyed by worktree name, not lane number', () => {
-  const lane = worktrees.enumerateLanes(svcCfg)[2]; // lane 3, demo-3
+  const lane = worktrees.enumerateLanes(svcCfg)[2]; // lane 3, lane3
   const [web] = sv.resolveServices(svcCfg, lane);
-  assert.match(web.pidFile, /demo-demo-3-web\.pid$/, 'lane 3 does not appear in the key');
-  assert.match(web.logFile, /demo-demo-3-web\.log$/);
+  assert.match(web.pidFile, /demo-lane3-web\.pid$/, 'lane 3 does not appear in the key');
+  assert.match(web.logFile, /demo-lane3-web\.log$/);
 });
 
 test('a project with no dev.services declared resolves to none', () => {
@@ -799,7 +1092,7 @@ test('a project with no dev.services declared resolves to none', () => {
 // pidfile that never recorded a port — get direct coverage here rather than
 // only indirectly through the two callers.
 test('boundPort: stopped or running-with-a-matching-port returns the fresh port with no ! marker', () => {
-  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, demo-2 — web.port is '3002'
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, lane2 — web.port is '3002'
   const [web] = sv.resolveServices(svcCfg, lane);
   assert.deepEqual(sv.boundPort(web, { running: false, pid: null, port: null }), { port: '3002', moved: '' });
   assert.deepEqual(
@@ -810,7 +1103,7 @@ test('boundPort: stopped or running-with-a-matching-port returns the fresh port 
 });
 
 test('boundPort: a diverged bound port wins and is marked !; a pidfile with no recorded port falls back to the fresh one, unmarked', () => {
-  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, demo-2 — web.port is '3002'
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, lane2 — web.port is '3002'
   const [web] = sv.resolveServices(svcCfg, lane);
   assert.deepEqual(
     sv.boundPort(web, { running: true, pid: 123, port: '3009' }),
@@ -877,12 +1170,12 @@ test('dashboard: no dev.services declared shows — on the second line', () => {
 });
 
 test('dashboard: services declared but none running shows —, still with the count of the rest', () => {
-  const lane = worktrees.enumerateLanes(svcCfg)[0]; // demo-1
+  const lane = worktrees.enumerateLanes(svcCfg)[0]; // lane1
   // Precondition, not an assumption: an earlier test (`start records pid and
   // port…`) starts and stops `web` on this exact lane, with no try/finally —
   // if its own assertions ever throw between start and stop, this test would
   // otherwise fail on a leftover running process and blame the wrong code.
-  assert.equal(sv.status(sv.resolveServices(svcCfg, lane)[0]).running, false, 'precondition: no service left running on demo-1 by an earlier test');
+  assert.equal(sv.status(sv.resolveServices(svcCfg, lane)[0]).running, false, 'precondition: no service left running on lane1 by an earlier test');
   const ctx = { ...resolveContext(lane2), config: svcCfg };
   const frame = render(ctx, createState(), Date.now(), [lane]);
   // The count suffix applies to "whichever of the above is shown" — including
@@ -891,7 +1184,7 @@ test('dashboard: services declared but none running shows —, still with the co
 });
 
 test('dashboard: first declared service running with a url template shows the resolved URL, plus a count of the rest', () => {
-  const lane = worktrees.enumerateLanes(svcCfg)[1]; // demo-2, lane 2
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane2, lane 2
   const [web] = sv.resolveServices(svcCfg, lane);
   const started = sv.start(web);
   assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
@@ -904,28 +1197,34 @@ test('dashboard: first declared service running with a url template shows the re
   }
 });
 
-test('dashboard: a url-template service also gets marked ! after a renumber — the regression the boundPort extraction fixed', () => {
-  const lane = worktrees.enumerateLanes(svcCfg)[0]; // demo-1, lane 1
+test('dashboard: a url-template service also gets marked ! once its portBase is edited while running', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[0]; // lane1
   const [web] = sv.resolveServices(svcCfg, lane); // bound at http://localhost:3001
   const started = sv.start(web);
   assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
   try {
-    const ctx = { ...resolveContext(lane2), config: svcCfg };
-    // Same worktree, renumbered lane: bookkeeping is keyed by name, so the pid
-    // file (and the real bound port, 3001) survives, but the freshly computed
-    // port — and therefore the filled url template — moves to 3005. Before the
-    // boundPort extraction this branch never appended '!', so a URL nobody was
+    // Lane numbers no longer move at all (D26) — the only way a bound port and
+    // a fresh computation can still disagree while a service stays up is a
+    // portBase edit (e.g. `lanes service-port web 350`). Bookkeeping is keyed
+    // by worktree name, so the pid file (and the real bound port, 3001)
+    // survives the edit untouched, but the freshly computed port — and
+    // therefore the filled url template — moves. Before the boundPort
+    // extraction this branch never appended '!', so a URL nobody was
     // listening on rendered with zero indication it was stale.
-    const renumbered = { ...lane, lane: 5 };
-    const frame = render(ctx, createState(), Date.now(), [renumbered]);
-    assert.equal(serviceLineFor(frame, lane.name), 'http://localhost:3005! (+1 more)');
+    const edited = {
+      ...svcCfg,
+      dev: { services: svcCfg.dev.services.map((s) => (s.name === 'web' ? { ...s, portBase: 350 } : s)) },
+    };
+    const ctx = { ...resolveContext(lane2), config: edited };
+    const frame = render(ctx, createState(), Date.now(), [lane]);
+    assert.equal(serviceLineFor(frame, lane.name), 'http://localhost:3501! (+1 more)');
   } finally {
     sv.stop(web);
   }
 });
 
-test('dashboard: first declared service running with no url template shows localhost:<bound-port>, with ! after a renumber', () => {
-  const lane = worktrees.enumerateLanes(svcCfgNoUrl)[2]; // demo-3, lane 3
+test('dashboard: first declared service running with no url template shows localhost:<bound-port>, with ! once its portBase is edited while running', () => {
+  const lane = worktrees.enumerateLanes(svcCfgNoUrl)[2]; // lane3
   const [api] = sv.resolveServices(svcCfgNoUrl, lane);
   const started = sv.start(api);
   assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
@@ -934,11 +1233,16 @@ test('dashboard: first declared service running with no url template shows local
     const frame = render(ctx, createState(), Date.now(), [lane]);
     assert.equal(serviceLineFor(frame, lane.name), 'localhost:4003');
 
-    // Same worktree, renumbered lane: bookkeeping is keyed by name (D18-style),
-    // so the pid file survives, but the freshly computed port moves — the cell
-    // must show the port the process actually bound to, marked with !.
-    const renumbered = { ...lane, lane: 5 };
-    const frameMoved = render(ctx, createState(), Date.now(), [renumbered]);
+    // Same lane, same worktree — only the service's own portBase changes.
+    // The pid file survives (keyed by worktree name, D18-style), but a fresh
+    // computation now disagrees — the cell must show the port the process
+    // actually bound to, marked with !.
+    const edited = {
+      ...svcCfgNoUrl,
+      dev: { services: svcCfgNoUrl.dev.services.map((s) => (s.name === 'api' ? { ...s, portBase: 450 } : s)) },
+    };
+    const ctxEdited = { ...resolveContext(lane2), config: edited };
+    const frameMoved = render(ctxEdited, createState(), Date.now(), [lane]);
     assert.equal(serviceLineFor(frameMoved, lane.name), 'localhost:4003!');
   } finally {
     sv.stop(api);
@@ -968,19 +1272,20 @@ test('lanes list SERVICES column: boundPort wiring is unchanged after the extrac
   git(main, 'config', 'user.name', 'test');
   mkdirSync(join(main, '.claude'));
   const svcWtDir = join(TMP, 'list-services-wts');
+  const cfgPath = join(main, '.claude', 'agent-system.json');
   const cfg = {
     project: 'list-services',
     worktreesDir: svcWtDir,
     basePort: 300,
     dev: { services: [{ name: 'web', command: 'echo web {port} && sleep 30', portBase: 300 }] },
   };
-  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  writeFileSync(cfgPath, JSON.stringify(cfg));
   writeFileSync(join(main, 'f.txt'), 'x');
   git(main, 'add', '-A');
   git(main, 'commit', '-qm', 'init');
-  git(main, 'worktree', 'add', '-q', join(svcWtDir, 'one'), '-b', 'feat/1-one');
+  git(main, 'worktree', 'add', '-q', join(svcWtDir, 'lane1'), '-b', 'feat/1-one');
 
-  const lane = worktrees.enumerateLanes(cfg)[0]; // 'one', lane 1
+  const lane = worktrees.enumerateLanes(cfg)[0]; // lane1
   const [web] = sv.resolveServices(cfg, lane);
   const started = sv.start(web);
   assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
@@ -988,12 +1293,14 @@ test('lanes list SERVICES column: boundPort wiring is unchanged after the extrac
     const before = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: main, encoding: 'utf8' });
     assert.match(before, /\x1b\[32mweb:3001\x1b\[0m/, 'running, matching port: green, no ! marker');
 
-    // An earlier-sorting worktree shifts 'one' from lane 1 to lane 2. Bookkeeping
-    // is keyed by worktree name, so the same pid file — and its recorded port,
-    // 3001 — still applies, but a fresh computation now disagrees (3002).
-    git(main, 'worktree', 'add', '-q', join(svcWtDir, 'aaa'), '-b', 'feat/2-aaa');
+    // Not a renumber — lane numbers no longer move at all (D26). Editing the
+    // committed portBase is now the only way a bound port and a fresh
+    // computation can disagree while the service stays up. Bookkeeping is
+    // keyed by worktree name, so the same pid file — and its recorded port,
+    // 3001 — still applies, but a fresh computation now disagrees (3501).
+    writeFileSync(cfgPath, JSON.stringify({ ...cfg, dev: { services: [{ ...cfg.dev.services[0], portBase: 350 }] } }));
     const after = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: main, encoding: 'utf8' });
-    assert.match(after, /\x1b\[32mweb:3001!\x1b\[0m/, 'the bound port is shown, marked !, once a renumber makes it stale');
+    assert.match(after, /\x1b\[32mweb:3001!\x1b\[0m/, 'the bound port is shown, marked !, once portBase changes under it');
   } finally {
     sv.stop(web);
   }
@@ -1003,7 +1310,7 @@ test('lanes list SERVICES column: boundPort wiring is unchanged after the extrac
 test('the SERVICE/CTX sub-header lines up with the real service/ctx columns on the row below', () => {
   const ctxInfo = new Map([['/tmp/aligned.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/tmp/aligned.jsonl' })]);
-  const lane = worktrees.enumerateLanes(wtCfg)[0]; // demo-1, no dev.services declared under wtCfg
+  const lane = worktrees.enumerateLanes(wtCfg)[0]; // lane1, no dev.services declared under wtCfg
   const ctx = { ...resolveContext(lane2), config: wtCfg };
   const frame = render(ctx, state, Date.now(), [lane], ctxInfo);
   const lines = stripAnsi(frame).split('\n');
@@ -1015,7 +1322,7 @@ test('the SERVICE/CTX sub-header lines up with the real service/ctx columns on t
 
   // Same fixed offset applied to the real second line below it — if the two
   // ever used a different width, the labels would sit over the wrong cells.
-  const dataIdx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const dataIdx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
   const secondLineText = lines[dataIdx + 1];
   assert.equal(secondLineText.slice(3, 3 + SERVICE_CELL_WIDTH).trim(), '—', 'SERVICE lines up over the service cell');
   assert.equal(
@@ -1071,28 +1378,28 @@ test('render omits the leading blank before the first lane, but still leaves one
 
 test('render puts no blank line before a single lane\'s block, and exactly one blank before RECENT after it', () => {
   const single = [{
-    lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'main',
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'main',
     isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
   }];
   const frame = render(resolveContext(lane2), createState(), Date.now(), single);
   const lines = stripAnsi(frame).split('\n');
   const sepIdx = lines.findIndex((l) => /^─+$/.test(l));
-  assert.ok(lines[sepIdx + 1].includes('demo-1'), 'the only lane\'s row must start right after the rule, with no leading blank');
+  assert.ok(lines[sepIdx + 1].includes('lane1'), 'the only lane\'s row must start right after the rule, with no leading blank');
   assert.equal(lines[sepIdx + 3], '', 'exactly one blank line must separate the only lane\'s block from RECENT');
   assert.ok(lines[sepIdx + 4].includes('RECENT'));
 });
 
 test('render inserts exactly one blank line between two lanes, and one more before RECENT after the last', () => {
   const two = [
-    { lane: 1, name: 'demo-1', path: join(wtDir, 'demo-1'), branch: 'main', isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true },
-    { lane: 2, name: 'demo-2', path: join(wtDir, 'demo-2'), branch: 'main', isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true },
+    { lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'main', isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true },
+    { lane: 2, name: 'lane2', path: join(wtDir, 'lane2'), branch: 'main', isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true },
   ];
   const frame = render(resolveContext(lane2), createState(), Date.now(), two);
   const lines = stripAnsi(frame).split('\n');
   const sepIdx = lines.findIndex((l) => /^─+$/.test(l));
-  assert.ok(lines[sepIdx + 1].includes('demo-1'), 'no leading blank before the first lane');
+  assert.ok(lines[sepIdx + 1].includes('lane1'), 'no leading blank before the first lane');
   assert.equal(lines[sepIdx + 3], '', 'exactly one blank line between the first lane\'s block and the second\'s');
-  assert.ok(lines[sepIdx + 4].includes('demo-2'), 'the second lane follows right after that single blank');
+  assert.ok(lines[sepIdx + 4].includes('lane2'), 'the second lane follows right after that single blank');
   assert.equal(lines[sepIdx + 6], '', 'one blank line before RECENT after the last lane');
   assert.ok(lines[sepIdx + 7].includes('RECENT'));
 });
@@ -1190,37 +1497,95 @@ test('lanes adopt refuses to clobber an existing config without --force', () => 
 const readEvents = () =>
   readFileSync(join(LANES_DIR, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
-test('lanes new emits lane_created, and lanes rm emits lane_removed', () => {
-  const base = git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim();
-  execFileSync(join(ROOT, 'bin', 'lanes'), ['new', 'demo-4', '--branch', 'feat/999-lane-events', '--from', base], {
-    cwd: repo,
-    encoding: 'utf8',
-  });
-  const created = readEvents().findLast((e) => e.ev === 'lane_created' && e.worktree === 'demo-4');
-  assert.ok(created, 'lanes new must emit lane_created');
+test('lanes new emits lane_created for the next lane, always detached, and lanes rm emits lane_removed', () => {
+  // A commit SHA, not a branch name: checking out `main` in a second worktree
+  // while `repo` already has it checked out is refused by git. A raw SHA always
+  // lands detached, which is the whole point — there is no `--branch` flag
+  // anymore to invent a branch name from.
+  const base = git(repo, 'rev-parse', 'HEAD').trim();
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['new', '--from', base], { cwd: repo, encoding: 'utf8' });
+  const created = readEvents().findLast((e) => e.ev === 'lane_created' && e.worktree === 'lane4');
+  assert.ok(created, 'wtDir already has lane1..lane3, so the next lane must be lane4');
   assert.equal(created.project, 'demo');
-  assert.equal(typeof created.lane, 'number');
-  assert.equal(created.branch, 'feat/999-lane-events');
-  assert.equal(created.path, join(wtDir, 'demo-4'), 'path is what liveness checks rely on');
+  assert.equal(created.lane, 4);
+  assert.equal(created.branch, null, 'always a detached HEAD');
+  assert.equal(created.path, join(wtDir, 'lane4'), 'path is what liveness checks rely on');
 
-  execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', 'demo-4'], { cwd: repo, encoding: 'utf8' });
-  const removed = readEvents().findLast((e) => e.ev === 'lane_removed' && e.worktree === 'demo-4');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', 'lane4'], { cwd: repo, encoding: 'utf8' });
+  const removed = readEvents().findLast((e) => e.ev === 'lane_removed' && e.worktree === 'lane4');
   assert.ok(removed, 'lanes rm must emit lane_removed');
   assert.equal(removed.project, 'demo');
-  assert.equal(typeof removed.lane, 'number');
+  assert.equal(removed.lane, 4);
 });
 
-test('lanes new without --branch does not invent a branch name from the worktree name', () => {
-  // A commit SHA, not the branch name: checking out `main` in a second worktree
-  // while `repo` already has it checked out is refused by git. A raw SHA always
-  // lands detached, which is the whole point of this no-`--branch` case.
+test('lanes new reuses the lane number lanes rm just freed, rather than skipping past it', () => {
   const base = git(repo, 'rev-parse', 'HEAD').trim();
-  execFileSync(join(ROOT, 'bin', 'lanes'), ['new', 'demo-5', '--from', base], { cwd: repo, encoding: 'utf8' });
-  const created = readEvents().findLast((e) => e.ev === 'lane_created' && e.worktree === 'demo-5');
-  assert.ok(created, 'lanes new must emit lane_created');
-  assert.equal(created.branch, null, 'no --branch means a detached HEAD, not a fabricated branch name');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['new', '--from', base], { cwd: repo, encoding: 'utf8' });
+  const created = readEvents().findLast((e) => e.ev === 'lane_created' && e.worktree === 'lane4');
+  assert.ok(created, 'the previous test removed lane4, so this lanes new must reuse it, not jump to lane5');
 
-  execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', 'demo-5'], { cwd: repo, encoding: 'utf8' });
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', 'lane4'], { cwd: repo, encoding: 'utf8' });
+});
+
+test('lanes rm refuses a non-top lane through the real CLI, naming the actual top', () => {
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', '1'], { cwd: repo, stdio: 'pipe' }),
+    /top is lane 3/,
+  );
+  assert.equal(existsSync(join(wtDir, 'lane1')), true, 'refused — lane1 must still be there');
+});
+
+test('lanes rm with no selector at all refuses, rather than defaulting to removing every lane', () => {
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['rm'], { cwd: repo, stdio: 'pipe' }),
+    /Usage: lanes rm/,
+  );
+  assert.equal(worktrees.enumerateLanes(wtCfg).length, 3, 'refused before touching anything — lane1..lane3 all still there');
+});
+
+test('lanes reset detaches a lane back to a clean base state through the real CLI', () => {
+  const { main, wtd, cfg } = makeLanesFixture('cli-reset', 1);
+  const lanePath = join(wtd, 'lane1');
+  git(lanePath, 'checkout', '-b', 'feat/1-cli-reset');
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+
+  const out = execFileSync(join(ROOT, 'bin', 'lanes'), ['reset', '1'], { cwd: main, encoding: 'utf8' });
+  assert.match(out, /lane 1 \(lane1\)/);
+  assert.match(out, /origin\/main/);
+
+  const lane = worktrees.enumerateLanes(cfg)[0];
+  assert.equal(lane.branch, 'main');
+  assert.equal(lane.isBase, true);
+
+  const emitted = readEvents().findLast((e) => e.ev === 'lane_reset' && e.project === cfg.project);
+  assert.ok(emitted, 'lanes reset must emit lane_reset, so the dashboard row does not keep showing the finished task');
+  assert.equal(emitted.lane, 1);
+  assert.equal(emitted.worktree, 'lane1');
+});
+
+test('lanes doctor warns about a directory under worktreesDir that does not match lane<N>', () => {
+  const { main, wtd, cfg } = makeLanesFixture('doctor-stray', 1);
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  mkdirSync(join(wtd, 'old-style-name'));
+
+  const out = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: main, encoding: 'utf8' });
+  assert.match(out, /lane naming/);
+  assert.match(out, /old-style-name/);
+});
+
+test('lanes list dies naming the stray directories when worktreesDir resolves but holds none matching lane<N>', () => {
+  const { main, wtd, cfg } = makeLanesFixture('stray-only', 0); // no conforming lanes at all
+  mkdirSync(join(wtd, 'wt1'));
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: main, stdio: 'pipe' }),
+    /wt1/,
+    'must name the actual stray directory, not just say "set worktreesDir" when it is already set correctly',
+  );
 });
 
 test('emitWithContext fills path from ctx.worktreeRoot too, not just the two direct emit() calls in lanes new/rm', () => {
@@ -1228,7 +1593,7 @@ test('emitWithContext fills path from ctx.worktreeRoot too, not just the two dir
     cwd: lane2,
     encoding: 'utf8',
   });
-  const staged = readEvents().findLast((e) => e.ev === 'stage' && e.worktree === 'demo-2' && e.stage === 'implement');
+  const staged = readEvents().findLast((e) => e.ev === 'stage' && e.worktree === 'lane2' && e.stage === 'implement');
   assert.ok(staged, 'lanes stage must emit a stage event');
   assert.equal(staged.path, lane2, 'emitWithContext must carry the real worktree root, same as the direct emit() calls');
   assert.ok(existsSync(staged.path), 'the recorded path must be a real, currently-existing directory');
@@ -1676,7 +2041,7 @@ test('applyEvents folds transcript like branch — carried forward, never cleare
     // carry the last known value forward for a non-`session_start` event.
     ev(4, 'idle', { transcript: null }),
   ]);
-  assert.equal(s.lanes.get('demo#demo-1').transcript, '/tmp/b.jsonl');
+  assert.equal(s.lanes.get('demo#lane1').transcript, '/tmp/b.jsonl');
 });
 
 test('applyEvents resets transcript on session_start, so a new session never inherits the outgoing one\'s value', () => {
@@ -1687,13 +2052,13 @@ test('applyEvents resets transcript on session_start, so a new session never inh
     // this must NOT fall back to the previous session's path via `??`.
     ev(3, 'session_start', { transcript: null }),
   ]);
-  assert.equal(s.lanes.get('demo#demo-1').transcript, null, 'must not inherit the outgoing session\'s transcript');
+  assert.equal(s.lanes.get('demo#lane1').transcript, null, 'must not inherit the outgoing session\'s transcript');
 
   const withPath = applyEvents(createState(), [
     ev(1, 'session_start', { transcript: '/tmp/old-session.jsonl' }),
     ev(2, 'session_start', { transcript: '/tmp/new-session.jsonl' }),
   ]);
-  assert.equal(withPath.lanes.get('demo#demo-1').transcript, '/tmp/new-session.jsonl');
+  assert.equal(withPath.lanes.get('demo#lane1').transcript, '/tmp/new-session.jsonl');
 });
 
 test('render adds a ctx line under each lane row, live-toned while the session is active', () => {
@@ -1702,8 +2067,8 @@ test('render adds a ctx line under each lane row, live-toned while the session i
   ]);
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: p })]);
   const lines = render(resolveContext(lane2), state).split('\n');
-  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
-  assert.ok(idx !== -1, 'demo-1 must have a row');
+  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
+  assert.ok(idx !== -1, 'lane1 must have a row');
   const ctxLine = ctxPortion(lines[idx + 1]);
   assert.ok(!ctxLine.includes(DIM), 'must not be dimmed while the session is live');
   assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '143K ctx · sonnet-5');
@@ -1715,7 +2080,7 @@ test('render dims the ctx line once the session has closed, but keeps showing th
   ]);
   const state = applyEvents(createState(), [ev(1, 'session_start', { transcript: p }), ev(2, 'session_end')]);
   const lines = render(resolveContext(lane2), state).split('\n');
-  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
   const ctxLine = ctxPortion(lines[idx + 1]);
   assert.ok(ctxLine.includes(DIM), 'must be dimmed once the session has closed');
   assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '1.0M ctx · opus-4-8');
@@ -1723,8 +2088,8 @@ test('render dims the ctx line once the session has closed, but keeps showing th
 
 test('render shows — in the ctx line when no transcript has ever been recorded for the lane', () => {
   const lines = render(resolveContext(lane2), createState()).split('\n');
-  const idx = lines.findIndex((l) => l.includes('demo-3'));
-  assert.ok(idx !== -1, 'demo-3 must have a row');
+  const idx = lines.findIndex((l) => l.includes('lane3'));
+  assert.ok(idx !== -1, 'lane3 must have a row');
   const ctxLine = ctxPortion(lines[idx + 1]);
   assert.ok(ctxLine.includes(DIM), 'no live session either, so dimmed');
   assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '—');
@@ -1734,8 +2099,8 @@ test('render uses a supplied ctxInfo map instead of reading the transcript itsel
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/never/actually/read.jsonl' })]);
   const ctxInfo = new Map([['/never/actually/read.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);
   const lines = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo).split('\n');
-  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
-  assert.ok(idx !== -1, 'demo-1 must have a row');
+  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
+  assert.ok(idx !== -1, 'lane1 must have a row');
   const stripped = ctxPortion(lines[idx + 1]).replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
   assert.equal(stripped.trim(), '2K ctx · sonnet-5', 'must read the supplied map, never touch the (nonexistent) file on disk');
 });
@@ -1743,7 +2108,7 @@ test('render uses a supplied ctxInfo map instead of reading the transcript itsel
 test('render treats a transcript missing from ctxInfo as unknown, not as licence to read it directly', () => {
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/some/real/path.jsonl' })]);
   const lines = render(resolveContext(lane2), state, Date.now(), undefined, new Map()).split('\n');
-  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
   const stripped = ctxPortion(lines[idx + 1]).replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
   assert.equal(stripped.trim(), '—', 'a throttled cache miss shows — until the next refresh, not a fresh direct read');
 });
@@ -1755,7 +2120,7 @@ test('the ctx line dims for CLI-driven events too — reviewed is not a liveness
   ]);
   const ctxInfo = new Map([['/tmp/x.jsonl', { tokens: 5000, model: 'claude-sonnet-5' }]]);
   const lines = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo).split('\n');
-  const idx = lines.findIndex((l) => l.includes('demo-1') && !l.includes('demo-10'));
+  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
   assert.ok(ctxPortion(lines[idx + 1]).includes(DIM), '"reviewed" must not read as a live session, even right after one closed');
 });
 

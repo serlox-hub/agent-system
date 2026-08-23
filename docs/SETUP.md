@@ -144,9 +144,10 @@ warns past `review.largeDiffThreshold`.
 
 ```bash
 lanes list                          # worktrees, branches, dirty state, services
-lanes new app-5 --branch feat/1-x   # create a lane
-lanes rm app-5                      # remove one; refuses to lose work
+lanes new                           # create the next lane, detached at origin/main
 lanes switch 2 feat/42-thing --create
+lanes rm 2                          # remove the top lane; refuses to lose work
+lanes reset 2                       # detach a lane back to a clean base state, keep it
 lanes each 'git fetch && git merge origin/main'   # across every lane
 lanes dev 2      # start lane 2's services      (selector: 1 · 1,3 · 2-4 · . · all)
 lanes stop       # stop everything
@@ -158,11 +159,15 @@ lanes service-port api 450          # per-machine, per-service portBase override
 ```
 
 Lanes are long-lived infrastructure — create once, cycle branches through them.
-Creating one can renumber the others (lane N = Nth subdirectory of
-`worktreesDir`, alphabetically); `lanes new` prints exactly what would move
-before doing it. `lanes rm` keeps the branch — it prints the `git branch -d` to
-run if you actually want it gone. A lane is "free" (what `/architect` looks for)
-when nothing would be lost by taking it over.
+Each is named `lane<N>` (N = max existing + 1), so the number is baked into the
+directory at creation time and never shifts when another lane is added or
+removed. `lanes rm` only pops the top of the stack (a contiguous run ending at
+the highest lane number; anything else is refused) — it keeps the branch and
+prints the `git branch -d` to run if you actually want it gone, and refuses
+outright if a declared service is still running in that lane. `lanes reset`
+returns a lane to that same clean, branch-free state without removing it. A
+lane is "free" (what `/architect` looks for) when nothing would be lost by
+taking it over.
 
 ---
 
@@ -187,7 +192,7 @@ entry in your shell profile, every `.claude/agent-system.json` in your repos.
 | Commit guard never fires | Check `review.commitGuard` isn't `false`, and that the repo has a config |
 | Guard fires again right after `/gate` | Expected — the tree changed since. The marker is a hash of the diff |
 | `/gate` says "nothing to review" | Check `review.excludePattern` isn't too broad — the skill prints what it excluded |
-| Lane numbers look wrong | They're the alphabetical position of each `worktreesDir` subdirectory — `lanes doctor` prints the one it resolved for where you're standing |
+| Lane numbers look wrong | Each lane is `lane<N>` — the number comes straight from the directory name, not a computed position; `lanes doctor` warns about any directory under `worktreesDir` that doesn't match `lane<N>` |
 
 ---
 
