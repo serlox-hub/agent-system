@@ -33,6 +33,46 @@ const VALUE_OPTS = new Set([
 ]);
 
 /**
+ * A shell removes quote characters from a word before exec and splits only on
+ * UNquoted whitespace — so `git "commit"`, `git com"mit"` and
+ * `git -C "my dir" commit` all run as an ordinary `git commit`, and
+ * `echo "run git commit later"` runs as one argument to `echo`, not four bare
+ * words. A plain `split(/\s+/)` gets every one of those backwards: it treats
+ * quote characters as part of the token and whitespace *inside* quotes as a
+ * token boundary. This walks the segment the way a shell would instead —
+ * unquoted whitespace ends a token, quote characters are dropped rather than
+ * kept, and whitespace inside an open quote is just more of the word.
+ */
+function tokenize(segment) {
+  const tokens = [];
+  let word = '';
+  let quote = null; // the quote character currently open, or null
+  let started = false; // word has content, or an (empty) quoted span was seen
+  for (const ch of segment) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else word += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (started) tokens.push(word);
+      word = '';
+      started = false;
+      continue;
+    }
+    word += ch;
+    started = true;
+  }
+  if (started) tokens.push(word);
+  return tokens;
+}
+
+/**
  * True when any command in the line is `git commit`.
  *
  * Walks tokens instead of pattern-matching, so it accepts every option form
@@ -42,7 +82,7 @@ const VALUE_OPTS = new Set([
  */
 function isGitCommit(command) {
   for (const segment of String(command).split(/&&|\|\||;|\|/)) {
-    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    const tokens = tokenize(segment.trim());
     const start = tokens.findIndex((t) => t === 'git' || t.endsWith('/git'));
     if (start === -1) continue;
     let i = start + 1;

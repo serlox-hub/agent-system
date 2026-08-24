@@ -33,7 +33,7 @@ const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'agent-system-test-')));
 process.env.HOME = TMP;
 mkdirSync(join(TMP, '.claude'));
 
-const { resolveContext, issueFromBranch, resolveLane, findProject, LANES_DIR } =
+const { resolveContext, issueFromBranch, resolveLane, findProject, LANES_DIR, emit } =
   await import(`${ROOT}/lib/context.mjs`);
 const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } = await import(
   `${ROOT}/lib/local-config.mjs`
@@ -378,10 +378,49 @@ test('the guard blocks an unreviewed commit through every option form', () => {
   assert.equal(guard(lane2, 'npm run build && git commit -m wip'), 'deny', 'chained commands count');
 });
 
+test('the guard blocks a commit under every way a shell can quote it, matching what actually runs', () => {
+  assert.equal(guard(lane2, 'git "commit" -m wip'), 'deny', 'whole token wrapped');
+  assert.equal(guard(lane2, "git 'commit' -m wip"), 'deny', 'whole token wrapped, single-quoted');
+  assert.equal(guard(lane2, 'git com"mit" -m wip'), 'deny', 'quote mid-word');
+  assert.equal(guard(lane2, 'git commit"" -m wip'), 'deny', 'empty quoted span appended');
+  assert.equal(guard(lane2, 'git ""commit -m wip'), 'deny', 'empty quoted span prepended');
+  assert.equal(guard(lane2, 'git -C "my dir" commit -m wip'), 'deny', 'quoted -C value with a space, no evasion intended');
+});
+
+test('the guard resolves nested and quoted-away edge cases the same way a real shell would', () => {
+  assert.equal(
+    guard(lane2, 'git -c "user.name=O\'Brien" commit -m wip'),
+    'deny',
+    'a single quote nested inside a double-quoted value is literal, not a token break, so -c still consumes exactly one value and commit lands where expected',
+  );
+  assert.equal(
+    guard(lane2, "git -c 'msg=\"hi there\"' commit -m wip"),
+    'deny',
+    'a double quote nested inside a single-quoted value is literal too',
+  );
+  assert.equal(
+    guard(lane2, 'git -C "" commit -m wip'),
+    'deny',
+    'an explicitly empty quoted value is still a real token, not a dropped one, so -C still consumes exactly one and commit is not miscounted past',
+  );
+  assert.equal(
+    guard(lane2, 'git "-C" "my dir" commit -m wip'),
+    'deny',
+    'a quoted option name unquotes to the same bare -C a real shell would produce, so it is still recognised as value-taking',
+  );
+  assert.equal(
+    guard(lane2, 'git commit -m "wip'),
+    'deny',
+    'an unterminated quote that only swallows the trailing argument must not hang or misfire',
+  );
+});
+
 test('the guard does not fire on git commands that merely mention commit', () => {
   assert.equal(guard(lane2, 'git log --grep commit'), 'allow');
   assert.equal(guard(lane2, 'git commit-tree abc'), 'allow');
   assert.equal(guard(lane2, 'echo "commit later"'), 'allow');
+  assert.equal(guard(lane2, 'echo "run git commit later"'), 'allow', 'a quoted phrase is one argument to echo, not four bare words');
+  assert.equal(guard(lane2, 'echo "git commit"'), 'allow');
 });
 
 test('the guard allows once the current diff is marked reviewed', () => {
@@ -764,6 +803,7 @@ test('lane selectors cover every form and report the unknown ones', () => {
   assert.deepEqual(pick('3,1'), [1, 3], 'normalised to lane order');
   assert.deepEqual(pick('1-2'), [1, 2]);
   assert.deepEqual(pick('lane3'), [3], 'by name');
+  assert.deepEqual(pick(','), [], 'a selector of only separators matches nothing, but is not "unknown" — callers needing exactly one lane must check the count themselves');
   assert.deepEqual(pick('.', join(lane2, 'src')), [2], 'a subdirectory still resolves');
   assert.deepEqual(worktrees.parseSelector('9,nope', all).unknown, ['nope', '9']);
 });
@@ -1579,6 +1619,86 @@ test('lanes reset detaches a lane back to a clean base state through the real CL
   assert.equal(emitted.worktree, 'lane1');
 });
 
+test('reset, switch and logs each refuse a multi-lane selector rather than silently acting on the first match', () => {
+  const { main, wtd, cfg } = makeLanesFixture('cli-selectone', 3);
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  for (const n of [1, 2, 3]) git(join(wtd, `lane${n}`), 'checkout', '-b', `feat/${n}-selectone`);
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['reset', 'all', '--force'], { cwd: main, stdio: 'pipe' }),
+    /lanes reset takes exactly one lane, got 3 \(1, 2, 3\)/,
+  );
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['switch', '1,2', 'main'], { cwd: main, stdio: 'pipe' }),
+    /lanes switch takes exactly one lane, got 2 \(1, 2\)/,
+  );
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['logs'], { cwd: main, stdio: 'pipe' }),
+    /Usage: lanes logs <lane>/,
+    'no lane argument at all, with 3 lanes declared, must ask for one rather than naming all 3 as if the caller had typed "all"',
+  );
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['logs', ','], { cwd: main, stdio: 'pipe' }),
+    /lanes logs takes exactly one lane, got 0 — no lane matched that selector\./,
+    'a non-empty selector that matches zero lanes must fail cleanly here, not crash downstream on an undefined lane',
+  );
+
+  const branches = worktrees.enumerateLanes(cfg).map((l) => l.branch).sort();
+  assert.deepEqual(
+    branches,
+    ['feat/1-selectone', 'feat/2-selectone', 'feat/3-selectone'],
+    'every refusal must happen before touching any lane — lane1 in particular, the one a bare `[target] = select(...)` would have silently picked',
+  );
+});
+
+test('reset, switch and logs still resolve a genuine single-lane selector correctly through selectOne', () => {
+  const { main, wtd, cfg } = makeLanesFixture('cli-selectone-happy', 2);
+  const svcCfg = { ...cfg, dev: { services: [{ name: 'web', command: 'true', portBase: 300 }] } };
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(svcCfg));
+
+  // switch: exactly-one-match happy path (numeric lane, plain branch name).
+  const switchOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['switch', '1', 'selectone/happy', '--create'], {
+    cwd: main,
+    encoding: 'utf8',
+  });
+  assert.match(switchOut, /lane 1 \(lane1\) → selectone\/happy/);
+  assert.equal(worktrees.enumerateLanes(cfg).find((l) => l.lane === 1).branch, 'selectone/happy');
+
+  // logs: exactly-one-match happy path.
+  const logsOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['logs', '2'], { cwd: main, encoding: 'utf8' });
+  assert.match(logsOut, /lane 2 · web/);
+  assert.match(logsOut, /no log yet/);
+});
+
+test('lanes switch dies with its own usage rather than misreading a lone positional as the branch', () => {
+  const { main, cfg } = makeLanesFixture('cli-switch-usage', 1);
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+
+  // `lanes switch main` has one positional arg, which is consumed as <lane>
+  // (not <branch>) by `[sel, branch] = rest.filter(...)`. The `if (!branch)`
+  // guard must catch this and print usage — not hand "main" to selectOne and
+  // report it as an unmatched lane selector.
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['switch', 'main'], { cwd: main, stdio: 'pipe' }),
+    /Usage: lanes switch <lane> <branch> \[--create\]/,
+  );
+  assert.equal(worktrees.enumerateLanes(cfg)[0].branch, 'main', 'refused before touching the lane');
+});
+
+test('lanes reset with no lane argument still dies with its own usage now that the standalone !sel precheck was folded into selectOne', () => {
+  const { main, cfg } = makeLanesFixture('cli-reset-usage', 1);
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['reset'], { cwd: main, stdio: 'pipe' }),
+    /Usage: lanes reset <lane> \[--force\]/,
+  );
+});
+
 test('lanes doctor warns about a directory under worktreesDir that does not match lane<N>', () => {
   const { main, wtd, cfg } = makeLanesFixture('doctor-stray', 1);
   mkdirSync(join(main, '.claude'), { recursive: true });
@@ -1962,6 +2082,72 @@ test('the suite writes its events inside the sandbox, not the real home', () => 
   assert.ok(LANES_DIR.startsWith(TMP), `event log escaped the sandbox: ${LANES_DIR}`);
   // The guard tests above emit real events; prove they landed here.
   assert.match(readFileSync(join(LANES_DIR, 'events.jsonl'), 'utf8'), /"ev":"commit_blocked"/);
+});
+
+test('emit refuses a line whose real UTF-8 byte size crosses the PIPE_BUF safety margin, even when its UTF-16 .length would pass', () => {
+  const eventsPath = join(LANES_DIR, 'events.jsonl');
+  const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
+  const before = readRaw();
+  // Each '文' is one UTF-16 code unit but three UTF-8 bytes: 1400 of them keep
+  // the JSON line's .length under 4000 while its byte size clears 4000.
+  const wide = '文'.repeat(1400);
+  const line = `${JSON.stringify({ ts: Date.now(), ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', note: wide })}\n`;
+  assert.ok(line.length < 4000, 'fixture must stay under the old, wrong .length check to prove the byte check is what fires');
+  assert.ok(Buffer.byteLength(line, 'utf8') > 4000, 'fixture must exceed 4000 real bytes for this test to mean anything');
+
+  const ok = emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', note: wide });
+  assert.equal(ok, false, 'a line whose real byte size exceeds the margin must be refused, not silently written oversized');
+  assert.equal(readRaw(), before, 'a refused line must not be appended at all');
+});
+
+test('emit still writes ordinary multi-byte content that stays under both the character and byte thresholds', () => {
+  const eventsPath = join(LANES_DIR, 'events.jsonl');
+  const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
+  const before = readRaw();
+  const note = '文'.repeat(50); // 150 bytes — nowhere near either threshold
+  const ok = emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', note });
+  assert.equal(ok, true, 'the byte check must not reject normal multi-byte content, only oversized lines');
+  const appended = readRaw().slice(before.length);
+  assert.equal(JSON.parse(appended.trim()).note, note, 'the content round-trips untouched, not mangled by the guard');
+});
+
+test('emit draws the line exactly where the > 4000 byte check says: 4000 bytes in, 4001 bytes out', () => {
+  const eventsPath = join(LANES_DIR, 'events.jsonl');
+  const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
+  const base = { ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1' };
+  // ASCII padding is one byte per character, so the note length maps 1:1 onto
+  // the line's total byte size — that gives an exact target, unlike the
+  // multi-byte fixture above which only proves "well over", not the boundary.
+  const sizeWithNote = (note) => Buffer.byteLength(`${JSON.stringify({ ts: Date.now(), ...base, note })}\n`, 'utf8');
+  const baseSize = sizeWithNote('');
+  const note4000 = 'x'.repeat(4000 - baseSize);
+  const note4001 = 'x'.repeat(4000 - baseSize + 1);
+  assert.equal(sizeWithNote(note4000), 4000, 'fixture must land exactly on the boundary');
+  assert.equal(sizeWithNote(note4001), 4001, 'fixture must land exactly one byte past the boundary');
+
+  const beforeAt = readRaw();
+  assert.equal(emit({ ...base, note: note4000 }), true, 'exactly 4000 bytes must be accepted — the check is `> 4000`, not `>=`');
+  assert.notEqual(readRaw(), beforeAt, 'the accepted boundary line must be appended');
+
+  const beforeOver = readRaw();
+  assert.equal(emit({ ...base, note: note4001 }), false, 'one byte past the boundary must be refused');
+  assert.equal(readRaw(), beforeOver, 'the refused line must not be appended');
+});
+
+test('emit truncates an oversized multi-byte detail before the byte check, so it is not refused for a length only the raw string had', () => {
+  const eventsPath = join(LANES_DIR, 'events.jsonl');
+  const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
+  const before = readRaw();
+  // Untruncated this is 2000 * 3 = 6000 bytes on its own — comfortably past the
+  // 4000-byte margin. The 300-character cap must fire first so the byte check
+  // never sees the raw size.
+  const detail = '文'.repeat(2000);
+  const ok = emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', detail });
+  assert.equal(ok, true, 'truncation must bring a hugely oversized multi-byte detail under the byte guard');
+  const appended = readRaw().slice(before.length);
+  const parsed = JSON.parse(appended.trim());
+  assert.equal(parsed.detail, `${'文'.repeat(297)}...`, 'truncated to 297 characters + ellipsis, same as ASCII detail');
+  assert.ok(Buffer.byteLength(appended, 'utf8') < 4000, 'the written line is nowhere near the margin once truncated');
 });
 
 // ── Context tokens (#4) ─────────────────────────────────────────────
