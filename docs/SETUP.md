@@ -120,34 +120,19 @@ In a spare terminal. Empty until a session in an adopted repo produces events.
 
 ---
 
-## 5. Daily flow
-
-```
-/architect         design first, adversarially → GitHub issue + linked branch
-                   ↓  you decide when to move
-                   implement, in the same session
-                   ↓  you decide when to move
-/gate              review, apply fixes, write tests, run the gates
-git commit         guarded: blocked unless /gate passed on this exact diff
-```
-
-`/architect` is for non-trivial work only — skip it for typos, dependency bumps,
-anything already decided. `/gate` is worth running on every commit.
-
-**Commit small.** The reviewer is a commit-time gate, so diff size is review
-quality: findings get applied at ~200 changed lines, ignored at 800. The guard
-warns past `review.largeDiffThreshold`.
-
----
-
-## 6. Managing lanes
+## 5. Managing lanes
 
 ```bash
 lanes list                          # worktrees, branches, dirty state, services
+lanes ui     # live dashboard — leave it running in a terminal, see §4
+lanes adopt  # scaffold .claude/agent-system.json for this repo, see §2
+lanes doctor # verify the install, the repo config and this worktree, see §3
 lanes new                           # create the next lane, detached at origin/main
 lanes switch 2 feat/42-thing --create
 lanes rm 2                          # remove the top lane; refuses to lose work
 lanes reset 2                       # detach a lane back to a clean base state, keep it
+lanes free                          # lanes safe to take over (what /architect checks)
+lanes status                        # one-shot snapshot (lanes ui without leaving it running)
 lanes each 'git fetch && git merge origin/main'   # across every lane
 lanes dev 2      # start lane 2's services      (selector: 1 · 1,3 · 2-4 · . · all)
 lanes stop       # stop everything
@@ -169,9 +154,23 @@ returns a lane to that same clean, branch-free state without removing it. A
 lane is "free" (what `/architect` looks for) when nothing would be lost by
 taking it over.
 
+Each lane can run the project's own services — a React client and a Python API
+in one repo are two entries in `dev.services`, with their own commands,
+directories and port series. They start detached as process-group leaders so
+`lanes stop` kills the whole tree, and their bookkeeping is keyed by worktree
+name rather than lane number, which is the part that moves. A service's own
+`portBase` wins over the top-level `basePort` when both are set — `lanes
+base-port` moves the informational lane-port hint, `lanes service-port` moves
+where a service actually binds.
+
+Three commands you won't usually type by hand — the skills call them for you:
+`lanes reviewed` marks the current diff clean (`/gate` does this), `lanes
+allow-commit` is a one-shot bypass of the commit guard, and `lanes stage
+<name>` emits a pipeline-stage event.
+
 ---
 
-## 7. Uninstall
+## 6. Uninstall
 
 ```bash
 ./install.sh --uninstall
@@ -212,4 +211,5 @@ entry in your shell profile, every `.claude/agent-system.json` in your repos.
   root, shared by every lane of that repo. Each wins over its committed
   counterpart, same reasoning as lane colours: two developers may want their
   lanes, their port range, or one service's port, somewhere different from
-  each other.
+  each other. Run any of the three with no argument to see the current value
+  and whether it's the local override or the committed default.

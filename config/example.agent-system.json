@@ -50,7 +50,7 @@
     "largeDiffThreshold": 400,
     "excludePattern": "^src/generated/|^CHANGELOG\\.md$|^(pnpm-lock\\.yaml|package-lock\\.json|yarn\\.lock)$",
     "domainAxes": [
-      "REPLACE THESE. Architecture, duplication, durable context and documentation currency are already built into the reviewer — do not repeat them here. These axes are the things only your team knows. See the review.domainAxes section of docs/SETUP.md.",
+      "REPLACE THESE. Architecture, duplication, durable context and documentation currency are already built into the reviewer — do not repeat them here. These axes are the things only your team knows. See \"2. Adopt a repo\" in docs/SETUP.md.",
       "Money paths: anything touching price, tax or discount must keep the calculation in one place and record the inputs it used. A second copy of the formula is a defect even when it agrees today.",
       "Offline-first. Users are on flaky connections — flag anything that assumes a request succeeds, or that loses local state on a failed sync.",
       "Both themes. Dark mode is the common case for our users, not an afterthought; any visual change has to be checked in both."
