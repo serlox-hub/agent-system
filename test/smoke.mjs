@@ -33,7 +33,7 @@ const TMP = realpathSync(mkdtempSync(join(tmpdir(), 'agent-system-test-')));
 process.env.HOME = TMP;
 mkdirSync(join(TMP, '.claude'));
 
-const { resolveContext, issueFromBranch, resolveLane, findProject, LANES_DIR } =
+const { resolveContext, issueFromBranch, resolveLane, findProject, LANES_DIR, emit } =
   await import(`${ROOT}/lib/context.mjs`);
 const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } = await import(
   `${ROOT}/lib/local-config.mjs`
@@ -1986,6 +1986,72 @@ test('the suite writes its events inside the sandbox, not the real home', () => 
   assert.ok(LANES_DIR.startsWith(TMP), `event log escaped the sandbox: ${LANES_DIR}`);
   // The guard tests above emit real events; prove they landed here.
   assert.match(readFileSync(join(LANES_DIR, 'events.jsonl'), 'utf8'), /"ev":"commit_blocked"/);
+});
+
+test('emit refuses a line whose real UTF-8 byte size crosses the PIPE_BUF safety margin, even when its UTF-16 .length would pass', () => {
+  const eventsPath = join(LANES_DIR, 'events.jsonl');
+  const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
+  const before = readRaw();
+  // Each '文' is one UTF-16 code unit but three UTF-8 bytes: 1400 of them keep
+  // the JSON line's .length under 4000 while its byte size clears 4000.
+  const wide = '文'.repeat(1400);
+  const line = `${JSON.stringify({ ts: Date.now(), ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', note: wide })}\n`;
+  assert.ok(line.length < 4000, 'fixture must stay under the old, wrong .length check to prove the byte check is what fires');
+  assert.ok(Buffer.byteLength(line, 'utf8') > 4000, 'fixture must exceed 4000 real bytes for this test to mean anything');
+
+  const ok = emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', note: wide });
+  assert.equal(ok, false, 'a line whose real byte size exceeds the margin must be refused, not silently written oversized');
+  assert.equal(readRaw(), before, 'a refused line must not be appended at all');
+});
+
+test('emit still writes ordinary multi-byte content that stays under both the character and byte thresholds', () => {
+  const eventsPath = join(LANES_DIR, 'events.jsonl');
+  const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
+  const before = readRaw();
+  const note = '文'.repeat(50); // 150 bytes — nowhere near either threshold
+  const ok = emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', note });
+  assert.equal(ok, true, 'the byte check must not reject normal multi-byte content, only oversized lines');
+  const appended = readRaw().slice(before.length);
+  assert.equal(JSON.parse(appended.trim()).note, note, 'the content round-trips untouched, not mangled by the guard');
+});
+
+test('emit draws the line exactly where the > 4000 byte check says: 4000 bytes in, 4001 bytes out', () => {
+  const eventsPath = join(LANES_DIR, 'events.jsonl');
+  const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
+  const base = { ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1' };
+  // ASCII padding is one byte per character, so the note length maps 1:1 onto
+  // the line's total byte size — that gives an exact target, unlike the
+  // multi-byte fixture above which only proves "well over", not the boundary.
+  const sizeWithNote = (note) => Buffer.byteLength(`${JSON.stringify({ ts: Date.now(), ...base, note })}\n`, 'utf8');
+  const baseSize = sizeWithNote('');
+  const note4000 = 'x'.repeat(4000 - baseSize);
+  const note4001 = 'x'.repeat(4000 - baseSize + 1);
+  assert.equal(sizeWithNote(note4000), 4000, 'fixture must land exactly on the boundary');
+  assert.equal(sizeWithNote(note4001), 4001, 'fixture must land exactly one byte past the boundary');
+
+  const beforeAt = readRaw();
+  assert.equal(emit({ ...base, note: note4000 }), true, 'exactly 4000 bytes must be accepted — the check is `> 4000`, not `>=`');
+  assert.notEqual(readRaw(), beforeAt, 'the accepted boundary line must be appended');
+
+  const beforeOver = readRaw();
+  assert.equal(emit({ ...base, note: note4001 }), false, 'one byte past the boundary must be refused');
+  assert.equal(readRaw(), beforeOver, 'the refused line must not be appended');
+});
+
+test('emit truncates an oversized multi-byte detail before the byte check, so it is not refused for a length only the raw string had', () => {
+  const eventsPath = join(LANES_DIR, 'events.jsonl');
+  const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
+  const before = readRaw();
+  // Untruncated this is 2000 * 3 = 6000 bytes on its own — comfortably past the
+  // 4000-byte margin. The 300-character cap must fire first so the byte check
+  // never sees the raw size.
+  const detail = '文'.repeat(2000);
+  const ok = emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', detail });
+  assert.equal(ok, true, 'truncation must bring a hugely oversized multi-byte detail under the byte guard');
+  const appended = readRaw().slice(before.length);
+  const parsed = JSON.parse(appended.trim());
+  assert.equal(parsed.detail, `${'文'.repeat(297)}...`, 'truncated to 297 characters + ellipsis, same as ASCII detail');
+  assert.ok(Buffer.byteLength(appended, 'utf8') < 4000, 'the written line is nowhere near the margin once truncated');
 });
 
 // ── Context tokens (#4) ─────────────────────────────────────────────
