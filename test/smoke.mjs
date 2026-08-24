@@ -378,10 +378,49 @@ test('the guard blocks an unreviewed commit through every option form', () => {
   assert.equal(guard(lane2, 'npm run build && git commit -m wip'), 'deny', 'chained commands count');
 });
 
+test('the guard blocks a commit under every way a shell can quote it, matching what actually runs', () => {
+  assert.equal(guard(lane2, 'git "commit" -m wip'), 'deny', 'whole token wrapped');
+  assert.equal(guard(lane2, "git 'commit' -m wip"), 'deny', 'whole token wrapped, single-quoted');
+  assert.equal(guard(lane2, 'git com"mit" -m wip'), 'deny', 'quote mid-word');
+  assert.equal(guard(lane2, 'git commit"" -m wip'), 'deny', 'empty quoted span appended');
+  assert.equal(guard(lane2, 'git ""commit -m wip'), 'deny', 'empty quoted span prepended');
+  assert.equal(guard(lane2, 'git -C "my dir" commit -m wip'), 'deny', 'quoted -C value with a space, no evasion intended');
+});
+
+test('the guard resolves nested and quoted-away edge cases the same way a real shell would', () => {
+  assert.equal(
+    guard(lane2, 'git -c "user.name=O\'Brien" commit -m wip'),
+    'deny',
+    'a single quote nested inside a double-quoted value is literal, not a token break, so -c still consumes exactly one value and commit lands where expected',
+  );
+  assert.equal(
+    guard(lane2, "git -c 'msg=\"hi there\"' commit -m wip"),
+    'deny',
+    'a double quote nested inside a single-quoted value is literal too',
+  );
+  assert.equal(
+    guard(lane2, 'git -C "" commit -m wip'),
+    'deny',
+    'an explicitly empty quoted value is still a real token, not a dropped one, so -C still consumes exactly one and commit is not miscounted past',
+  );
+  assert.equal(
+    guard(lane2, 'git "-C" "my dir" commit -m wip'),
+    'deny',
+    'a quoted option name unquotes to the same bare -C a real shell would produce, so it is still recognised as value-taking',
+  );
+  assert.equal(
+    guard(lane2, 'git commit -m "wip'),
+    'deny',
+    'an unterminated quote that only swallows the trailing argument must not hang or misfire',
+  );
+});
+
 test('the guard does not fire on git commands that merely mention commit', () => {
   assert.equal(guard(lane2, 'git log --grep commit'), 'allow');
   assert.equal(guard(lane2, 'git commit-tree abc'), 'allow');
   assert.equal(guard(lane2, 'echo "commit later"'), 'allow');
+  assert.equal(guard(lane2, 'echo "run git commit later"'), 'allow', 'a quoted phrase is one argument to echo, not four bare words');
+  assert.equal(guard(lane2, 'echo "git commit"'), 'allow');
 });
 
 test('the guard allows once the current diff is marked reviewed', () => {
