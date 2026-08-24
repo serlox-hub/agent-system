@@ -129,7 +129,8 @@ lanes adopt  # scaffold .claude/agent-system.json for this repo, see §2
 lanes doctor # verify the install, the repo config and this worktree, see §3
 lanes new                           # create the next lane, detached at origin/main
 lanes switch 2 feat/42-thing --create
-lanes rm 2                          # remove the top lane; refuses to lose work
+lanes rm                            # remove the top lane; refuses to lose work
+lanes clear                         # remove every lane, top-down; refuses to lose work
 lanes reset 2                       # detach a lane back to a clean base state, keep it
 lanes free                          # lanes safe to take over (what /architect checks)
 lanes each 'git fetch && git merge origin/main'   # across every lane
@@ -145,13 +146,17 @@ lanes service-port api 450          # per-machine, per-service portBase override
 Lanes are long-lived infrastructure — create once, cycle branches through them.
 Each is named `lane<N>` (N = max existing + 1), so the number is baked into the
 directory at creation time and never shifts when another lane is added or
-removed. `lanes rm` only pops the top of the stack (a contiguous run ending at
-the highest lane number; anything else is refused) — it keeps the branch and
-prints the `git branch -d` to run if you actually want it gone, and refuses
-outright if a declared service is still running in that lane. `lanes reset`
-returns a lane to that same clean, branch-free state without removing it. A
-lane is "free" (what `/architect` looks for) when nothing would be lost by
-taking it over.
+removed. `lanes rm` only ever pops the top of the stack — no argument needed,
+since that's the only lane a single `rm` can legally remove; an explicit
+number/name is accepted only as a confirmation that it names that same top
+lane, and `all` is refused outright. `lanes clear` is the separate command for
+removing every lane, top-down, in one call — a different word on purpose, so
+it can't be reached by a typo or muscle-memory on `rm`. Both keep the branch
+and print the `git branch -d` to run if you actually want it gone, and both
+refuse outright if a declared service is still running in a targeted lane.
+`lanes reset` returns a lane to that same clean, branch-free state without
+removing it. A lane is "free" (what `/architect` looks for) when nothing would
+be lost by taking it over.
 
 Each lane can run the project's own services — a React client and a Python API
 in one repo are two entries in `dev.services`, with their own commands,

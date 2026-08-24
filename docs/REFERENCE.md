@@ -35,7 +35,7 @@ dashboard costs zero tokens.
 | `stage` | a pipeline stage was entered (`lanes stage …`) |
 | `reviewed` | `/gate` marked the diff clean |
 | `commit_blocked` / `commit_bypass` / `commit_reviewed` | commit guard outcomes |
-| `lane_created` / `lane_removed` | `lanes new` / `lanes rm` created or removed a lane |
+| `lane_created` / `lane_removed` | `lanes new` / `lanes rm` or `lanes clear` created or removed a lane |
 | `lane_reset` | `lanes reset` returned a lane to a clean base state — the dashboard row starts fresh, same as `lane_created` |
 
 `idle` is the one that earns the dashboard its keep: with four lanes, the thing
