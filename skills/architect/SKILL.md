@@ -155,7 +155,7 @@ lanes free      # tab-separated: lane, name, path, branch. Exit 1 when none.
   the least surprising outcome and needs no session move.
 - **If it is not free but another lane is**, take the first free one. The user's
   current worktree is busy with something else and must not be disturbed.
-- **If no lane is free**, stop. Show `lanes list` and say plainly that every lane
+- **If no lane is free**, stop. Show `lanes status --once` and say plainly that every lane
   has uncommitted changes or unpushed commits, so there is nowhere to put this
   work. The user decides what to land, park or discard. Do not stash, do not
   force, do not pick a dirty lane.

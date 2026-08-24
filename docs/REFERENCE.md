@@ -66,7 +66,7 @@ Stated plainly, because finding these yourself later is worse:
 - **The event log keeps one rotated generation** (2 MiB each). It is a dashboard
   feed, not an audit trail; if you want long-term history, ship the JSONL
   somewhere else.
-- **Notifications fire only for events that arrive while `lanes ui` is running.**
+- **Notifications fire only for events that arrive while `lanes status` is running.**
   History is replayed into the display but never notified.
 - **Project-local agents and skills win over these.** A repo with its own
   `.claude/agents/` or `.claude/skills/` keeps using them, so adopting this

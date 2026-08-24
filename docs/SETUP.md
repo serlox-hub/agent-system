@@ -14,7 +14,7 @@ no config file means no events, no commit guard, nothing). Everything reversible
 | Set this machine's port prefix | `lanes base-port <n>` |
 | Set this machine's port for one service | `lanes service-port <name> <n>` |
 | Check everything is wired correctly | `lanes doctor` |
-| Watch the live lane dashboard | `lanes ui` |
+| Watch the live lane dashboard | `lanes status` |
 | Uninstall | `./install.sh --uninstall` |
 
 ---
@@ -113,7 +113,7 @@ table). Run it from inside the repo you just adopted.
 ## 4. Watch the dashboard
 
 ```bash
-lanes ui
+lanes status
 ```
 
 In a spare terminal. Empty until a session in an adopted repo produces events.
@@ -123,8 +123,8 @@ In a spare terminal. Empty until a session in an adopted repo produces events.
 ## 5. Managing lanes
 
 ```bash
-lanes list                          # worktrees, branches, dirty state, services
-lanes ui     # live dashboard — leave it running in a terminal, see §4
+lanes status # live dashboard — leave it running in a terminal, see §4
+lanes status --once                 # one-shot snapshot: worktrees, branches, dirty state, first service per lane
 lanes adopt  # scaffold .claude/agent-system.json for this repo, see §2
 lanes doctor # verify the install, the repo config and this worktree, see §3
 lanes new                           # create the next lane, detached at origin/main
@@ -132,7 +132,6 @@ lanes switch 2 feat/42-thing --create
 lanes rm 2                          # remove the top lane; refuses to lose work
 lanes reset 2                       # detach a lane back to a clean base state, keep it
 lanes free                          # lanes safe to take over (what /architect checks)
-lanes status                        # one-shot snapshot (lanes ui without leaving it running)
 lanes each 'git fetch && git merge origin/main'   # across every lane
 lanes dev 2      # start lane 2's services      (selector: 1 · 1,3 · 2-4 · . · all)
 lanes stop       # stop everything
@@ -187,7 +186,7 @@ entry in your shell profile, every `.claude/agent-system.json` in your repos.
 | Symptom | Fix |
 |---|---|
 | `lanes: command not found` | `bin/` not on PATH — re-run `./install.sh`, it prints the exact export line |
-| Nothing in `lanes ui` | Session predates the install — restart it. Then `lanes doctor` |
+| Nothing in `lanes status` | Session predates the install — restart it. Then `lanes doctor` |
 | Commit guard never fires | Check `review.commitGuard` isn't `false`, and that the repo has a config |
 | Guard fires again right after `/gate` | Expected — the tree changed since. The marker is a hash of the diff |
 | `/gate` says "nothing to review" | Check `review.excludePattern` isn't too broad — the skill prints what it excluded |

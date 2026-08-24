@@ -12,6 +12,6 @@
     "install-system": "node install.mjs",
     "uninstall-system": "node install.mjs --uninstall",
     "doctor": "node bin/lanes.mjs doctor",
-    "ui": "node bin/lanes.mjs ui"
+    "status": "node bin/lanes.mjs status"
   }
 }

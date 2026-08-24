@@ -171,7 +171,7 @@ if (UNINSTALL) {
       'In a repo you want to use this in:  lanes adopt',
       'Fill in review.domainAxes in the generated config — see docs/SETUP.md.',
       'lanes doctor        # verify',
-      'lanes ui            # in a spare terminal',
+      'lanes status        # in a spare terminal',
     ];
     if (onPath) {
       ok(`${BIN} is already on your PATH`);

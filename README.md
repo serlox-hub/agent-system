@@ -64,12 +64,12 @@ Commit small: review quality drops off past ~200 changed lines.
 ## `lanes` cheatsheet
 
 ```
-lanes list             Worktrees, branches, dirty state, running services
 lanes new              Create the next lane, detached at origin/main
 lanes switch <n> <br>  Put a branch in a lane (--create to make it)
 lanes rm <n>           Remove the top lane; refuses to lose work
 lanes dev <n>          Start a lane's services
-lanes ui               Live dashboard — leave it running in a terminal
+lanes status           Live dashboard — leave it running in a terminal
+lanes status --once    One-shot snapshot: worktrees, branches, dirty state, first service per lane
 ```
 
 Full command reference (numbering, per-machine overrides, services, colours):

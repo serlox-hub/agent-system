@@ -304,8 +304,7 @@ function marksCell(r) {
  *
  * `serviceStatus` (`lib/services.mjs`'s `status`) deletes the pidfile of a
  * confirmed-dead process, so calling this — and therefore `render()` — is not
- * side-effect-free. Pre-existing self-healing already exercised by `lanes
- * list` (`bin/lanes.mjs:593`), not introduced here.
+ * side-effect-free: every `lanes status` frame self-heals a stale pidfile.
  */
 function serviceCell(ctx, r) {
   if (!r.name) return '—';
@@ -316,9 +315,9 @@ function serviceCell(ctx, r) {
   let text = '—';
   if (st.running) {
     // The bound port, not the freshly computed one — `portBase` can be
-    // edited while the service stays up, same as `lanes list`. The `!`
-    // marker applies to the URL too: a url template is filled with the
-    // freshly computed port, which can just as easily be stale.
+    // edited while the service stays up. The `!` marker applies to the URL
+    // too: a url template is filled with the freshly computed port, which
+    // can just as easily be stale.
     const { port, moved } = boundPort(first, st);
     text = first.url ? `${first.url}${moved}` : `localhost:${port}${moved}`;
   }
@@ -337,7 +336,7 @@ export function fmtTokens(n) {
  * token count with no context-window-size table to compare it against.
  *
  * `ctxInfo`, when supplied, is a `Map<transcriptPath, {tokens,model}|null>`
- * refreshed on the same ~20-tick cadence as `laneInfo` (see `runUi`) rather
+ * refreshed on the same ~20-tick cadence as `laneInfo` (see `watchStatus`) rather
  * than read fresh every second — a real transcript's trailing line can run
  * past the 256KB fast-path window, and the full-file fallback that follows
  * measures 7-12ms on real multi-MB files, not the sub-millisecond figure a
@@ -457,7 +456,7 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
   return out.join('\n');
 }
 
-/** One-shot snapshot. Must not clear the terminal — it is a print, not a UI. */
+/** `lanes status --once`. Must not clear the terminal — it is a print, not a live view. */
 export function printStatus() {
   const ctx = resolveContext(process.cwd());
   const tail = new EventTail(EVENTS_FILE);
@@ -465,7 +464,13 @@ export function printStatus() {
   process.stdout.write(`${render(ctx, state)}\n`);
 }
 
-export async function runUi() {
+/** `lanes status`: the same frame as `printStatus`, redrawn in place once a second. */
+export async function watchStatus() {
+  // A redraw loop into a pipe or a file is an unbounded ANSI dump nobody
+  // reads — piping `lanes status` (a script, or an agent's own Bash call)
+  // means a one-shot snapshot was wanted, so give it one instead of hanging.
+  if (!process.stdout.isTTY) return printStatus();
+
   const ctx = resolveContext(process.cwd());
   const tail = new EventTail(EVENTS_FILE);
   const state = createState();

@@ -147,15 +147,10 @@ function detectCommands(root) {
 }
 
 switch (cmd) {
-  case 'ui': {
-    const { runUi } = await import(join(ROOT, 'ui', 'dashboard.mjs'));
-    await runUi();
-    break;
-  }
-
   case 'status': {
-    const { printStatus } = await import(join(ROOT, 'ui', 'dashboard.mjs'));
-    printStatus();
+    const { printStatus, watchStatus } = await import(join(ROOT, 'ui', 'dashboard.mjs'));
+    if (rest.includes('--once')) printStatus();
+    else await watchStatus();
     break;
   }
 
@@ -448,7 +443,6 @@ switch (cmd) {
   // These import lazily on purpose: the service supervisor is the only part of
   // the system that owns child processes and mutable pid state, and a failure in
   // it must never be able to take down `lanes reviewed` or the commit guard.
-  case 'list':
   case 'new':
   case 'rm':
   case 'reset':
@@ -620,30 +614,6 @@ switch (cmd) {
     // Everything below needs the service supervisor.
     const sv = await import(join(ROOT, 'lib', 'services.mjs'));
 
-    if (cmd === 'list') {
-      const w = (s, n) => String(s ?? '').padEnd(n);
-      out(`${'#'.padEnd(3)}${w('WORKTREE', 16)}${w('BRANCH', 28)}${w('STATE', 14)}SERVICES`);
-      out(`${DIM}${'─'.repeat(84)}${RESET}`);
-      for (const l of lanes) {
-        const svcs = sv.resolveServices(ctx.config, l);
-        const rendered = svcs.length
-          ? svcs.map((s) => {
-              const st = sv.status(s);
-              const { port, moved } = sv.boundPort(s, st);
-              return st.running
-                ? `\x1b[32m${s.name}:${port}${moved}\x1b[0m`
-                : `${DIM}${s.name}:${port}${RESET}`;
-            }).join('  ')
-          : `${DIM}none declared${RESET}`;
-        const TONE = { dirty: '\x1b[33m', ahead: '\x1b[32m', behind: '\x1b[31m', unknown: '\x1b[33m', free: DIM };
-        const marks = worktrees.laneMarks(l).map((t) => `${TONE[t.tone]}${t.text}${RESET}`).join(' ');
-        out(`${w(l.lane, 3)}${w(l.name, 16)}${w(l.branch, 28)}${marks.padEnd(14 + 9)}${rendered}`);
-      }
-      out();
-      out(`${DIM}~n uncommitted · +n ahead of origin/${worktrees.baseBranch(ctx.config)} · -n behind · ? = origin/${worktrees.baseBranch(ctx.config)} could not be resolved · svc! = running on a port a fresh computation no longer agrees with (e.g. after editing portBase)${RESET}`);
-      break;
-    }
-
     if (cmd === 'dev' || cmd === 'stop') {
       const targets = select(rest.find((a) => !a.startsWith('-')));
       let any = false;
@@ -808,7 +778,6 @@ switch (cmd) {
         'lanes — worktree lanes for Claude Code',
         '',
         'Lanes',
-        '  lanes list                     Worktrees, branches, dirty state, services',
         '  lanes new [--from <ref>]       Create the next lane, detached at base (or --from)',
         '  lanes rm <sel> [--force]       Remove the top lane(s); refuses to lose work',
         '  lanes reset <n> [--force]      Detach a lane back to a clean base state',
@@ -822,8 +791,7 @@ switch (cmd) {
         '  lanes logs <n> [svc] [-f]      Tail a service log',
         '',
         'Dashboard',
-        '  lanes ui                       Live dashboard of every lane',
-        '  lanes status                   One-shot snapshot',
+        '  lanes status [--once]          Live dashboard of every lane (--once: one-shot snapshot)',
         '  lanes color [<n> <hex>]        Show or set this machine\'s lane colours',
         '',
         'Setup and gates',
