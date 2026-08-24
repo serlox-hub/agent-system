@@ -496,6 +496,34 @@ switch (cmd) {
       return picked;
     };
 
+    // reset/switch/logs each act on exactly one lane, but `select` accepts the
+    // same multi-lane syntax (`1,3`, `2-4`, `all`) as rm/dev/stop/each. Refused
+    // rather than narrowed to the first match: `reset --force` is unrecoverable
+    // per lane, and switch/logs cannot mean more than one lane at all (a branch
+    // checks out in one worktree; --follow already refuses >1 target) — so a
+    // batch form would only exist for reset, and only as a way to lose the
+    // whole stack at once. Also refused rather than looped, for the same
+    // reason: `rm`/`dev`/`stop` iterate because their per-lane action is either
+    // safe or explicitly force-gated per lane already; a bare `lanes reset all
+    // --force` looping would force-discard every lane's work in one command.
+    // `usage` covers the *other* zero-lane case: an omitted argument resolves
+    // through `select`'s own "empty means all" (matching dev/stop — rm refuses
+    // a bare selector on purpose, see above), so without this a caller who
+    // typed nothing would be told how many lanes they never mentioned, and a
+    // selector that is syntactically present but matches nothing (`lanes logs
+    // ,`) would hand the caller `undefined` instead of failing here.
+    const selectOne = (arg, verb, usage) => {
+      if (String(arg ?? '').trim() === '') die(usage);
+      const targets = select(arg);
+      if (targets.length !== 1) {
+        die(
+          `lanes ${verb} takes exactly one lane, got ${targets.length}` +
+            (targets.length ? ` (${targets.map((l) => l.lane).join(', ')}) — run it once per lane.` : ' — no lane matched that selector.'),
+        );
+      }
+      return targets[0];
+    };
+
     if (cmd === 'free') {
       const free = lanes.filter(worktrees.isFree);
       if (!free.length) {
@@ -563,8 +591,7 @@ switch (cmd) {
     if (cmd === 'reset') {
       const force = rest.includes('--force');
       const sel = rest.find((a) => !a.startsWith('-'));
-      if (!sel) die('Usage: lanes reset <lane> [--force]');
-      const [target] = select(sel);
+      const target = selectOne(sel, 'reset', 'Usage: lanes reset <lane> [--force]');
       const res = worktrees.resetLane(ctx.config, target, { force });
       if (res.error) die(res.error);
       // A lane going idle-branch-free is as much a fresh start as `lanes new`
@@ -586,8 +613,9 @@ switch (cmd) {
 
     if (cmd === 'switch') {
       const [sel, branch] = rest.filter((a) => !a.startsWith('-'));
-      if (!sel || !branch) die('Usage: lanes switch <lane> <branch> [--create]');
-      const [target] = select(sel);
+      const usage = 'Usage: lanes switch <lane> <branch> [--create]';
+      if (!branch) die(usage); // selectOne(sel, ...) below covers a missing/empty sel itself
+      const target = selectOne(sel, 'switch', usage);
       const res = worktrees.switchBranch(ctx.config, target, branch, { create: rest.includes('--create') });
       if (res.error) die(res.error);
       out(`${OK} lane ${res.lane} (${res.name}) → ${res.branch}`);
@@ -671,8 +699,11 @@ switch (cmd) {
 
     if (cmd === 'logs') {
       const args = rest.filter((a) => !a.startsWith('-'));
-      const [target] = select(args[0]);
-      if (!target) die('Usage: lanes logs <lane> [service] [--follow]');
+      // A missing lane arg resolves through `select`'s own "empty means all"
+      // (matching dev/stop — rm refuses a bare selector on purpose, see
+      // above), so it must go through selectOne's own usage check too, not
+      // silently pick the lowest-numbered lane.
+      const target = selectOne(args[0], 'logs', 'Usage: lanes logs <lane> [service] [--follow]');
       const svcs = sv.resolveServices(ctx.config, target);
       const picked = args[1] ? svcs.filter((s) => s.name === args[1]) : svcs;
       if (!picked.length) die(`no such service in lane ${target.lane}: ${args[1] ?? '(none declared)'}`);
@@ -837,6 +868,7 @@ switch (cmd) {
         '  lanes allow-commit             One-shot bypass of the commit guard',
         '',
         'Selectors: 1 · 1,3 · 2-4 · . (current lane) · all (default)',
+        '  commands shown with <n> above (reset, switch, logs) take exactly one lane',
         '',
       ].join('\n'),
     );

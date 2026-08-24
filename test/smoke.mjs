@@ -803,6 +803,7 @@ test('lane selectors cover every form and report the unknown ones', () => {
   assert.deepEqual(pick('3,1'), [1, 3], 'normalised to lane order');
   assert.deepEqual(pick('1-2'), [1, 2]);
   assert.deepEqual(pick('lane3'), [3], 'by name');
+  assert.deepEqual(pick(','), [], 'a selector of only separators matches nothing, but is not "unknown" — callers needing exactly one lane must check the count themselves');
   assert.deepEqual(pick('.', join(lane2, 'src')), [2], 'a subdirectory still resolves');
   assert.deepEqual(worktrees.parseSelector('9,nope', all).unknown, ['nope', '9']);
 });
@@ -1601,6 +1602,86 @@ test('lanes reset detaches a lane back to a clean base state through the real CL
   assert.ok(emitted, 'lanes reset must emit lane_reset, so the dashboard row does not keep showing the finished task');
   assert.equal(emitted.lane, 1);
   assert.equal(emitted.worktree, 'lane1');
+});
+
+test('reset, switch and logs each refuse a multi-lane selector rather than silently acting on the first match', () => {
+  const { main, wtd, cfg } = makeLanesFixture('cli-selectone', 3);
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  for (const n of [1, 2, 3]) git(join(wtd, `lane${n}`), 'checkout', '-b', `feat/${n}-selectone`);
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['reset', 'all', '--force'], { cwd: main, stdio: 'pipe' }),
+    /lanes reset takes exactly one lane, got 3 \(1, 2, 3\)/,
+  );
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['switch', '1,2', 'main'], { cwd: main, stdio: 'pipe' }),
+    /lanes switch takes exactly one lane, got 2 \(1, 2\)/,
+  );
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['logs'], { cwd: main, stdio: 'pipe' }),
+    /Usage: lanes logs <lane>/,
+    'no lane argument at all, with 3 lanes declared, must ask for one rather than naming all 3 as if the caller had typed "all"',
+  );
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['logs', ','], { cwd: main, stdio: 'pipe' }),
+    /lanes logs takes exactly one lane, got 0 — no lane matched that selector\./,
+    'a non-empty selector that matches zero lanes must fail cleanly here, not crash downstream on an undefined lane',
+  );
+
+  const branches = worktrees.enumerateLanes(cfg).map((l) => l.branch).sort();
+  assert.deepEqual(
+    branches,
+    ['feat/1-selectone', 'feat/2-selectone', 'feat/3-selectone'],
+    'every refusal must happen before touching any lane — lane1 in particular, the one a bare `[target] = select(...)` would have silently picked',
+  );
+});
+
+test('reset, switch and logs still resolve a genuine single-lane selector correctly through selectOne', () => {
+  const { main, wtd, cfg } = makeLanesFixture('cli-selectone-happy', 2);
+  const svcCfg = { ...cfg, dev: { services: [{ name: 'web', command: 'true', portBase: 300 }] } };
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(svcCfg));
+
+  // switch: exactly-one-match happy path (numeric lane, plain branch name).
+  const switchOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['switch', '1', 'selectone/happy', '--create'], {
+    cwd: main,
+    encoding: 'utf8',
+  });
+  assert.match(switchOut, /lane 1 \(lane1\) → selectone\/happy/);
+  assert.equal(worktrees.enumerateLanes(cfg).find((l) => l.lane === 1).branch, 'selectone/happy');
+
+  // logs: exactly-one-match happy path.
+  const logsOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['logs', '2'], { cwd: main, encoding: 'utf8' });
+  assert.match(logsOut, /lane 2 · web/);
+  assert.match(logsOut, /no log yet/);
+});
+
+test('lanes switch dies with its own usage rather than misreading a lone positional as the branch', () => {
+  const { main, cfg } = makeLanesFixture('cli-switch-usage', 1);
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+
+  // `lanes switch main` has one positional arg, which is consumed as <lane>
+  // (not <branch>) by `[sel, branch] = rest.filter(...)`. The `if (!branch)`
+  // guard must catch this and print usage — not hand "main" to selectOne and
+  // report it as an unmatched lane selector.
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['switch', 'main'], { cwd: main, stdio: 'pipe' }),
+    /Usage: lanes switch <lane> <branch> \[--create\]/,
+  );
+  assert.equal(worktrees.enumerateLanes(cfg)[0].branch, 'main', 'refused before touching the lane');
+});
+
+test('lanes reset with no lane argument still dies with its own usage now that the standalone !sel precheck was folded into selectOne', () => {
+  const { main, cfg } = makeLanesFixture('cli-reset-usage', 1);
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['reset'], { cwd: main, stdio: 'pipe' }),
+    /Usage: lanes reset <lane> \[--force\]/,
+  );
 });
 
 test('lanes doctor warns about a directory under worktreesDir that does not match lane<N>', () => {
