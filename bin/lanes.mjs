@@ -445,6 +445,7 @@ switch (cmd) {
   // it must never be able to take down `lanes reviewed` or the commit guard.
   case 'new':
   case 'rm':
+  case 'clear':
   case 'reset':
   case 'switch':
   case 'dev':
@@ -491,21 +492,28 @@ switch (cmd) {
     };
 
     // reset/switch/logs each act on exactly one lane, but `select` accepts the
-    // same multi-lane syntax (`1,3`, `2-4`, `all`) as rm/dev/stop/each. Refused
+    // same multi-lane syntax (`1,3`, `2-4`, `all`) as dev/stop/each. Refused
     // rather than narrowed to the first match: `reset --force` is unrecoverable
     // per lane, and switch/logs cannot mean more than one lane at all (a branch
     // checks out in one worktree; --follow already refuses >1 target) — so a
     // batch form would only exist for reset, and only as a way to lose the
     // whole stack at once. Also refused rather than looped, for the same
-    // reason: `rm`/`dev`/`stop` iterate because their per-lane action is either
+    // reason: `dev`/`stop` iterate because their per-lane action is either
     // safe or explicitly force-gated per lane already; a bare `lanes reset all
     // --force` looping would force-discard every lane's work in one command.
     // `usage` covers the *other* zero-lane case: an omitted argument resolves
-    // through `select`'s own "empty means all" (matching dev/stop — rm refuses
-    // a bare selector on purpose, see above), so without this a caller who
-    // typed nothing would be told how many lanes they never mentioned, and a
-    // selector that is syntactically present but matches nothing (`lanes logs
-    // ,`) would hand the caller `undefined` instead of failing here.
+    // through `select`'s own "empty means all" (matching dev/stop), so without
+    // this a caller who typed nothing would be told how many lanes they never
+    // mentioned, and a selector that is syntactically present but matches
+    // nothing (`lanes logs ,`) would hand the caller `undefined` instead of
+    // failing here.
+    //
+    // `rm` doesn't go through `select`/`selectOne` at all: it never takes an
+    // arbitrary selector, only an optional confirmation that must name the
+    // current top of the stack (see its own block below) — there is no "empty
+    // means all" for it to inherit, and no multi-lane form to refuse, because
+    // removing every lane in one command is `lanes clear`, a different word
+    // chosen so it can't be reached by a typo or muscle-memory on `rm`.
     const selectOne = (arg, verb, usage) => {
       if (String(arg ?? '').trim() === '') die(usage);
       const targets = select(arg);
@@ -552,16 +560,9 @@ switch (cmd) {
       break;
     }
 
-    if (cmd === 'rm') {
-      const force = rest.includes('--force');
-      // A bare `lanes rm` must not default to "all": every lane detached at
-      // base (D26's resting state) is free, so an omitted selector could
-      // silently remove the whole stack. `all` is still available, explicitly.
-      const sel = rest.find((a) => !a.startsWith('-'));
-      if (!sel) die('Usage: lanes rm <lane|name|all> [--force]');
-      const targets = select(sel);
-      if (!targets.length) die('Usage: lanes rm <lane|name|all> [--force]');
-      const res = worktrees.removeWorktree(ctx.config, targets, { force });
+    // Shared by `rm` and `clear` — both just choose *which* lanes to pass to
+    // removeWorktree and report the same shape of result.
+    const reportRemoval = (res) => {
       for (const r of res.removed || []) {
         emit({
           ev: 'lane_removed',
@@ -579,6 +580,40 @@ switch (cmd) {
         }
       }
       if (res.error) die(res.error);
+    };
+
+    if (cmd === 'rm') {
+      const force = rest.includes('--force');
+      const top = Math.max(...lanes.map((l) => l.lane));
+      // `rm` only ever pops the top: mechanically that's the *only* lane a
+      // single `rm` can ever legally remove (removeWorktree refuses anything
+      // else), so a bare `lanes rm` defaulting to it loses no safety — unlike
+      // `all`, which would silently take the whole stack. An explicit
+      // lane/name argument is still accepted, but purely as a confirmation
+      // that must name that same top lane; anything else (a lower lane, a
+      // range, `all`) is refused, pointing at `lanes clear` for "every lane".
+      const arg = rest.find((a) => !a.startsWith('-'));
+      if (arg === 'all') die('lanes rm removes one lane at a time — use `lanes clear` to remove every lane.');
+      // Bare `rm` bypasses `select` entirely rather than passing '' through it
+      // — `select('')` means "every lane" for dev/stop/each, which is exactly
+      // the default this command must not have.
+      const targets = arg === undefined ? [lanes.find((l) => l.lane === top)] : select(arg);
+      const target = targets.length === 1 ? targets[0] : null;
+      if (!target || target.lane !== top) {
+        die(
+          `lanes rm always removes the top of the stack — top is lane ${top}, ` +
+            `try \`lanes rm\` or \`lanes rm ${top}\`. To remove every lane, use \`lanes clear\`.`,
+        );
+      }
+      reportRemoval(worktrees.removeWorktree(ctx.config, [target], { force }));
+      break;
+    }
+
+    if (cmd === 'clear') {
+      const force = rest.includes('--force');
+      const stray = rest.find((a) => !a.startsWith('-'));
+      if (stray !== undefined) die('lanes clear takes no lane — it removes every lane. To remove one, use `lanes rm`.');
+      reportRemoval(worktrees.removeWorktree(ctx.config, lanes, { force, wholeStack: true }));
       break;
     }
 
@@ -810,7 +845,8 @@ switch (cmd) {
         '',
         'Lanes',
         '  lanes new [--from <ref>]       Create the next lane, detached at base (or --from)',
-        '  lanes rm <sel> [--force]       Remove the top lane(s); refuses to lose work',
+        '  lanes rm [--force]             Remove the top lane; refuses to lose work',
+        '  lanes clear [--force]          Remove every lane, top-down; refuses to lose work',
         '  lanes reset <n> [--force]      Detach a lane back to a clean base state',
         '  lanes switch <n> <b> [--create]  Point a lane at another branch',
         '  lanes free                     Lanes safe to take over (used by /architect)',

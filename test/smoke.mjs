@@ -1605,20 +1605,103 @@ test('lanes rm refuses a non-top lane through the real CLI, naming the actual to
   assert.equal(existsSync(join(wtDir, 'lane1')), true, 'refused — lane1 must still be there');
 });
 
-test('lanes rm with no selector at all refuses, rather than defaulting to removing every lane', () => {
+// Every CLI-level lane test needs its own throwaway fixture, not the shared
+// repo/wtDir: several of them (rm, clear, reset, doctor with a stray
+// directory) actually remove or rewrite lane directories, and later tests in
+// this file (the ctx/render suite) rely on the shared wtDir keeping its real
+// lane1..lane3 on disk throughout the run. `extend` lets a caller write a
+// modified config (e.g. adding dev.services) without duplicating the
+// fixture/config-write dance just to change one field.
+function makeCliLanesFixture(name, laneCount, extend) {
+  const { main, wtd, cfg } = makeLanesFixture(name, laneCount);
+  const written = extend ? extend(cfg) : cfg;
+  mkdirSync(join(main, '.claude'), { recursive: true });
+  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(written));
+  return { main, wtd, cfg: written };
+}
+
+test('lanes rm with no argument removes the top lane, not every lane', () => {
+  const { main, wtd, cfg } = makeCliLanesFixture('cli-rm-top', 3);
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['rm'], { cwd: main, encoding: 'utf8' });
+  const removed = readEvents().findLast((e) => e.project === cfg.project && e.ev === 'lane_removed');
+  assert.equal(removed.lane, 3, 'bare rm pops the current top of the stack');
+  assert.equal(worktrees.enumerateLanes(cfg).length, 2, 'only the top lane is gone');
+  assert.equal(existsSync(join(wtd, 'lane2')), true, 'lower lanes are untouched');
+});
+
+test('lanes rm all is refused — removing every lane needs `lanes clear`', () => {
+  const { main, cfg } = makeCliLanesFixture('cli-rm-all', 2);
   assert.throws(
-    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['rm'], { cwd: repo, stdio: 'pipe' }),
-    /Usage: lanes rm/,
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', 'all'], { cwd: main, stdio: 'pipe' }),
+    /lanes clear/,
   );
-  assert.equal(worktrees.enumerateLanes(wtCfg).length, 3, 'refused before touching anything — lane1..lane3 all still there');
+  assert.equal(worktrees.enumerateLanes(cfg).length, 2, 'refused before touching anything');
+});
+
+test('lanes rm refuses a range — it removes exactly one lane, never several', () => {
+  const { main, cfg } = makeCliLanesFixture('cli-rm-range', 2);
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', '1-2'], { cwd: main, stdio: 'pipe' }),
+    /always removes the top of the stack/,
+  );
+  assert.equal(worktrees.enumerateLanes(cfg).length, 2, 'refused before touching anything');
+});
+
+test('lanes clear refuses while any lane is dirty, same blockers as rm, and --force removes every lane', () => {
+  const { main, wtd, cfg } = makeCliLanesFixture('cli-clear', 3);
+  writeFileSync(join(wtd, 'lane2', 'dirty.txt'), 'x');
+
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['clear'], { cwd: main, stdio: 'pipe' }),
+    /lane 2/,
+  );
+  assert.equal(worktrees.enumerateLanes(cfg).length, 3, 'refused before touching anything');
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['clear', '--force'], { cwd: main, encoding: 'utf8' });
+  assert.equal(worktrees.enumerateLanes(cfg).length, 0);
+});
+
+test('lanes clear with a lane argument refuses instead of silently removing every lane', () => {
+  const { main, cfg } = makeCliLanesFixture('cli-clear-arg', 3);
+  assert.throws(
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['clear', '2'], { cwd: main, stdio: 'pipe' }),
+    /lanes clear takes no lane/,
+  );
+  assert.equal(
+    worktrees.enumerateLanes(cfg).length,
+    3,
+    'refused before touching anything — not narrowed to lane 2, and not the whole stack either',
+  );
+});
+
+test('lanes clear succeeds on a stack with a gap left by removing a lane directory by hand', () => {
+  const { main, wtd, cfg } = makeCliLanesFixture('cli-clear-gap', 3);
+  // Not `lanes rm` — a directory deleted outside the tool, the way `doctor`'s
+  // "stray directory" tests simulate drift, leaves lane numbering [1, 3] with
+  // no 2. The contiguous-run guard exists to stop a *partial* removal from
+  // stranding a number like this; `clear` must still take the whole stack.
+  rmSync(join(wtd, 'lane2'), { recursive: true, force: true });
+  assert.deepEqual(worktrees.enumerateLanes(cfg).map((l) => l.lane), [1, 3], 'lane2 is gone from disk, leaving a gap');
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['clear'], { cwd: main, encoding: 'utf8' });
+  assert.equal(worktrees.enumerateLanes(cfg).length, 0, 'wholeStack skips the contiguous-run guard, so the gap does not block clear');
+});
+
+test('removeWorktree without wholeStack still refuses that same gapped stack, pinning the boundary', () => {
+  const { wtd, cfg } = makeLanesFixture('rm-gap-boundary', 3);
+  rmSync(join(wtd, 'lane2'), { recursive: true, force: true });
+  const lanes = worktrees.enumerateLanes(cfg);
+  assert.deepEqual(lanes.map((l) => l.lane), [1, 3], 'same gapped state as the clear test above');
+
+  const res = worktrees.removeWorktree(cfg, lanes);
+  assert.match(res.error, /top is lane 3/, 'the exact lanes clear would pass, minus wholeStack, is refused like any other non-contiguous selection');
+  assert.equal(worktrees.enumerateLanes(cfg).length, 2, 'refused before touching anything');
 });
 
 test('lanes reset detaches a lane back to a clean base state through the real CLI', () => {
-  const { main, wtd, cfg } = makeLanesFixture('cli-reset', 1);
+  const { main, wtd, cfg } = makeCliLanesFixture('cli-reset', 1);
   const lanePath = join(wtd, 'lane1');
   git(lanePath, 'checkout', '-b', 'feat/1-cli-reset');
-  mkdirSync(join(main, '.claude'), { recursive: true });
-  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
 
   const out = execFileSync(join(ROOT, 'bin', 'lanes'), ['reset', '1'], { cwd: main, encoding: 'utf8' });
   assert.match(out, /lane 1 \(lane1\)/);
@@ -1635,9 +1718,7 @@ test('lanes reset detaches a lane back to a clean base state through the real CL
 });
 
 test('reset, switch and logs each refuse a multi-lane selector rather than silently acting on the first match', () => {
-  const { main, wtd, cfg } = makeLanesFixture('cli-selectone', 3);
-  mkdirSync(join(main, '.claude'), { recursive: true });
-  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  const { main, wtd, cfg } = makeCliLanesFixture('cli-selectone', 3);
   for (const n of [1, 2, 3]) git(join(wtd, `lane${n}`), 'checkout', '-b', `feat/${n}-selectone`);
 
   assert.throws(
@@ -1668,10 +1749,10 @@ test('reset, switch and logs each refuse a multi-lane selector rather than silen
 });
 
 test('reset, switch and logs still resolve a genuine single-lane selector correctly through selectOne', () => {
-  const { main, wtd, cfg } = makeLanesFixture('cli-selectone-happy', 2);
-  const svcCfg = { ...cfg, dev: { services: [{ name: 'web', command: 'true', portBase: 300 }] } };
-  mkdirSync(join(main, '.claude'), { recursive: true });
-  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(svcCfg));
+  const { main, wtd, cfg } = makeCliLanesFixture('cli-selectone-happy', 2, (c) => ({
+    ...c,
+    dev: { services: [{ name: 'web', command: 'true', portBase: 300 }] },
+  }));
 
   // switch: exactly-one-match happy path (numeric lane, plain branch name).
   const switchOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['switch', '1', 'selectone/happy', '--create'], {
@@ -1688,9 +1769,7 @@ test('reset, switch and logs still resolve a genuine single-lane selector correc
 });
 
 test('lanes switch dies with its own usage rather than misreading a lone positional as the branch', () => {
-  const { main, cfg } = makeLanesFixture('cli-switch-usage', 1);
-  mkdirSync(join(main, '.claude'), { recursive: true });
-  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  const { main, cfg } = makeCliLanesFixture('cli-switch-usage', 1);
 
   // `lanes switch main` has one positional arg, which is consumed as <lane>
   // (not <branch>) by `[sel, branch] = rest.filter(...)`. The `if (!branch)`
@@ -1704,9 +1783,7 @@ test('lanes switch dies with its own usage rather than misreading a lone positio
 });
 
 test('lanes reset with no lane argument still dies with its own usage now that the standalone !sel precheck was folded into selectOne', () => {
-  const { main, cfg } = makeLanesFixture('cli-reset-usage', 1);
-  mkdirSync(join(main, '.claude'), { recursive: true });
-  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  const { main } = makeCliLanesFixture('cli-reset-usage', 1);
 
   assert.throws(
     () => execFileSync(join(ROOT, 'bin', 'lanes'), ['reset'], { cwd: main, stdio: 'pipe' }),
@@ -1715,9 +1792,7 @@ test('lanes reset with no lane argument still dies with its own usage now that t
 });
 
 test('lanes doctor warns about a directory under worktreesDir that does not match lane<N>', () => {
-  const { main, wtd, cfg } = makeLanesFixture('doctor-stray', 1);
-  mkdirSync(join(main, '.claude'), { recursive: true });
-  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
+  const { main, wtd } = makeCliLanesFixture('doctor-stray', 1);
   mkdirSync(join(wtd, 'old-style-name'));
 
   const out = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: main, encoding: 'utf8' });
@@ -1726,10 +1801,8 @@ test('lanes doctor warns about a directory under worktreesDir that does not matc
 });
 
 test('lanes free dies naming the stray directories when worktreesDir resolves but holds none matching lane<N>', () => {
-  const { main, wtd, cfg } = makeLanesFixture('stray-only', 0); // no conforming lanes at all
+  const { main, wtd } = makeCliLanesFixture('stray-only', 0); // no conforming lanes at all
   mkdirSync(join(wtd, 'wt1'));
-  mkdirSync(join(main, '.claude'), { recursive: true });
-  writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
 
   assert.throws(
     () => execFileSync(join(ROOT, 'bin', 'lanes'), ['free'], { cwd: main, stdio: 'pipe' }),
