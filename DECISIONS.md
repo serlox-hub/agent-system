@@ -19,7 +19,7 @@ reversed, never to make room.
 
 ## D27 — The exhaustive `lanes` command list lives in `docs/SETUP.md`, not `README.md`
 `core` · 2026-08 · `README.md`, `docs/SETUP.md`
-The README is the pitch, held near 100 lines, so a 21-command list would crowd
+The README is the pitch, held near 100 lines, so a 19-command list would crowd
 out what actually decides whether someone adopts the tool. Keeping one
 canonical list means a new command can't be documented in one place and
 forgotten in the other.
@@ -45,12 +45,16 @@ Rejected: a fixed-denominator percentage — an earlier draft used 200K and real
 sonnet-5 sessions hit 165% of it, a confident-looking number that is wrong on
 exactly the sessions this feature exists to warn about.
 
-## D24 — `boundPort()` lives in `lib/services.mjs`, shared by `lanes list` and `lanes ui`
-`core` · 2026-08 · `lib/services.mjs:boundPort` · #3
-Both renderers computed the bound-port/`!`-divergence formula independently — the same
-class of drift `laneMarks` was extracted once to prevent. Rejected: leaving it duplicated,
-which issue #3's own Out of scope named — a two-screens-can-disagree formula outweighs
-staying inside that line.
+## D24 — `boundPort` stays in `lib/services.mjs`, not inlined into `serviceCell`
+`core` · 2026-08 · `lib/services.mjs:boundPort`
+Has exactly one caller now (`ui/dashboard.mjs`'s `serviceCell`, `lanes status`'s
+only renderer since `lanes list` was retired), but its own branches — stopped,
+running-and-matching, running-and-diverged, and a pidfile that never recorded a
+port — get direct test coverage this way instead of only exercising it
+indirectly through the renderer.
+Rejected: inlining it into `serviceCell` now that only one caller is left — the
+obvious cleanup, but it drops those branches back into a renderer, untestable
+except through the full `render()` output.
 
 ## D23 — agent-system never installs a `statusLine` hook, only merges into `hooks`
 `product` · 2026-08 · `install.mjs`, `hooks/emit.mjs`, `lib/transcript.mjs` · #4
@@ -71,13 +75,13 @@ directory in hand, but a linked worktree's root isn't shared; every lane would
 need its own copy. Resolved at the MAIN worktree's root instead (`--git-common-dir`).
 
 ## D21 — `planCreate` creates a missing `worktreesDir` itself, but only if its parent already exists
-`core` · 2026-08 · `lib/worktrees.mjs:124`
-`list`/`doctor`/`ui` must stay read-only, but `new` is itself an act of creation —
+`core` · 2026-08 · `lib/worktrees.mjs:planCreate`
+`doctor`/`status` must stay read-only, but `new` is itself an act of creation —
 refusing a path `adopt` just proposed is a dead end. The parent check stops it
 from silently creating a stale or mistyped path instead of reporting it.
 Rejected: routing through the read-only `worktreesDir()` accessor — the obvious
 cleanup, but it reintroduces the refusal this exists to avoid, or makes
-list/doctor/ui create directories as a side effect of reading state.
+doctor/status create directories as a side effect of reading state.
 
 ## D15 — The quality gates run only in `/gate` Phase 5, never in the reviewer
 `product` · 2026-08 · `skills/gate/SKILL.md`, `agents/code-reviewer.md`

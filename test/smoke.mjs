@@ -691,16 +691,32 @@ test('laneMarks: a lane with no git data at all stays empty — it must not clai
   assert.deepEqual(worktrees.laneMarks({}), []);
 });
 
-test('lanes list shows a dirty lane as ~N and documents the new ? token in its legend', () => {
-  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: repo, encoding: 'utf8' });
+test('lanes status --once shows a dirty lane as ~N', () => {
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['status', '--once'], { cwd: repo, encoding: 'utf8' });
   const row = output.split('\n').find((l) => l.includes('lane2'));
   assert.ok(row, 'lane2 must have a row');
-  assert.match(row, /~\d+/, 'lane2 has real uncommitted changes from earlier tests, so ~N must still show in `lanes list`');
-  assert.match(
-    output,
-    /\? = origin\/main could not be resolved/,
-    'the legend must document the ? token, alongside the pre-existing ~n/+n/-n/svc! ones',
+  assert.match(row, /~\d+/, 'lane2 has real uncommitted changes from earlier tests, so ~N must still show');
+});
+
+test('lanes status (no --once) falls back to a single printStatus frame when stdout is not a TTY', () => {
+  // execFileSync captures stdout into a pipe, so process.stdout.isTTY is
+  // false in the child — same as any non-interactive caller (a script, or an
+  // agent's own Bash call). watchStatus must detect that and return a single
+  // printStatus() frame instead of hiding the cursor and looping forever with
+  // setInterval + `await new Promise(() => {})`, which would hang this test
+  // until the timeout below kills it.
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['status'], { cwd: repo, encoding: 'utf8', timeout: 5000 });
+  const row = output.split('\n').find((l) => l.includes('lane2'));
+  assert.ok(row, 'lane2 must have a row, same shape as --once');
+  assert.match(row, /~\d+/, 'same dirty-lane content as --once');
+  assert.equal(
+    output.split('agent-system').length - 1,
+    1,
+    'exactly one frame — a looping redraw would repeat the title on every tick',
   );
+  assert.ok(!output.includes(`${ESC}[2J`), 'must not clear the screen — that is the interactive loop only');
+  assert.ok(!output.includes(`${ESC}[?25l`), 'must not hide the cursor — that is the interactive loop only');
+  assert.ok(!output.includes('ctrl-c to quit'), 'the interactive footer must not appear in the one-shot fallback');
 });
 
 test('planCreate picks max(existing lane numbers) + 1, never a plain count — a gap does not get backfilled', () => {
@@ -1086,11 +1102,10 @@ test('a project with no dev.services declared resolves to none', () => {
   assert.deepEqual(sv.resolveServices(wtCfg, worktrees.enumerateLanes(wtCfg)[0]), []);
 });
 
-// boundPort is the shared helper `lanes list` (bin/lanes.mjs) and the
-// dashboard's serviceCell (ui/dashboard.mjs) both now consume, so its own
-// branches — not running, running-and-matching, running-and-diverged, and a
-// pidfile that never recorded a port — get direct coverage here rather than
-// only indirectly through the two callers.
+// boundPort is a pure helper the dashboard's serviceCell (ui/dashboard.mjs)
+// consumes, so its own branches — not running, running-and-matching,
+// running-and-diverged, and a pidfile that never recorded a port — get direct
+// coverage here rather than only indirectly through the renderer.
 test('boundPort: stopped or running-with-a-matching-port returns the fresh port with no ! marker', () => {
   const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, lane2 — web.port is '3002'
   const [web] = sv.resolveServices(svcCfg, lane);
@@ -1261,20 +1276,20 @@ test('dashboard: a row with no .name (foreign project or vanished lane) is never
   );
 });
 
-test('lanes list SERVICES column: boundPort wiring is unchanged after the extraction — same port, same ! marker, same colours', () => {
+test('lanes status --once SERVICE cell: boundPort wiring shows the bound port and the ! marker on divergence', () => {
   // A dedicated fixture, not svcCfg/wtDir: this needs dev.services in the
-  // *committed* config the real `lanes list` CLI reads from `cwd`, which the
+  // *committed* config the real `lanes status` CLI reads from `cwd`, which the
   // shared repo/wtDir fixture deliberately does not declare.
-  const main = join(TMP, 'list-services');
+  const main = join(TMP, 'status-services');
   mkdirSync(main);
   git(main, 'init', '-q');
   git(main, 'config', 'user.email', 'test@test.test');
   git(main, 'config', 'user.name', 'test');
   mkdirSync(join(main, '.claude'));
-  const svcWtDir = join(TMP, 'list-services-wts');
+  const svcWtDir = join(TMP, 'status-services-wts');
   const cfgPath = join(main, '.claude', 'agent-system.json');
   const cfg = {
-    project: 'list-services',
+    project: 'status-services',
     worktreesDir: svcWtDir,
     basePort: 300,
     dev: { services: [{ name: 'web', command: 'echo web {port} && sleep 30', portBase: 300 }] },
@@ -1290,8 +1305,8 @@ test('lanes list SERVICES column: boundPort wiring is unchanged after the extrac
   const started = sv.start(web);
   assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
   try {
-    const before = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: main, encoding: 'utf8' });
-    assert.match(before, /\x1b\[32mweb:3001\x1b\[0m/, 'running, matching port: green, no ! marker');
+    const before = execFileSync(join(ROOT, 'bin', 'lanes'), ['status', '--once'], { cwd: main, encoding: 'utf8' });
+    assert.match(before, /localhost:3001(?!!)/, 'running, matching port: no ! marker');
 
     // Not a renumber — lane numbers no longer move at all (D26). Editing the
     // committed portBase is now the only way a bound port and a fresh
@@ -1299,8 +1314,8 @@ test('lanes list SERVICES column: boundPort wiring is unchanged after the extrac
     // keyed by worktree name, so the same pid file — and its recorded port,
     // 3001 — still applies, but a fresh computation now disagrees (3501).
     writeFileSync(cfgPath, JSON.stringify({ ...cfg, dev: { services: [{ ...cfg.dev.services[0], portBase: 350 }] } }));
-    const after = execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: main, encoding: 'utf8' });
-    assert.match(after, /\x1b\[32mweb:3001!\x1b\[0m/, 'the bound port is shown, marked !, once portBase changes under it');
+    const after = execFileSync(join(ROOT, 'bin', 'lanes'), ['status', '--once'], { cwd: main, encoding: 'utf8' });
+    assert.match(after, /localhost:3001!/, 'the bound port is shown, marked !, once portBase changes under it');
   } finally {
     sv.stop(web);
   }
@@ -1449,7 +1464,7 @@ test('the sh wrapper resolves and runs the CLI', () => {
   const help = execFileSync(join(ROOT, 'bin', 'lanes'), { encoding: 'utf8' });
   // Assert on subcommands, not the tagline: the banner wording is cosmetic and
   // a test that fails on a reworded headline is noise.
-  for (const sub of ['lanes list', 'lanes dev', 'lanes doctor', 'lanes reviewed']) {
+  for (const sub of ['lanes status', 'lanes dev', 'lanes doctor', 'lanes reviewed']) {
     assert.ok(help.includes(sub), `help is missing ${sub}`);
   }
 });
@@ -1590,14 +1605,14 @@ test('lanes doctor warns about a directory under worktreesDir that does not matc
   assert.match(out, /old-style-name/);
 });
 
-test('lanes list dies naming the stray directories when worktreesDir resolves but holds none matching lane<N>', () => {
+test('lanes free dies naming the stray directories when worktreesDir resolves but holds none matching lane<N>', () => {
   const { main, wtd, cfg } = makeLanesFixture('stray-only', 0); // no conforming lanes at all
   mkdirSync(join(wtd, 'wt1'));
   mkdirSync(join(main, '.claude'), { recursive: true });
   writeFileSync(join(main, '.claude', 'agent-system.json'), JSON.stringify(cfg));
 
   assert.throws(
-    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['list'], { cwd: main, stdio: 'pipe' }),
+    () => execFileSync(join(ROOT, 'bin', 'lanes'), ['free'], { cwd: main, stdio: 'pipe' }),
     /wt1/,
     'must name the actual stray directory, not just say "set worktreesDir" when it is already set correctly',
   );
@@ -2110,7 +2125,7 @@ test('render shows — in the ctx line when no transcript has ever been recorded
   assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '—');
 });
 
-test('render uses a supplied ctxInfo map instead of reading the transcript itself — the throttle runUi relies on', () => {
+test('render uses a supplied ctxInfo map instead of reading the transcript itself — the throttle watchStatus relies on', () => {
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/never/actually/read.jsonl' })]);
   const ctxInfo = new Map([['/never/actually/read.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);
   const lines = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo).split('\n');

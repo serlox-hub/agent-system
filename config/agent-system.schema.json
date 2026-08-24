@@ -14,7 +14,7 @@
     },
     "worktreesDir": {
       "type": "string",
-      "description": "Directory holding the fixed worktrees. Each is auto-named `lane<N>` by `lanes new` (N = max existing + 1) — the number is baked into the directory name at creation time, so it stays stable across add/remove; it is never recomputed from position. Supports ~ expansion. This is only the DEFAULT: `lanes worktrees-dir <path>` sets a per-machine override in the gitignored `.claude/agent-system.local.json`, which wins over this field whenever present (useful when teammates want their lanes on different disks). `lanes adopt` writes new values there, never here. Omit this (and basePort) if the repo does not use worktrees: lanes are disabled, `lanes ui` falls back to whatever sessions appear in the log, and everything else still works."
+      "description": "Directory holding the fixed worktrees. Each is auto-named `lane<N>` by `lanes new` (N = max existing + 1) — the number is baked into the directory name at creation time, so it stays stable across add/remove; it is never recomputed from position. Supports ~ expansion. This is only the DEFAULT: `lanes worktrees-dir <path>` sets a per-machine override in the gitignored `.claude/agent-system.local.json`, which wins over this field whenever present (useful when teammates want their lanes on different disks). `lanes adopt` writes new values there, never here. Omit this (and basePort) if the repo does not use worktrees: lanes are disabled, `lanes status` falls back to whatever sessions appear in the log, and everything else still works."
     },
     "basePort": {
       "type": "integer",
@@ -196,7 +196,7 @@
               },
               "url": {
                 "type": "string",
-                "description": "Optional URL for this service. Printed by `lanes dev` when it starts, and shown on the `lanes ui` / `lanes status` dashboard while it is running. Same placeholders."
+                "description": "Optional URL for this service. Printed by `lanes dev` when it starts, and shown on the `lanes status` dashboard while it is running. Same placeholders."
               }
             },
             "additionalProperties": false
