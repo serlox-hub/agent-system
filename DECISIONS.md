@@ -17,6 +17,17 @@ reversed, never to make room.
 
 ---
 
+## D27 — The exhaustive `lanes` command list lives in `docs/SETUP.md`, not `README.md`
+`core` · 2026-08 · `README.md`, `docs/SETUP.md`
+The README is the pitch, held near 100 lines, so a 21-command list would crowd
+out what actually decides whether someone adopts the tool. Keeping one
+canonical list means a new command can't be documented in one place and
+forgotten in the other.
+Rejected: listing every `lanes` command in the README too — it recreates two
+lists that drift, as this same diff's `agents/code-reviewer.md` fix showed:
+the pull toward re-syncing satellite files the moment the canonical location
+is ambiguous.
+
 ## D26 — `lanes new` no longer accepts a name; every lane is auto-numbered (`lane<N>`)
 `product` · 2026-08 · `lib/worktrees.mjs:planCreate` · #5
 Lane identity moves from user-chosen to tool-generated, so numbers stay stable

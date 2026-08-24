@@ -106,8 +106,8 @@ Three fixed axes, always:
   what it now gets wrong — a doc that quietly goes wrong is worse than no doc,
   since it actively misleads the next reader who trusts it. New behavior with no
   doc at all is only a finding if the project already documents its siblings
-  (e.g. every other CLI command is listed in `README.md` but this new one is
-  not) — do not demand documentation a project never had.
+  (e.g. every other CLI command is listed in the project's command reference
+  but this new one is not) — do not demand documentation a project never had.
 
 Then **every axis in `review.domainAxes`**, treated with the same weight as A,
 B and C. Those are the axes the project's owner decided matter here; they are

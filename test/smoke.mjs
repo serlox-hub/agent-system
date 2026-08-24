@@ -1306,6 +1306,21 @@ test('lanes list SERVICES column: boundPort wiring is unchanged after the extrac
   }
 });
 
+test('lanes dev: no dev.services declared warns and points at a section that actually exists in docs/SETUP.md', () => {
+  // `repo` (the shared fixture) declares no dev.services and has real lanes,
+  // so `select()` resolves targets but resolveServices yields nothing for
+  // any of them — the `if (!any)` warning branch this diff's message lives in.
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['dev'], { cwd: repo, encoding: 'utf8' });
+  assert.match(output, /no services declared/);
+  assert.match(output, /see "5\. Managing lanes" in docs\/SETUP\.md\./);
+
+  // Pins the exact class of bug this text fixed: the hint used to point at a
+  // "Dev services" section of docs/SETUP.md that never existed. Asserting the
+  // referenced heading is real guards against it going stale again silently.
+  const setupDoc = readFileSync(join(ROOT, 'docs', 'SETUP.md'), 'utf8');
+  assert.match(setupDoc, /^## 5\. Managing lanes$/m, 'the section named in the hint must exist');
+});
+
 // ── Dashboard: sub-header, rule width and lane spacing (#4) ──────────
 test('the SERVICE/CTX sub-header lines up with the real service/ctx columns on the row below', () => {
   const ctxInfo = new Map([['/tmp/aligned.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);

@@ -664,7 +664,7 @@ switch (cmd) {
       }
       if (!any) {
         out(`${WARN} no services declared. Add dev.services to .claude/agent-system.json —`);
-        out('  see the "Dev services" section of docs/SETUP.md.');
+        out('  see "5. Managing lanes" in docs/SETUP.md.');
       }
       break;
     }
