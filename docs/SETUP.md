@@ -135,11 +135,11 @@ lanes free                          # lanes safe to take over (what /architect c
 lanes each 'git fetch && git merge origin/main'   # across every lane
 lanes dev 2      # start lane 2's services      (selector: 1 · 1,3 · 2-4 · . · all)
 lanes stop       # stop everything
-lanes logs 2 web -f
+lanes logs 2 <serviceName> -f
 lanes color 2 832561                # per-machine lane colour, not committed
 lanes worktrees-dir ~/proj-lanes    # per-machine worktreesDir override, not committed
 lanes base-port 400                 # per-machine basePort override, not committed
-lanes service-port api 450          # per-machine, per-service portBase override
+lanes service-port <serviceName> 450  # per-machine, per-service portBase override
 ```
 
 Lanes are long-lived infrastructure — create once, cycle branches through them.
