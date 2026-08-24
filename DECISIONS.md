@@ -17,6 +17,21 @@ reversed, never to make room.
 
 ---
 
+## D28 — `lanes rm` takes no selector; `lanes clear` is the separate command for removing every lane
+`product` · 2026-08 · `bin/lanes.mjs`
+`removeWorktree` only ever accepts a contiguous run ending at the top of the
+stack, so a single `rm` has exactly one legal target: the current top. A bare
+`lanes rm` defaulting to it loses no safety, unlike defaulting to `all` —
+every lane detached at base is "free", so an unqualified default there could
+silently take the whole stack. An explicit lane/name argument is still
+accepted, but only as a confirmation that it names that same top lane; `all`
+is refused, pointing at `lanes clear`, a different word chosen so mass
+removal can't be reached by a typo or muscle-memory on `rm`.
+Rejected: keeping `rm <sel>` accepting ranges/`all` as before — it forced
+spelling out a target for the one common, always-safe case (pop the top)
+purely so the rare, dangerous case (`all`) had somewhere to live; splitting
+the verb removes that tension entirely.
+
 ## D27 — The exhaustive `lanes` command list lives in `docs/SETUP.md`, not `README.md`
 `core` · 2026-08 · `README.md`, `docs/SETUP.md`
 The README is the pitch, held near 100 lines, so a 19-command list would crowd
