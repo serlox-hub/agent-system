@@ -648,6 +648,12 @@ switch (cmd) {
       const res = worktrees.switchBranch(ctx.config, target, branch, { create: rest.includes('--create') });
       if (res.error) die(res.error);
       out(`${OK} lane ${res.lane} (${res.name}) → ${res.branch}`);
+      // `--create` always makes a new branch off base, never the base branch
+      // itself, so only a plain switch can land here — the one path where
+      // `switchBranch` runs a bare `checkout <branch>` that could name base.
+      if (!rest.includes('--create') && res.branch === worktrees.baseBranch(ctx.config)) {
+        out(`${WARN} lane ${res.lane} now holds ${res.branch} itself — a commit here moves the shared branch, not just this lane's.`);
+      }
       break;
     }
 
