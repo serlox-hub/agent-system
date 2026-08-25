@@ -282,7 +282,7 @@ function rowsFor(ctx, lanes, laneInfo) {
   return rows;
 }
 
-const MARKS_TONE = { dirty: C.yellow, ahead: C.green, behind: C.red, unknown: C.yellow, free: C.dim };
+const MARKS_TONE = { danger: `${C.bold}${C.red}`, dirty: C.yellow, ahead: C.green, behind: C.red, unknown: C.yellow, free: C.dim };
 
 /**
  * `[#<issue>] <branch> (<marks>)`, the row's one variable-width cell — issue
