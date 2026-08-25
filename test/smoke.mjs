@@ -744,6 +744,11 @@ test('laneMarks: a lane with no git data at all stays empty — it must not clai
   assert.deepEqual(worktrees.laneMarks({}), []);
 });
 
+test('laneMarks: on-base! pre-empts free — a lane holding the base branch itself is flagged even though isFree would still call it free', () => {
+  const marks = worktrees.laneMarks({ holdsBaseBranch: true, dirty: false, baseKnown: true, ahead: 0, behind: 0 });
+  assert.deepEqual(marks, [{ text: 'on-base!', tone: 'danger' }]);
+});
+
 test('lanes status --once shows a dirty lane as ~N', () => {
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['status', '--once'], { cwd: repo, encoding: 'utf8' });
   const row = output.split('\n').find((l) => l.includes('feat/402-thing'));
@@ -872,7 +877,31 @@ test('enumerateLanes normalizes a detached-at-base lane: branch reads as the bas
   const lane = worktrees.enumerateLanes(cfg)[0];
   assert.equal(lane.branch, 'main', 'not the literal "HEAD"');
   assert.equal(lane.isBase, true);
+  // Pins the isBase/holdsBaseBranch distinction on the exact lane a fresh
+  // `lanes new`/`reset` leaves behind: merely detached at base's commit,
+  // never the base branch itself, so on-base! must not fire for it.
+  assert.equal(lane.holdsBaseBranch, false, 'detached at the same commit as base is not the same as holding the base branch itself');
   assert.deepEqual(worktrees.laneMarks(lane), [{ text: 'free', tone: 'free' }]);
+});
+
+test('enumerateLanes sets holdsBaseBranch (and MARKS on-base!) only when a lane literally has the base branch checked out, not merely detached at its commit', () => {
+  const { main, wtd, cfg } = makeLanesFixture('holds-base', 1);
+  const lanePath = join(wtd, 'lane1');
+  // git refuses to check out a branch that is already checked out in another
+  // worktree, so `main` must vacate the base branch first — the same reason
+  // this state is only reachable in practice via `lanes switch <lane> <base>`
+  // without --create.
+  git(main, 'checkout', '-qb', 'parking-branch');
+  git(lanePath, 'checkout', 'main');
+
+  const lane = worktrees.enumerateLanes(cfg)[0];
+  assert.equal(lane.holdsBaseBranch, true, 'the lane has the literal base branch checked out');
+  assert.equal(lane.isBase, true);
+  assert.deepEqual(
+    worktrees.laneMarks(lane),
+    [{ text: 'on-base!', tone: 'danger' }],
+    'on-base! must appear, pre-empting free even though isFree(lane) is still true (clean, level with base)',
+  );
 });
 
 test('removeWorktree refuses a non-top selection, naming the real top', () => {
@@ -1891,6 +1920,29 @@ test('reset, switch and logs still resolve a genuine single-lane selector correc
   const logsOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['logs', '2'], { cwd: main, encoding: 'utf8' });
   assert.match(logsOut, /lane 2 · web/);
   assert.match(logsOut, /no log yet/);
+});
+
+test('lanes switch warns when a plain switch lands on the base branch itself, but not when --create lands on a fresh feature branch', () => {
+  const { main, cfg } = makeCliLanesFixture('cli-switch-warn', 2);
+  // Vacate `main` from the main worktree first — git refuses to check out a
+  // branch already checked out in another worktree, and this is the only
+  // path (a plain switch, no --create) that can ever land on base at all.
+  git(main, 'checkout', '-qb', 'parking-branch');
+
+  const onBaseOut = execFileSync(join(ROOT, 'bin', 'lanes'), ['switch', '1', 'main'], { cwd: main, encoding: 'utf8' });
+  assert.match(
+    onBaseOut,
+    /lane 1 now holds main itself — a commit here moves the shared branch, not just this lane's\./,
+  );
+  assert.equal(worktrees.enumerateLanes(cfg).find((l) => l.lane === 1).holdsBaseBranch, true);
+
+  const createOut = execFileSync(
+    join(ROOT, 'bin', 'lanes'),
+    ['switch', '2', 'feat/switch-warn', '--create'],
+    { cwd: main, encoding: 'utf8' },
+  );
+  assert.ok(!createOut.includes('now holds'), '--create always branches off base, never lands on base itself, so no WARN');
+  assert.equal(worktrees.enumerateLanes(cfg).find((l) => l.lane === 2).holdsBaseBranch, false);
 });
 
 test('lanes switch dies with its own usage rather than misreading a lone positional as the branch', () => {
