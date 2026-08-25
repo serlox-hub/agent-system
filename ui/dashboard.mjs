@@ -114,10 +114,10 @@ const STATES = {
   busy: { icon: '●', color: C.cyan, label: () => 'working' },
   stage: { icon: '◆', color: C.cyan, label: (e) => `stage: ${e.stage}` },
   idle: { icon: '▲', color: C.yellow, label: () => 'waiting for you' },
-  reviewed: { icon: '✓', color: C.green, label: () => 'reviewed, ready to commit' },
+  reviewed: { icon: '✓', color: C.green, label: () => 'ready to commit' },
   commit_reviewed: { icon: '✓', color: C.green, label: () => 'committing' },
   commit_bypass: { icon: '✓', color: C.dim, label: () => 'committing (unreviewed)' },
-  commit_blocked: { icon: '■', color: C.red, label: () => 'commit blocked — needs review' },
+  commit_blocked: { icon: '■', color: C.red, label: () => 'blocked, needs review' },
   session_start: { icon: '○', color: C.dim, label: () => 'session open' },
   session_end: { icon: '○', color: C.grey, label: () => 'offline' },
   lane_created: { icon: '+', color: C.green, label: () => 'lane created' },
@@ -214,6 +214,11 @@ export function applyEvents(state, events) {
         // once the session behind it is long gone.
         ev: e.ev === 'stage' ? (prev.ev ?? null) : e.ev,
         agent: e.ev === 'agent_start' ? e.agent : e.ev === 'agent_end' ? null : prev.agent,
+        // Kept folded although render() no longer displays it (#9 dropped the
+        // STAGE column) — RECENT reads a stage event's own `e.stage` straight
+        // off the raw log, never this field, so nothing currently reads it.
+        // Deliberately out of scope for #9, not dead by accident: removing it
+        // is a separate call, not a side effect of a display change.
         stage: e.ev === 'stage' ? e.stage : prev.stage,
         // Same reasoning as `ev`: a stage marker must not reset how long the
         // *state* next to it has been true, or FOR lies the instant one fires.
@@ -275,52 +280,82 @@ function rowsFor(ctx, lanes, laneInfo) {
   return rows;
 }
 
-const MARKS_WIDTH = 12;
 const MARKS_TONE = { dirty: C.yellow, ahead: C.green, behind: C.red, unknown: C.yellow, free: C.dim };
 
 /**
- * The plain text (`laneMarks`' tokens joined by ' ') is measured and padded
- * first, since `pad()` counts raw `.length` and would misalign on text that
- * already carries ANSI codes; the coloured version is then wrapped around
- * each token, reusing the padding `pad()` already computed.
+ * `[#<issue>] <branch> (<marks>)`, the row's one variable-width cell — issue
+ * and marks are always shown in full (they are the decision-relevant part:
+ * `lanes free`'s "nothing would be lost" reasoning is built on marks), only
+ * the branch/name part itself is ellipsis-truncated when the budget is tight.
+ * Composed and measured as plain text first, coloured after, same reason as
+ * the old `marksCell` this replaces: `pad()` counts raw `.length` and would
+ * misalign on text that already carries ANSI codes.
+ *
+ * A row with no branch — a foreign-project/vanished-lane row kept alive by
+ * `rowsFor`'s fail-open `existsSync` check, or a declared lane mid a transient
+ * git-read failure — falls back to the worktree name in the branch slot, the
+ * one identifier that always exists (matches `notifyTitle`'s fallback), but
+ * still shows a carried-forward issue or marks: a failed *branch* read must
+ * not blank an issue number `rowsFor` already decided to keep.
  */
-function marksCell(r) {
+function branchCell(r, width) {
+  const issuePrefix = r.issue ? `[#${r.issue}] ` : '';
   const tokens = laneMarks(r);
-  const plain = tokens.map((t) => t.text).join(' ');
-  const padded = pad(plain, MARKS_WIDTH);
-  if (!plain || plain.length >= MARKS_WIDTH) return padded;
-  const trailing = padded.slice(plain.length);
-  const colored = tokens.map((t) => `${MARKS_TONE[t.tone]}${t.text}${C.reset}`).join(' ');
-  return colored + trailing;
+  const marksPlain = tokens.map((t) => t.text).join(' ');
+  const marksSuffix = marksPlain ? ` (${marksPlain})` : '';
+  const name = r.branch || r.worktree || '—';
+  const nameBudget = Math.max(1, width - issuePrefix.length - marksSuffix.length);
+  const nameText = name.length > nameBudget
+    ? `${name.slice(0, Math.max(0, nameBudget - 1))}…`
+    : name;
+  const plain = `${issuePrefix}${nameText}${marksSuffix}`;
+  const padded = pad(plain, width);
+  if (!marksPlain || plain.length > width) return padded;
+  const coloredMarks = tokens.map((t) => `${MARKS_TONE[t.tone]}${t.text}${C.reset}`).join(' ');
+  return `${issuePrefix}${nameText} (${coloredMarks})` + padded.slice(plain.length);
 }
 
 /**
- * Only the first declared service is shown, plus a trailing count — the header
- * row already fills most of the 152-column cap, leaving no room for a full
- * list. A row with no `.name` is a foreign project's or a vanished lane's
- * (see rowsFor): it never carries the live `.path`/`.lane` resolveServices
- * needs, and `.name` never resolves against any config but the current
- * project's, so it is never passed in at all.
+ * The service line beneath a lane's row, or `null` when nothing is running —
+ * the line itself is conditional (unlike the old fixed second line), so
+ * "should it show" and "what does it say" are one decision, not two: an
+ * earlier version split them into `serviceCell`/`serviceRunning`, each
+ * re-deriving `resolveServices`/`serviceStatus` independently, which read the
+ * same pidfile twice per lane per paint and checked only `svcs[0]` for both —
+ * a lane whose *second* declared service was the one running showed nothing
+ * at all. This checks every declared service and shows whichever one is
+ * actually up, still with a trailing count of the rest — there is no room for
+ * a full list once the row is this narrow. A row with no `.name` is a
+ * foreign project's or a vanished lane's (see rowsFor): it never carries the
+ * live `.path`/`.lane` resolveServices needs, and `.name` never resolves
+ * against any config but the current project's, so it is never passed in at
+ * all.
  *
  * `serviceStatus` (`lib/services.mjs`'s `status`) deletes the pidfile of a
  * confirmed-dead process, so calling this — and therefore `render()` — is not
  * side-effect-free: every `lanes status` frame self-heals a stale pidfile.
  */
-function serviceCell(ctx, r) {
-  if (!r.name) return '—';
+function serviceLine(ctx, r) {
+  if (!r.name) return null;
   const svcs = resolveServices(ctx?.config, r);
-  if (!svcs.length) return '—';
-  const first = svcs[0];
-  const st = serviceStatus(first);
-  let text = '—';
-  if (st.running) {
-    // The bound port, not the freshly computed one — `portBase` can be
-    // edited while the service stays up. The `!` marker applies to the URL
-    // too: a url template is filled with the freshly computed port, which
-    // can just as easily be stale.
-    const { port, moved } = boundPort(first, st);
-    text = first.url ? `${first.url}${moved}` : `localhost:${port}${moved}`;
+  if (!svcs.length) return null;
+  let running = null;
+  let st = null;
+  for (const s of svcs) {
+    const status = serviceStatus(s);
+    if (status.running) {
+      running = s;
+      st = status;
+      break;
+    }
   }
+  if (!running) return null;
+  // The bound port, not the freshly computed one — `portBase` can be edited
+  // while the service stays up. The `!` marker applies to the URL too: a url
+  // template is filled with the freshly computed port, which can just as
+  // easily be stale.
+  const { port, moved } = boundPort(running, st);
+  const text = running.url ? `${running.url}${moved}` : `localhost:${port}${moved}`;
   return svcs.length > 1 ? `${text} (+${svcs.length - 1} more)` : text;
 }
 
@@ -331,9 +366,12 @@ export function fmtTokens(n) {
 }
 
 /**
- * "143K ctx · sonnet-5", or "—". The model tag rides alongside the count
- * because the same number means different things on different models — a raw
- * token count with no context-window-size table to compare it against.
+ * "143K·sonnet-5", or "—". The model tag rides alongside the count because
+ * the same number means different things on different models — a raw token
+ * count with no context-window-size table to compare it against (D25: never a
+ * percentage — no fixed denominator is right for every model). No literal
+ * "ctx" in the text: the CTX column header already says so, same as STAGE/
+ * STATE cells never repeated their own column name.
  *
  * `ctxInfo`, when supplied, is a `Map<transcriptPath, {tokens,model}|null>`
  * refreshed on the same ~20-tick cadence as `laneInfo` (see `watchStatus`) rather
@@ -347,7 +385,7 @@ function ctxCell(r, ctxInfo) {
   if (!r.transcript) return '—';
   const info = ctxInfo ? ctxInfo.get(r.transcript) ?? null : readContext(r.transcript);
   if (!info) return '—';
-  return `${fmtTokens(info.tokens)} ctx · ${info.model.replace(/^claude-/, '')}`;
+  return `${fmtTokens(info.tokens)}·${info.model.replace(/^claude-/, '')}`;
 }
 
 /**
@@ -361,25 +399,16 @@ function ctxCell(r, ctxInfo) {
  */
 const LIVE_EVENTS = new Set(['session_start', 'busy', 'idle', 'agent_start', 'agent_end']);
 
-/**
- * The service cell owns the WORKTREE+BRANCH+MARKS+ISSUE width (room enough for
- * a real URL) and stays dimmed unconditionally, matching #3's shipped design;
- * the ctx cell follows immediately after, under STAGE+STATE+FOR, with its own
- * independent live/dim tone — a closed session still has a real transcript on
- * disk, so the value keeps showing, just de-emphasized, regardless of whether
- * a service happens to still be running in the same lane.
- */
-const SERVICE_CELL_WIDTH = 20 + 40 + MARKS_WIDTH + 8;
-
-/** Second line, always present — never collapses back to 1 line (#3's own decision). */
-function secondLine(ctx, r, ctxInfo) {
-  const live = LIVE_EVENTS.has(r.ev);
-  return (
-    pad('', 3) +
-    C.dim + pad(serviceCell(ctx, r), SERVICE_CELL_WIDTH) + C.reset +
-    (live ? '' : C.dim) + ctxCell(r, ctxInfo) + C.reset
-  );
-}
+const LANE_WIDTH = 3;
+// Fits every STATES label and every agent name this repo's own agents produce
+// in full (longest: "spec-challenger running" at 25 with its icon). Two
+// STATES labels (commit_blocked, reviewed) were shortened to fit this rather
+// than widening it — see their wording above.
+const STATE_WIDTH = 26;
+const FOR_WIDTH = 7; // fits up to "999h59m" — lanes are long-lived (D20), multi-day idle is ordinary
+const CTX_WIDTH = 24; // fits the worst realistic model id after stripping "claude-" (~19 chars) + tokens
+const CTX_MIN_TERM_WIDTH = 85; // below this, drop the CTX column outright rather than starve BRANCH
+const BRANCH_FLOOR = 20;
 
 /** Build the frame as a string. Callers decide whether to clear the screen. */
 export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config), ctxInfo = null) {
@@ -388,55 +417,63 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
   const width = Math.max(60, process.stdout.columns || 100);
   const out = [];
 
+  // Capped at 100 even on a wider terminal, deliberately — the frame stays a
+  // consistent, compact shape rather than stretching back out to show more of
+  // the branch name the way it used to. Still adaptive downward: on anything
+  // narrower it shrinks with `width`, same as before.
+  const termWidth = Math.min(width, 100);
+  const showCtx = termWidth >= CTX_MIN_TERM_WIDTH;
+  // 4 single-space gaps between 5 cells (LANE BRANCH STATE FOR CTX), or 3
+  // between 4 when CTX is dropped — BRANCH is the only cell excluded, since
+  // it is the free variable the rest of this reservation solves for.
+  const reserved = LANE_WIDTH + STATE_WIDTH + FOR_WIDTH + (showCtx ? CTX_WIDTH + 4 : 3);
+  const branchWidth = Math.max(BRANCH_FLOOR, termWidth - reserved);
+
   const title = `agent-system${ctx?.project ? ` · ${ctx.project}` : ''}`;
   const clock = fmtClock(now);
-  const headerRow = `${pad('#', 3)}${pad('WORKTREE', 20)}${pad('BRANCH', 40)}${pad('MARKS', MARKS_WIDTH)}${pad('ISSUE', 8)}${pad('STAGE', 18)}${pad('STATE', 32)}FOR`;
-  // Wide and fixed on purpose: a narrower adaptive layout would have to hide
-  // columns as more get added over time, and STAGE next to STATE is exactly
-  // that first addition. Assumes a wide-enough terminal; a split pane wraps.
-  const titleWidth = Math.min(width, 152);
+  const headerCells = [pad('#', LANE_WIDTH), pad('BRANCH', branchWidth), pad('STATE', STATE_WIDTH), pad('FOR', FOR_WIDTH)];
+  if (showCtx) headerCells.push(pad('CTX', CTX_WIDTH));
+  const headerRow = headerCells.join(' ');
+  const titleWidth = termWidth;
   // The rule under the header must never render narrower than the header
   // itself, or its tail (STATE, FOR) hangs past the rule with nothing
   // underlining it. Measured from the real string rather than a hand-kept
   // constant, so widening a column can never silently reopen that gap.
-  // The title bar keeps its own, unfloored width — it has no columns to
-  // underline, and flooring it too would wrap the clock onto its own line
-  // on any terminal narrower than the header.
   const barWidth = Math.max(headerRow.length, titleWidth);
   const gap = Math.max(1, titleWidth - title.length - clock.length);
   out.push(`${C.bold}${title}${C.reset}${C.dim}${' '.repeat(gap)}${clock}${C.reset}`);
   out.push('');
   out.push(`${C.bold}${headerRow}${C.reset}`);
-  // Sub-header, dim: labels the second line's otherwise-unmarked service/ctx
-  // cells, aligned to the exact same columns `secondLine` renders them at —
-  // without it, that row reads as stray text under STAGE/STATE rather than as
-  // its own labelled data.
-  out.push(`${C.dim}${pad('', 3)}${pad('SERVICE', SERVICE_CELL_WIDTH)}CTX${C.reset}`);
   out.push(`${C.dim}${'─'.repeat(barWidth)}${C.reset}`);
 
   if (rows.length === 0) {
     out.push(`${C.dim}  No lanes yet. Start a Claude Code session in a configured worktree.${C.reset}`);
   }
 
-  // Blank between lanes, not after every one — keeps the visual grouping
-  // this loop exists for while costing one line per lane instead of two, and
-  // leaves the trailing `out.push('')` below as the single, unconditional
-  // separator before RECENT, in both the populated and empty-lanes cases.
+  // Blank between lanes, not after every one: keeps the visual grouping this
+  // loop exists for, and is what binds an optional service line to the row
+  // above it now that most lanes are back down to a single row. Leaves the
+  // trailing `out.push('')` below as the single, unconditional separator
+  // before RECENT, in both the populated and empty-lanes cases.
   rows.forEach((r, i) => {
     if (i > 0) out.push('');
     const s = stateOf(r.ev);
+    const live = LIVE_EVENTS.has(r.ev);
     const laneColor = colorFor(r.lane);
-    out.push(
-      pad(r.lane ?? '·', 3) +
-        laneColor + pad(r.worktree, 20) + C.reset +
-        pad(r.branch || '—', 40) +
-        marksCell(r) +
-        pad(r.issue ? `#${r.issue}` : '—', 8) +
-        C.dim + pad(r.stage || '—', 18) + C.reset +
-        s.color + pad(`${s.icon} ${s.label(r)}`, 32) + C.reset +
-        (r.ev === 'idle' ? C.yellow : C.dim) + (r.since ? fmtElapsed(now - r.since) : '—') + C.reset,
-    );
-    out.push(secondLine(ctx, r, ctxInfo));
+    const cells = [
+      laneColor + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
+      branchCell(r, branchWidth),
+      s.color + pad(`${s.icon} ${s.label(r)}`, STATE_WIDTH) + C.reset,
+      (r.ev === 'idle' ? C.yellow : C.dim) + pad(r.since ? fmtElapsed(now - r.since) : '—', FOR_WIDTH) + C.reset,
+    ];
+    if (showCtx) {
+      cells.push((live ? '' : C.dim) + pad(ctxCell(r, ctxInfo), CTX_WIDTH) + C.reset);
+    }
+    out.push(cells.join(' '));
+    const svcLine = serviceLine(ctx, r);
+    if (svcLine) {
+      out.push(`${' '.repeat(LANE_WIDTH + 1)}${C.dim}${svcLine}${C.reset}`);
+    }
   });
 
   out.push('');
@@ -445,7 +482,7 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
   for (const e of state.history.slice().reverse()) {
     const s = stateOf(e.ev);
     // Fall back to worktree name when there is no lane number — same fallback
-    // as the main table's WORKTREE column and notifyTitle, so a row is never
+    // as `branchCell`'s ghost-row case and `notifyTitle`, so a row is never
     // reduced to the bare `·` placeholder with nothing to identify it by.
     const who = e.lane ?? e.worktree ?? '·';
     const whoColor = e.lane != null ? colorFor(e.lane) : C.dim;
