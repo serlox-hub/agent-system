@@ -20,6 +20,12 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ESC = String.fromCharCode(27);
 
+// render() sizes and even drops columns (CTX below 85) based on
+// process.stdout.columns — deterministic here regardless of the real
+// terminal this suite happens to run in. Tests that specifically exercise a
+// different width save and restore this around their own body.
+process.stdout.columns = 100;
+
 // ── Fixture: a real repo with three real worktrees ──────────────────
 // realpath matters: on macOS os.tmpdir() is /var/... which is a symlink to
 // /private/var/..., and `git rev-parse --show-toplevel` reports the real path.
@@ -452,6 +458,13 @@ test('commitGuard: false disables the block entirely', () => {
 // ── Dashboard state ─────────────────────────────────────────────────
 const ev = (ts, e, extra = {}) => ({ ts, ev: e, project: 'demo', lane: 1, worktree: 'lane1', ...extra });
 
+// WORKTREE is no longer its own column (the lane redesign dropped it), so a
+// row can no longer be found by searching for e.g. 'lane1' as text — only the
+// lane number is still rendered, left-padded to 3 columns. Matching the exact
+// padded prefix (not a bare `startsWith(String(n))`) is what keeps lane 1 from
+// matching lane 10's row too.
+const rowPrefix = (n) => String(n).padEnd(3);
+
 test('applyEvents keeps only the latest state per lane', () => {
   const s = applyEvents(createState(), [ev(1, 'session_start'), ev(2, 'agent_start', { agent: 'code-reviewer' })]);
   assert.equal(s.lanes.size, 1);
@@ -520,12 +533,14 @@ test('a stage event is a milestone, not a liveness signal — it must not overwr
   assert.equal(row2.stage, 'review');
 });
 
-test('render puts stage and state in separate columns, and never paints a bare stage as live', () => {
+test('render has no STAGE column at all — a bare stage marker shows only as "no session seen"', () => {
   const frame = render(resolveContext(lane2), applyEvents(createState(), [ev(1, 'stage', { stage: 'implement' })]));
-  const table = frame.slice(0, frame.indexOf('RECENT')); // RECENT is a log; the merged "stage: X" label is fine there
-  assert.ok(table.includes('implement'), 'the stage still shows');
+  const table = frame.slice(0, frame.indexOf('RECENT')); // RECENT is a log; "stage: X" is fine there, checked separately below
+  assert.ok(!table.includes('implement'), 'STAGE has no column in the live table — the stage name must not appear there');
   assert.ok(table.includes('no session seen'), 'a bare stage marker is not a state, and must not be painted as one');
-  assert.ok(!table.includes('stage: implement'), 'the old merged "stage: X" state label must be gone from the table');
+
+  const recent = frame.slice(frame.indexOf('RECENT'));
+  assert.ok(recent.includes('stage: implement'), 'RECENT is unchanged — it still logs the raw stage event with its merged label');
 });
 
 test('history is capped so a long-running dashboard cannot grow without bound', () => {
@@ -542,12 +557,12 @@ test('render emits no clear-screen — that is the caller’s choice', () => {
   const ctx = resolveContext(lane2);
   const frame = render(ctx, applyEvents(createState(), [ev(1, 'idle')]));
   assert.ok(!frame.includes(`${ESC}[2J`), 'lanes status must not wipe the terminal');
-  assert.ok(frame.includes('lane2'), 'declared lanes appear even with no events of their own');
+  assert.ok(frame.includes('feat/402-thing'), 'declared lanes appear even with no events of their own');
 });
 
 test('render shows a declared lane with no events at all as offline', () => {
   const frame = render(resolveContext(lane2), createState());
-  assert.ok(frame.includes('lane3'));
+  assert.ok(frame.includes('feat/403-thing'));
   assert.ok(frame.includes('offline'));
 });
 
@@ -556,14 +571,12 @@ test('MARKS renders ? when the base ref cannot be resolved — never free, never
   // resolve `origin/main...HEAD` — every lane's baseKnown is false.
   const frame = render(resolveContext(lane2), createState());
   const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
-  const row = stripped.split('\n').find((l) => l.includes('lane3'));
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(3)));
   assert.ok(row, 'lane3 must have a row');
-  // Column order: # (3) WORKTREE (20) BRANCH (40) MARKS (12) ...
-  const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
-  assert.equal(marks, '?', 'unknown divergence must render as ?, distinct from both free and —');
+  assert.ok(row.includes('feat/403-thing (?)'), 'unknown divergence must render as (?), distinct from both (free) and no marks at all');
 });
 
-test('MARKS renders dirty, ahead and behind together through the laneInfo seam, without shifting ISSUE', () => {
+test('MARKS renders dirty, ahead and behind together through the laneInfo seam, right after the issue', () => {
   // Fabricated laneInfo, bypassing the real `enumerateLanes` git read — this
   // is the only way to exercise the coloured, non-"?" formatting path, since
   // the fixture repo (no `origin`) always makes the real read baseKnown: false.
@@ -573,15 +586,13 @@ test('MARKS renders dirty, ahead and behind together through the laneInfo seam, 
   }];
   const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated);
   const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
-  const row = stripped.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
   assert.ok(row, 'lane1 must have a row');
-  const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
-  assert.equal(marks, '~3 +2 -1', 'dirty, ahead and behind must all render together when the base is known');
-  // The ANSI codes wrapped around each token must not shift where ISSUE
-  // starts — the regression the pad-then-colour ordering in marksCell guards
-  // against — and the issue must follow the fabricated branch, not be blank.
-  const issue = row.slice(3 + 20 + 40 + 12, 3 + 20 + 40 + 12 + 8).trim();
-  assert.equal(issue, '#9', 'ISSUE must read correctly right after a coloured MARKS cell');
+  // The ANSI codes wrapped around the marks tokens must not shift what comes
+  // before them — the regression the pad-then-colour ordering in branchCell
+  // guards against — so issue, branch and marks must all read correctly, in
+  // order, out of the same cell.
+  assert.ok(row.includes('[#9] feat/9-x (~3 +2 -1)'), 'dirty, ahead and behind must all render together, right after the issue and branch');
 });
 
 test('MARKS renders free for a clean lane on base once the base ref actually resolves', () => {
@@ -591,9 +602,8 @@ test('MARKS renders free for a clean lane on base once the base ref actually res
   }];
   const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated);
   const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
-  const row = stripped.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
-  const marks = row.slice(3 + 20 + 40, 3 + 20 + 40 + 12).trim();
-  assert.equal(marks, 'free', 'clean and on base, with a resolvable base ref, must render free — never ?');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row.includes('main (free)'), 'clean and on base, with a resolvable base ref, must render (free) — never (?)');
 });
 
 test('rowsFor clears a stale issue once the branch is read and encodes none, rather than keeping an event-log leftover', () => {
@@ -605,7 +615,8 @@ test('rowsFor clears a stale issue once the branch is read and encodes none, rat
     isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
   }];
   const frame = render(resolveContext(lane2), state, Date.now(), backOnBase);
-  const row = frame.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
   assert.ok(row, 'lane1 must have a row');
   assert.ok(!row.includes('#402'), 'a resolved branch with no issue in it must clear the stale one, not keep displaying it');
 });
@@ -619,7 +630,8 @@ test('rowsFor keeps the last known issue when the branch read itself fails', () 
     isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: false,
   }];
   const frame = render(resolveContext(lane2), state, Date.now(), failedRead);
-  const row = frame.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
   assert.ok(row, 'lane1 must have a row');
   assert.ok(row.includes('#402'), 'a failed branch read must not blank a previously known issue');
 });
@@ -674,7 +686,7 @@ test('a currently-declared lane bypasses the existsSync liveness check entirely,
     path: join(wtDir, 'lane1-stale-path-from-before-a-rename'),
   });
   const frame = render(resolveContext(lane2), state);
-  const row = frame.split('\n').find((l) => l.includes('lane1') && !l.includes('lane10'));
+  const row = frame.split('\n').find((l) => l.includes('feat/401-thing'));
   assert.ok(row, 'lane1 must still get a row');
   assert.ok(row.includes('waiting for you'), 'a declared lane must keep its real state regardless of a stale path');
   assert.ok(!row.includes('offline'), 'it must not fall back to the no-events default either');
@@ -732,7 +744,7 @@ test('laneMarks: a lane with no git data at all stays empty — it must not clai
 
 test('lanes status --once shows a dirty lane as ~N', () => {
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['status', '--once'], { cwd: repo, encoding: 'utf8' });
-  const row = output.split('\n').find((l) => l.includes('lane2'));
+  const row = output.split('\n').find((l) => l.includes('feat/402-thing'));
   assert.ok(row, 'lane2 must have a row');
   assert.match(row, /~\d+/, 'lane2 has real uncommitted changes from earlier tests, so ~N must still show');
 });
@@ -745,7 +757,7 @@ test('lanes status (no --once) falls back to a single printStatus frame when std
   // setInterval + `await new Promise(() => {})`, which would hang this test
   // until the timeout below kills it.
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['status'], { cwd: repo, encoding: 'utf8', timeout: 5000 });
-  const row = output.split('\n').find((l) => l.includes('lane2'));
+  const row = output.split('\n').find((l) => l.includes('feat/402-thing'));
   assert.ok(row, 'lane2 must have a row, same shape as --once');
   assert.match(row, /~\d+/, 'same dirty-lane content as --once');
   assert.equal(
@@ -1200,31 +1212,34 @@ test('start records pid and port, and stop kills the whole process group', () =>
   assert.equal(sv.stop(web).notRunning, true);
 });
 
-// ── Dashboard: service cell (second line) ────────────────────────────
+// ── Dashboard: conditional service line ──────────────────────────────
 const stripAnsi = (s) => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
 
-// Column order on the second line since #4: 3-space prefix, then the service
-// cell at a fixed width (WORKTREE+BRANCH+MARKS+ISSUE, matching the main row's
-// own column widths), then the ctx cell immediately after with no gap of its
-// own (see SERVICE_CELL_WIDTH in ui/dashboard.mjs).
-const SERVICE_CELL_WIDTH = 20 + 40 + 12 + 8;
-
-/** The service line directly under a lane's own row, with the stable 3-space prefix stripped. */
-function serviceLineFor(frame, laneName) {
+/**
+ * The service line directly under a lane's own row, or `null` when none was
+ * rendered — the line is now conditional (present only when something is
+ * actually running), not a fixed second line with a `—` placeholder, so
+ * "no line at all" is itself a real, asserted outcome, not just an empty
+ * string. A service line is the only thing that can start with a leading
+ * space: every lane row starts with its (unpadded) number or `·`, and RECENT
+ * rows start with a clock.
+ */
+function serviceLineFor(frame, matchesRow) {
   const lines = stripAnsi(frame).split('\n');
-  const idx = lines.findIndex((l) => l.includes(laneName));
-  assert.ok(idx !== -1, `${laneName} must have a row`);
-  return lines[idx + 1].slice(3, 3 + SERVICE_CELL_WIDTH).trimEnd();
+  const idx = lines.findIndex(matchesRow);
+  assert.ok(idx !== -1, 'the row must exist');
+  const next = lines[idx + 1];
+  return next && next.startsWith(' ') ? next.trim() : null;
 }
 
-test('dashboard: no dev.services declared shows — on the second line', () => {
+test('dashboard: no dev.services declared shows no service line at all', () => {
   const lane = worktrees.enumerateLanes(wtCfg)[0];
   const ctx = { ...resolveContext(lane2), config: wtCfg };
   const frame = render(ctx, createState(), Date.now(), [lane]);
-  assert.equal(serviceLineFor(frame, lane.name), '—');
+  assert.equal(serviceLineFor(frame, (l) => l.startsWith(rowPrefix(lane.lane))), null);
 });
 
-test('dashboard: services declared but none running shows —, still with the count of the rest', () => {
+test('dashboard: services declared but none running shows no service line at all', () => {
   const lane = worktrees.enumerateLanes(svcCfg)[0]; // lane1
   // Precondition, not an assumption: an earlier test (`start records pid and
   // port…`) starts and stops `web` on this exact lane, with no try/finally —
@@ -1233,9 +1248,11 @@ test('dashboard: services declared but none running shows —, still with the co
   assert.equal(sv.status(sv.resolveServices(svcCfg, lane)[0]).running, false, 'precondition: no service left running on lane1 by an earlier test');
   const ctx = { ...resolveContext(lane2), config: svcCfg };
   const frame = render(ctx, createState(), Date.now(), [lane]);
-  // The count suffix applies to "whichever of the above is shown" — including
-  // the placeholder, per the spec's rendering table — not only a live value.
-  assert.equal(serviceLineFor(frame, lane.name), '— (+1 more)');
+  // Conditional on something actually running, not on the formatted text —
+  // the old placeholder-with-count ('— (+1 more)') is gone entirely now, not
+  // just its wording, since it would otherwise show a line for a lane where
+  // nothing is up.
+  assert.equal(serviceLineFor(frame, (l) => l.startsWith(rowPrefix(lane.lane))), null);
 });
 
 test('dashboard: first declared service running with a url template shows the resolved URL, plus a count of the rest', () => {
@@ -1246,7 +1263,7 @@ test('dashboard: first declared service running with a url template shows the re
   try {
     const ctx = { ...resolveContext(lane2), config: svcCfg };
     const frame = render(ctx, createState(), Date.now(), [lane]);
-    assert.equal(serviceLineFor(frame, lane.name), 'http://localhost:3002 (+1 more)');
+    assert.equal(serviceLineFor(frame, (l) => l.startsWith(rowPrefix(lane.lane))), 'http://localhost:3002 (+1 more)');
   } finally {
     sv.stop(web);
   }
@@ -1272,7 +1289,7 @@ test('dashboard: a url-template service also gets marked ! once its portBase is 
     };
     const ctx = { ...resolveContext(lane2), config: edited };
     const frame = render(ctx, createState(), Date.now(), [lane]);
-    assert.equal(serviceLineFor(frame, lane.name), 'http://localhost:3501! (+1 more)');
+    assert.equal(serviceLineFor(frame, (l) => l.startsWith(rowPrefix(lane.lane))), 'http://localhost:3501! (+1 more)');
   } finally {
     sv.stop(web);
   }
@@ -1286,7 +1303,7 @@ test('dashboard: first declared service running with no url template shows local
   try {
     const ctx = { ...resolveContext(lane2), config: svcCfgNoUrl };
     const frame = render(ctx, createState(), Date.now(), [lane]);
-    assert.equal(serviceLineFor(frame, lane.name), 'localhost:4003');
+    assert.equal(serviceLineFor(frame, (l) => l.startsWith(rowPrefix(lane.lane))), 'localhost:4003');
 
     // Same lane, same worktree — only the service's own portBase changes.
     // The pid file survives (keyed by worktree name, D18-style), but a fresh
@@ -1298,7 +1315,29 @@ test('dashboard: first declared service running with no url template shows local
     };
     const ctxEdited = { ...resolveContext(lane2), config: edited };
     const frameMoved = render(ctxEdited, createState(), Date.now(), [lane]);
-    assert.equal(serviceLineFor(frameMoved, lane.name), 'localhost:4003!');
+    assert.equal(serviceLineFor(frameMoved, (l) => l.startsWith(rowPrefix(lane.lane))), 'localhost:4003!');
+  } finally {
+    sv.stop(api);
+  }
+});
+
+test('dashboard: the second declared service running (not the first) is still detected and shown, with the count of the rest', () => {
+  // Regression: serviceLine now scans every declared service for one that is
+  // running, rather than checking only svcs[0] — see the comment above it in
+  // ui/dashboard.mjs. Before that fix, this exact scenario (web declared but
+  // never started, api started) rendered no line at all.
+  const lane = worktrees.enumerateLanes(svcCfg)[2]; // lane3, untouched by any earlier service test
+  const [, api] = sv.resolveServices(svcCfg, lane);
+  const started = sv.start(api);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const ctx = { ...resolveContext(lane2), config: svcCfg };
+    const frame = render(ctx, createState(), Date.now(), [lane]);
+    assert.equal(
+      serviceLineFor(frame, (l) => l.startsWith(rowPrefix(lane.lane))),
+      'localhost:4003 (+1 more)',
+      'the running second service must be found and shown, with the count of the other declared service',
+    );
   } finally {
     sv.stop(api);
   }
@@ -1310,9 +1349,9 @@ test('dashboard: a row with no .name (foreign project or vanished lane) is never
   const ctx = { ...resolveContext(lane2), config: svcCfg };
   const frame = render(ctx, state, Date.now(), []);
   assert.equal(
-    serviceLineFor(frame, 'demo-ghost-2'),
-    '—',
-    'no .name must never reach resolveServices, regardless of what the project declares',
+    serviceLineFor(frame, (l) => l.includes('demo-ghost-2')),
+    null,
+    'no .name must never reach resolveServices, regardless of what the project declares — no line renders at all',
   );
 });
 
@@ -1376,8 +1415,8 @@ test('lanes dev: no dev.services declared warns and points at a section that act
   assert.match(setupDoc, /^## 5\. Managing lanes$/m, 'the section named in the hint must exist');
 });
 
-// ── Dashboard: sub-header, rule width and lane spacing (#4) ──────────
-test('the SERVICE/CTX sub-header lines up with the real service/ctx columns on the row below', () => {
+// ── Dashboard: header, rule width and lane spacing ────────────────────
+test('CTX is a real header column on the main row, not a separate line — SERVICE has no column at all, only a conditional line', () => {
   const ctxInfo = new Map([['/tmp/aligned.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/tmp/aligned.jsonl' })]);
   const lane = worktrees.enumerateLanes(wtCfg)[0]; // lane1, no dev.services declared under wtCfg
@@ -1385,33 +1424,30 @@ test('the SERVICE/CTX sub-header lines up with the real service/ctx columns on t
   const frame = render(ctx, state, Date.now(), [lane], ctxInfo);
   const lines = stripAnsi(frame).split('\n');
 
-  const headerIdx = lines.findIndex((l) => l.includes('WORKTREE'));
-  const subHeader = lines[headerIdx + 1];
-  assert.equal(subHeader.slice(3, 3 + SERVICE_CELL_WIDTH).trim(), 'SERVICE');
-  assert.equal(subHeader.slice(3 + SERVICE_CELL_WIDTH).trim(), 'CTX');
+  const headerLine = lines.find((l) => l.includes('BRANCH'));
+  assert.ok(headerLine.includes('CTX'), 'CTX must be one of the header columns');
+  assert.ok(!headerLine.includes('SERVICE'), 'SERVICE has no column — it is a conditional line, never a header');
 
-  // Same fixed offset applied to the real second line below it — if the two
-  // ever used a different width, the labels would sit over the wrong cells.
-  const dataIdx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
-  const secondLineText = lines[dataIdx + 1];
-  assert.equal(secondLineText.slice(3, 3 + SERVICE_CELL_WIDTH).trim(), '—', 'SERVICE lines up over the service cell');
+  const row = lines.find((l) => l.startsWith(rowPrefix(lane.lane)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('2K·sonnet-5'), 'the ctx value sits on the lane\'s own row, not a line below it');
   assert.equal(
-    secondLineText.slice(3 + SERVICE_CELL_WIDTH).trim(),
-    '2K ctx · sonnet-5',
-    'CTX lines up exactly where the ctx cell starts, with no gap or overlap',
+    serviceLineFor(frame, (l) => l.startsWith(rowPrefix(lane.lane))),
+    null,
+    'no dev.services declared means no service line at all',
   );
 });
 
 test('the rule under the header is never shorter than the header row, even on a terminal narrower than it', () => {
   const originalColumns = process.stdout.columns;
   try {
-    process.stdout.columns = 60; // far narrower than the ~136-char fixed header
+    process.stdout.columns = 60; // far narrower than the ~100-column capped header
     const frame = render(resolveContext(lane2), createState());
     const lines = stripAnsi(frame).split('\n');
-    const headerIdx = lines.findIndex((l) => l.includes('WORKTREE'));
+    const headerIdx = lines.findIndex((l) => l.includes('BRANCH'));
     const headerLine = lines[headerIdx];
-    const sepLine = lines[headerIdx + 2]; // header, sub-header, then the rule
-    assert.ok(/^─+$/.test(sepLine) && sepLine.length > 0, 'the line two below the header must be the rule');
+    const sepLine = lines[headerIdx + 1]; // header, then the rule directly
+    assert.ok(/^─+$/.test(sepLine) && sepLine.length > 0, 'the line right below the header must be the rule');
     assert.equal(
       sepLine.length,
       headerLine.length,
@@ -1422,19 +1458,104 @@ test('the rule under the header is never shorter than the header row, even on a 
   }
 });
 
-test('the title bar keeps its own narrower width instead of being pulled out to match the wider header rule', () => {
+test('the title bar and the header rule share one capped width now that the header has no separate wider cap', () => {
   const originalColumns = process.stdout.columns;
   try {
     process.stdout.columns = 60;
     const frame = render(resolveContext(lane2), createState());
     const lines = stripAnsi(frame).split('\n');
     const titleLine = lines[0];
-    const headerLine = lines.find((l) => l.includes('WORKTREE'));
-    assert.ok(titleLine.length < headerLine.length, 'the title/clock line must not be padded out to the header/rule width');
-    assert.equal(titleLine.length, 60, 'the title bar follows the floored terminal width, not the wider header');
+    const headerLine = lines.find((l) => l.includes('BRANCH'));
+    assert.equal(titleLine.length, headerLine.length, 'both are capped at the same floored terminal width now that the header no longer has its own separate, wider cap');
   } finally {
     process.stdout.columns = originalColumns;
   }
+});
+
+test('the frame stays capped at 100 columns even on a much wider terminal — the deliberate one-way trade', () => {
+  const originalColumns = process.stdout.columns;
+  try {
+    process.stdout.columns = 200;
+    const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/tmp/wide.jsonl' })]);
+    const frame = render(resolveContext(lane2), state);
+    const table = frame.slice(0, frame.indexOf('RECENT'));
+    const lines = stripAnsi(table).split('\n').filter((l) => l.trim());
+    assert.ok(lines.length > 0, 'the table must have rendered something to check');
+    for (const line of lines) {
+      assert.ok(line.length <= 100, `line exceeds 100 columns at terminal width 200: "${line}"`);
+    }
+  } finally {
+    process.stdout.columns = originalColumns;
+  }
+});
+
+test('below 85 columns CTX drops out entirely, rather than starving BRANCH', () => {
+  const originalColumns = process.stdout.columns;
+  try {
+    process.stdout.columns = 80;
+    const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/tmp/narrow.jsonl' })]);
+    const ctxInfo = new Map([['/tmp/narrow.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);
+    const frame = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo);
+    const lines = stripAnsi(frame).split('\n');
+    const headerLine = lines.find((l) => l.includes('BRANCH'));
+    assert.ok(!headerLine.includes('CTX'), 'CTX column must be gone below the 85-column threshold');
+    const row = lines.find((l) => l.startsWith(rowPrefix(1)));
+    assert.ok(row, 'lane1 must have a row');
+    assert.ok(!row.includes('sonnet-5'), 'no ctx value should render anywhere on the row either');
+  } finally {
+    process.stdout.columns = originalColumns;
+  }
+});
+
+test('CTX_MIN_TERM_WIDTH is an inclusive floor: exactly 85 columns keeps CTX, 84 drops it', () => {
+  const originalColumns = process.stdout.columns;
+  try {
+    process.stdout.columns = 85;
+    const atThreshold = stripAnsi(render(resolveContext(lane2), createState()));
+    const headerAt = atThreshold.split('\n').find((l) => l.includes('BRANCH'));
+    assert.ok(headerAt.includes('CTX'), 'CTX must still show at exactly the threshold width (>=, not >)');
+
+    process.stdout.columns = 84;
+    const belowThreshold = stripAnsi(render(resolveContext(lane2), createState()));
+    const headerBelow = belowThreshold.split('\n').find((l) => l.includes('BRANCH'));
+    assert.ok(!headerBelow.includes('CTX'), 'one column narrower must drop CTX');
+  } finally {
+    process.stdout.columns = originalColumns;
+  }
+});
+
+test('when the row is tight, only the branch name shrinks — issue and marks always render in full', () => {
+  const longBranch = 'feat/1234-a-genuinely-quite-long-branch-name-that-will-not-fit';
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: longBranch,
+    isBase: false, dirty: true, dirtyCount: 7, ahead: 3, behind: 2, baseKnown: true,
+  }];
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('[#1234] '), 'the issue must render in full');
+  assert.ok(row.includes('(~7 +3 -2)'), 'the marks must render in full, never sacrificed to make room for the branch');
+  assert.ok(row.includes('…'), 'the branch name itself is what shrinks');
+  assert.ok(!row.includes(longBranch), 'the full branch name must not have fit verbatim');
+});
+
+test('STATE never truncates any real STATES label, including the two shortened to fit', () => {
+  const state = applyEvents(createState(), [ev(1, 'commit_blocked')]);
+  const frame = render(resolveContext(lane2), state);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('■ blocked, needs review'), 'the longest STATE label must render in full, not ellipsised');
+});
+
+test('STATE also fits the longest real agent_start label this repo\'s own agents produce ("spec-challenger running")', () => {
+  const state = applyEvents(createState(), [ev(1, 'agent_start', { agent: 'spec-challenger' })]);
+  const frame = render(resolveContext(lane2), state);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('● spec-challenger running'), 'STATE_WIDTH was sized for this exact label — it must not truncate');
 });
 
 test('render omits the leading blank before the first lane, but still leaves one before RECENT with zero lanes', () => {
@@ -1454,9 +1575,11 @@ test('render puts no blank line before a single lane\'s block, and exactly one b
   const frame = render(resolveContext(lane2), createState(), Date.now(), single);
   const lines = stripAnsi(frame).split('\n');
   const sepIdx = lines.findIndex((l) => /^─+$/.test(l));
-  assert.ok(lines[sepIdx + 1].includes('lane1'), 'the only lane\'s row must start right after the rule, with no leading blank');
-  assert.equal(lines[sepIdx + 3], '', 'exactly one blank line must separate the only lane\'s block from RECENT');
-  assert.ok(lines[sepIdx + 4].includes('RECENT'));
+  assert.ok(lines[sepIdx + 1].startsWith(rowPrefix(1)), 'the only lane\'s row must start right after the rule, with no leading blank');
+  // No service declared, so no conditional line follows the row — the blank
+  // separator comes right after it, not one line further down.
+  assert.equal(lines[sepIdx + 2], '', 'exactly one blank line must separate the only lane\'s block from RECENT');
+  assert.ok(lines[sepIdx + 3].includes('RECENT'));
 });
 
 test('render inserts exactly one blank line between two lanes, and one more before RECENT after the last', () => {
@@ -1467,11 +1590,11 @@ test('render inserts exactly one blank line between two lanes, and one more befo
   const frame = render(resolveContext(lane2), createState(), Date.now(), two);
   const lines = stripAnsi(frame).split('\n');
   const sepIdx = lines.findIndex((l) => /^─+$/.test(l));
-  assert.ok(lines[sepIdx + 1].includes('lane1'), 'no leading blank before the first lane');
-  assert.equal(lines[sepIdx + 3], '', 'exactly one blank line between the first lane\'s block and the second\'s');
-  assert.ok(lines[sepIdx + 4].includes('lane2'), 'the second lane follows right after that single blank');
-  assert.equal(lines[sepIdx + 6], '', 'one blank line before RECENT after the last lane');
-  assert.ok(lines[sepIdx + 7].includes('RECENT'));
+  assert.ok(lines[sepIdx + 1].startsWith(rowPrefix(1)), 'no leading blank before the first lane');
+  assert.equal(lines[sepIdx + 2], '', 'exactly one blank line between the first lane\'s block and the second\'s');
+  assert.ok(lines[sepIdx + 3].startsWith(rowPrefix(2)), 'the second lane follows right after that single blank');
+  assert.equal(lines[sepIdx + 4], '', 'one blank line before RECENT after the last lane');
+  assert.ok(lines[sepIdx + 5].includes('RECENT'));
 });
 
 // ── Lane colours ────────────────────────────────────────────────────
@@ -2252,17 +2375,27 @@ const writeTranscript = (name, lines) => {
 };
 
 /**
- * Since #3 shipped, a lane's second line carries the service cell (always
- * dimmed) followed immediately by the ctx cell (its own independent tone) —
- * see `secondLine` in ui/dashboard.mjs. The service cell always ends with a
- * reset before the ctx cell begins, so that reset is the reliable place to
- * split the raw line — a fixed-width slice would break the moment either
- * cell's width changes.
+ * CTX is the last cell on a lane's own row (not a separate line — that
+ * changed when WORKTREE/STAGE were dropped to fit the row in 100 columns).
+ * It is always preceded by the FOR cell's own reset, then a single join
+ * space, so the second-to-last reset in the row marks where FOR ends and CTX
+ * begins — the reliable place to split, since a fixed-width slice would break
+ * the moment an earlier cell's width changes.
  */
-function ctxPortion(rawLine) {
-  const cut = rawLine.indexOf(RESET, 3);
-  assert.ok(cut !== -1, 'the service cell must end with a reset before the ctx cell begins');
-  return rawLine.slice(cut + RESET.length);
+function ctxPortion(row) {
+  const lastReset = row.lastIndexOf(RESET);
+  assert.ok(lastReset !== -1, 'the row must have at least one reset');
+  const priorReset = row.lastIndexOf(RESET, lastReset - 1);
+  assert.ok(priorReset !== -1, "the FOR cell's own reset must come before the ctx cell begins");
+  return row.slice(priorReset + RESET.length, lastReset + RESET.length);
+}
+
+/** The real, colour-coded row for a given lane number — located via the ANSI-stripped copy, since the lane number itself sits behind an escape code. */
+function rawRowFor(frame, laneNum) {
+  const raw = frame.split('\n');
+  const idx = stripAnsi(frame).split('\n').findIndex((l) => l.startsWith(rowPrefix(laneNum)));
+  assert.ok(idx !== -1, `lane ${laneNum} must have a row`);
+  return raw[idx];
 }
 
 test('fmtTokens formats exactly at the K/M boundaries', () => {
@@ -2350,67 +2483,58 @@ test('applyEvents resets transcript on session_start, so a new session never inh
   assert.equal(withPath.lanes.get('demo#lane1').transcript, '/tmp/new-session.jsonl');
 });
 
-test('render adds a ctx line under each lane row, live-toned while the session is active', () => {
+test('render puts ctx on the lane\'s own row, live-toned while the session is active', () => {
   const p = writeTranscript('live.jsonl', [
     assistantLine('claude-sonnet-5', { input_tokens: 43000, cache_creation_input_tokens: 100000, cache_read_input_tokens: 0 }),
   ]);
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: p })]);
-  const lines = render(resolveContext(lane2), state).split('\n');
-  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
-  assert.ok(idx !== -1, 'lane1 must have a row');
-  const ctxLine = ctxPortion(lines[idx + 1]);
-  assert.ok(!ctxLine.includes(DIM), 'must not be dimmed while the session is live');
-  assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '143K ctx · sonnet-5');
+  const frame = render(resolveContext(lane2), state);
+  const ctxCell = ctxPortion(rawRowFor(frame, 1));
+  assert.ok(!ctxCell.includes(DIM), 'must not be dimmed while the session is live');
+  assert.equal(ctxCell.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '143K·sonnet-5');
 });
 
-test('render dims the ctx line once the session has closed, but keeps showing the last known value', () => {
+test('render dims the ctx cell once the session has closed, but keeps showing the last known value', () => {
   const p = writeTranscript('closed.jsonl', [
     assistantLine('claude-opus-4-8', { input_tokens: 900000, cache_creation_input_tokens: 100000, cache_read_input_tokens: 0 }),
   ]);
   const state = applyEvents(createState(), [ev(1, 'session_start', { transcript: p }), ev(2, 'session_end')]);
-  const lines = render(resolveContext(lane2), state).split('\n');
-  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
-  const ctxLine = ctxPortion(lines[idx + 1]);
-  assert.ok(ctxLine.includes(DIM), 'must be dimmed once the session has closed');
-  assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '1.0M ctx · opus-4-8');
+  const frame = render(resolveContext(lane2), state);
+  const ctxCell = ctxPortion(rawRowFor(frame, 1));
+  assert.ok(ctxCell.includes(DIM), 'must be dimmed once the session has closed');
+  assert.equal(ctxCell.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '1.0M·opus-4-8');
 });
 
-test('render shows — in the ctx line when no transcript has ever been recorded for the lane', () => {
-  const lines = render(resolveContext(lane2), createState()).split('\n');
-  const idx = lines.findIndex((l) => l.includes('lane3'));
-  assert.ok(idx !== -1, 'lane3 must have a row');
-  const ctxLine = ctxPortion(lines[idx + 1]);
-  assert.ok(ctxLine.includes(DIM), 'no live session either, so dimmed');
-  assert.equal(ctxLine.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '—');
+test('render shows — in the ctx cell when no transcript has ever been recorded for the lane', () => {
+  const frame = render(resolveContext(lane2), createState());
+  const ctxCell = ctxPortion(rawRowFor(frame, 3));
+  assert.ok(ctxCell.includes(DIM), 'no live session either, so dimmed');
+  assert.equal(ctxCell.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').trim(), '—');
 });
 
 test('render uses a supplied ctxInfo map instead of reading the transcript itself — the throttle watchStatus relies on', () => {
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/never/actually/read.jsonl' })]);
   const ctxInfo = new Map([['/never/actually/read.jsonl', { tokens: 2000, model: 'claude-sonnet-5' }]]);
-  const lines = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo).split('\n');
-  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
-  assert.ok(idx !== -1, 'lane1 must have a row');
-  const stripped = ctxPortion(lines[idx + 1]).replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
-  assert.equal(stripped.trim(), '2K ctx · sonnet-5', 'must read the supplied map, never touch the (nonexistent) file on disk');
+  const frame = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo);
+  const stripped = ctxPortion(rawRowFor(frame, 1)).replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  assert.equal(stripped.trim(), '2K·sonnet-5', 'must read the supplied map, never touch the (nonexistent) file on disk');
 });
 
 test('render treats a transcript missing from ctxInfo as unknown, not as licence to read it directly', () => {
   const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/some/real/path.jsonl' })]);
-  const lines = render(resolveContext(lane2), state, Date.now(), undefined, new Map()).split('\n');
-  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
-  const stripped = ctxPortion(lines[idx + 1]).replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const frame = render(resolveContext(lane2), state, Date.now(), undefined, new Map());
+  const stripped = ctxPortion(rawRowFor(frame, 1)).replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
   assert.equal(stripped.trim(), '—', 'a throttled cache miss shows — until the next refresh, not a fresh direct read');
 });
 
-test('the ctx line dims for CLI-driven events too — reviewed is not a liveness signal, same reasoning as stage', () => {
+test('the ctx cell dims for CLI-driven events too — reviewed is not a liveness signal, same reasoning as stage', () => {
   const state = applyEvents(createState(), [
     ev(1, 'session_start', { transcript: '/tmp/x.jsonl' }),
     ev(2, 'reviewed'), // /gate marked it clean — unrelated to whether a session is attached
   ]);
   const ctxInfo = new Map([['/tmp/x.jsonl', { tokens: 5000, model: 'claude-sonnet-5' }]]);
-  const lines = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo).split('\n');
-  const idx = lines.findIndex((l) => l.includes('lane1') && !l.includes('lane10'));
-  assert.ok(ctxPortion(lines[idx + 1]).includes(DIM), '"reviewed" must not read as a live session, even right after one closed');
+  const frame = render(resolveContext(lane2), state, Date.now(), undefined, ctxInfo);
+  assert.ok(ctxPortion(rawRowFor(frame, 1)).includes(DIM), '"reviewed" must not read as a live session, even right after one closed');
 });
 
 test('render never throws when a lane carries a transcript path that no longer resolves to anything readable', () => {
