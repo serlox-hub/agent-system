@@ -17,6 +17,16 @@ reversed, never to make room.
 
 ---
 
+## D30 — `applyEvents`'s folded `stage` field stays, though nothing renders it
+`core` · 2026-08 · `ui/dashboard.mjs:applyEvents` · #9
+Dropping the STAGE column (#9) was a display decision; the field is the load-bearing half of the guard stopping a stage event from overwriting `ev`/`since`, and has its own test coverage.
+Rejected: deleting it as dead state — it looks unread, but removing it risks taking the stage-is-not-a-liveness-signal guard down with it.
+
+## D29 — `lanes status`'s frame caps at 100 columns even on a wider terminal
+`core` · 2026-08 · `ui/dashboard.mjs:render` · #9
+Keeps one consistent, compact shape at the user's real pane size instead of reflowing on every resize; still adapts down below 100, and drops CTX below 85 rather than starve BRANCH.
+Rejected: letting BRANCH absorb the extra room on a wide terminal — recreates the pre-#9 behaviour where the same lane renders a different shape in every pane.
+
 ## D28 — `lanes rm` takes no selector; `lanes clear` is the separate command for removing every lane
 `product` · 2026-08 · `bin/lanes.mjs`
 `removeWorktree` only ever accepts a contiguous run ending at the top of the

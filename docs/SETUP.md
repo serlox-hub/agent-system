@@ -124,7 +124,7 @@ In a spare terminal. Empty until a session in an adopted repo produces events.
 
 ```bash
 lanes status # live dashboard — leave it running in a terminal, see §4
-lanes status --once                 # one-shot snapshot: worktrees, branches, dirty state, first service per lane
+lanes status --once                 # one-shot snapshot: branch, marks, state, context, running services
 lanes adopt  # scaffold .claude/agent-system.json for this repo, see §2
 lanes doctor # verify the install, the repo config and this worktree, see §3
 lanes new                           # create the next lane, detached at origin/main
