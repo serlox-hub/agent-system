@@ -45,7 +45,9 @@ const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } 
   `${ROOT}/lib/local-config.mjs`
 );
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK } = await import(`${ROOT}/lib/marks.mjs`);
-const { createState, applyEvents, render, notifyTitle, fmtTokens } = await import(`${ROOT}/ui/dashboard.mjs`);
+const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed } = await import(
+  `${ROOT}/ui/dashboard.mjs`
+);
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
 const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE } = await import(`${ROOT}/lib/colors.mjs`);
 const worktrees = await import(`${ROOT}/lib/worktrees.mjs`);
@@ -2406,6 +2408,33 @@ test('fmtTokens formats exactly at the K/M boundaries', () => {
   assert.equal(fmtTokens(999999), '1000K', 'still below the M threshold, since that check is on the raw count');
   assert.equal(fmtTokens(1_000_000), '1.0M');
   assert.equal(fmtTokens(1_500_000), '1.5M');
+});
+
+test('fmtElapsed switches to d/h at the 24h boundary and stays within FOR_WIDTH', () => {
+  assert.equal(fmtElapsed(23 * 3600e3 + 59 * 60e3), '23h59m', 'just under a day is still hours');
+  assert.equal(fmtElapsed(24 * 3600e3), '1d00h', 'exactly a day rolls over to days');
+  assert.equal(fmtElapsed(28 * 3600e3 + 15 * 60e3), '1d04h');
+
+  const FOR_WIDTH = 7; // ui/dashboard.mjs sizes this column against the same constant
+  for (const ms of [0, 999, 59 * 1000, 59 * 60e3 + 59 * 1000, 23 * 3600e3 + 59 * 60e3, 999 * 86400e3 + 23 * 3600e3]) {
+    assert.ok(fmtElapsed(ms).length <= FOR_WIDTH, `fmtElapsed(${ms}) = "${fmtElapsed(ms)}" must fit FOR_WIDTH`);
+  }
+});
+
+test('the FOR cell in a real row switches to d/h too — not just the unit function in isolation', () => {
+  const state = createState();
+  const since = Date.UTC(2020, 0, 1);
+  const now = since + 30 * 3600e3 + 15 * 60e3; // 1d06h15m later
+  state.lanes.set('demo#lane1', {
+    project: 'demo', worktree: 'lane1', ev: 'idle', since,
+    // A currently-declared lane bypasses the existsSync liveness check
+    // entirely (see the test above), so no real path is needed here.
+  });
+  const frame = render(resolveContext(lane2), state, now);
+  const row = stripAnsi(frame).split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('1d06h'), `render() must thread now - since through fmtElapsed into the FOR cell: "${row}"`);
+  assert.ok(row.length <= 100, 'the row must still fit the 100-column cap once FOR widens from h/m to d/h');
 });
 
 test('readContext returns null for a missing file, a non-string path, or an empty file', () => {

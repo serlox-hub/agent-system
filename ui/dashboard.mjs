@@ -35,14 +35,16 @@ const C = {
   grey: '\x1b[90m',
 };
 
-function fmtElapsed(ms) {
+export function fmtElapsed(ms) {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m${String(s % 60).padStart(2, '0')}s`;
   const h = Math.floor(m / 60);
-  return `${h}h${String(m % 60).padStart(2, '0')}m`;
+  if (h < 24) return `${h}h${String(m % 60).padStart(2, '0')}m`;
+  const d = Math.floor(h / 24);
+  return `${d}d${String(h % 24).padStart(2, '0')}h`;
 }
 
 function fmtClock(ts) {
@@ -405,7 +407,10 @@ const LANE_WIDTH = 3;
 // STATES labels (commit_blocked, reviewed) were shortened to fit this rather
 // than widening it — see their wording above.
 const STATE_WIDTH = 26;
-const FOR_WIDTH = 7; // fits up to "999h59m" — lanes are long-lived (D20), multi-day idle is ordinary
+// Hours-only overflowed this at 1000h (~42 days idle — ordinary under D20); d/h
+// holds the same 7 chars out to "999d23h". 7 is load-bearing: render()'s
+// reserved budget (below) is solved against the 100-col cap (D29).
+const FOR_WIDTH = 7;
 const CTX_WIDTH = 24; // fits the worst realistic model id after stripping "claude-" (~19 chars) + tokens
 const CTX_MIN_TERM_WIDTH = 85; // below this, drop the CTX column outright rather than starve BRANCH
 const BRANCH_FLOOR = 20;
