@@ -3098,6 +3098,68 @@ test('a live status overrides the folded ev/since/waitingFor, and FOR measures f
   assert.match(row, /\b5s\b/, 'FOR must measure from the live statusUpdatedAt (1000), not the folded busy since (1) — now (6000) - 1000 = 5s');
 });
 
+test('findLiveStatuses selection is deterministic regardless of array order — the same lane picks the same live status either way (#14)', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  // Neither cwd is an exact match, so the ascending-startedAt rule has to
+  // decide — and its winner ('earlier') deliberately has the
+  // lexically-LOSING sessionId ('sess-z' > 'sess-a'), so this only passes if
+  // the startedAt comparison actually runs before the sessionId tiebreak.
+  const earlier = { cwd: join(wtDir, 'lane1', 'sub-a'), status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-z', startedAt: 100 };
+  const later = { cwd: join(wtDir, 'lane1', 'sub-b'), status: 'busy', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-a', startedAt: 500 };
+  const rowFrom = (liveStatuses) => {
+    const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, liveStatuses);
+    return frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  };
+  assert.ok(rowFrom([earlier, later]).includes('waiting for you'), 'the earlier-started session must win, array order [earlier, later]');
+  assert.ok(rowFrom([later, earlier]).includes('waiting for you'), 'and the same session must win with the array reversed — [later, earlier]');
+});
+
+test('findLiveStatuses: an exact cwd match always wins over a merely-prefix one, regardless of startedAt or sessionId (#14)', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  // exactButLate loses on both startedAt (much later) and sessionId
+  // ('sess-z' > 'sess-a') — only the exact-cwd rule can make it win.
+  const exactButLate = { cwd: join(wtDir, 'lane1'), status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-z', startedAt: 9999 };
+  const prefixButEarly = { cwd: join(wtDir, 'lane1', 'sub'), status: 'busy', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-a', startedAt: 1 };
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, [prefixButEarly, exactButLate]);
+  const row = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row.includes('waiting for you'), 'the exact-cwd session must win even though the prefix-matched one started much earlier and has a lexically-earlier sessionId');
+});
+
+test('findLiveStatuses: sessionId is the final tiebreak when cwd and startedAt are both tied (#14)', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const a = { cwd: join(wtDir, 'lane1'), status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 100 };
+  const b = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-b', startedAt: 100 };
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, [b, a]);
+  const row = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '').split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row.includes('waiting for you'), 'with cwd and startedAt tied, the lexically-smaller sessionId ("sess-a") must win, giving a total order rather than a coin flip');
+});
+
+test('findLiveStatuses never matches a row with no recorded path — an undefined lanePath must not coerce into a stray "undefined/" prefix match (#14)', () => {
+  // Mirrors the pre-existing "ghost row with no recorded path fails open"
+  // case (events written before the `path` field existed): the row must
+  // still render, but a live status must never leak onto it, since a bare
+  // `startsWith(`${lanePath}/`)` with no `!lanePath` guard would happily
+  // coerce `undefined` to the string "undefined" and could match a stray cwd.
+  const state = createState();
+  state.lanes.set('demo#some-worktree', { project: 'demo', worktree: 'some-worktree', ev: 'busy', since: 1 });
+  const liveStatuses = [{ cwd: 'undefined/sub', status: 'waiting', waitingFor: 'should never surface', statusUpdatedAt: 1 }];
+  const frame = render(resolveContext(lane2), state, Date.now(), [], null, liveStatuses);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.includes('some-worktree'));
+  assert.ok(row, 'the pathless row must still render (fails open, per the existsSync liveness check)');
+  assert.ok(row.includes('working'), 'the folded busy state must stand — findLiveStatuses([...], undefined) must return [] via its early `!lanePath` guard');
+  assert.ok(!row.includes('should never surface'), 'a live status must never override a row that has no path to match against');
+});
+
 test('the live override never touches a protected lanes-specific state like commit_blocked', () => {
   const fabricated = [{
     lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
@@ -3245,6 +3307,24 @@ test('liveTransitionNotifications drops its tracked baseline once the row become
   const noMatchRows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
   liveTransitionNotifications(noMatchRows, [], prev, new Set());
   assert.equal(prev.has('demo#lane1'), false, 'no live match this tick must drop the baseline too, so a later reattachment starts clean');
+});
+
+test('liveTransitionNotifications picks the same deterministic match as render — this is a separate call site, not exercised by the render-path ordering tests above (#14)', () => {
+  // Neither cwd is exact, so ascending-startedAt has to decide, same shape as
+  // the render-path "array order independence" test — but going through
+  // liveTransitionNotifications' own call to findLiveStatuses, which could
+  // silently diverge (e.g. a stale copy-paste of the old singular
+  // findLiveStatus) without this catching it.
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  const earlier = { cwd: '/p/lane1/sub-a', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-z', startedAt: 100 };
+  const later = { cwd: '/p/lane1/sub-b', status: 'busy', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-a', startedAt: 500 };
+  const baselineAfter = (liveStatuses) => {
+    const prev = new Map([['demo#lane1', 'busy']]);
+    liveTransitionNotifications(rows, liveStatuses, prev, new Set());
+    return prev.get('demo#lane1');
+  };
+  assert.equal(baselineAfter([earlier, later]), 'idle', 'the earlier-started session must win, array order [earlier, later]');
+  assert.equal(baselineAfter([later, earlier]), 'idle', 'and the same session must win with the array reversed — [later, earlier]');
 });
 
 // ── Run ─────────────────────────────────────────────────────────────
