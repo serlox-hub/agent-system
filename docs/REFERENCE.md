@@ -54,6 +54,14 @@ produced it — taken from the hook payload for hook-driven events, from
 `CLAUDE_CODE_SESSION_ID` for the `lanes` CLI, and `null` when a `lanes`
 command is run outside Claude Code. Nothing reads it yet.
 
+The dashboard's displayed state is not purely event-derived: each render tick
+also reads `~/.claude/sessions/*.json`, Claude Code's own live per-session
+status file, and lets it override the folded `busy`/`idle`/nothing with the
+session's real-time `busy`/`idle`/`waiting` — catching an interrupted turn (no
+`Stop` ever fires) or a pending `AskUserQuestion`, neither of which produces
+an event above. The richer, lanes-specific states (`agent_start`, `reviewed`,
+`commit_*`, `lane_*`) stay authoritative and are never overridden.
+
 ## Known limitations
 
 Stated plainly, because finding these yourself later is worse:
@@ -71,8 +79,11 @@ Stated plainly, because finding these yourself later is worse:
 - **The event log keeps one rotated generation** (2 MiB each). It is a dashboard
   feed, not an audit trail; if you want long-term history, ship the JSONL
   somewhere else.
-- **Notifications fire only for events that arrive while `lanes status` is running.**
-  History is replayed into the display but never notified.
+- **Notifications fire for events that arrive while `lanes status` is running,
+  and for live-status transitions read from `~/.claude/sessions/*.json` each
+  tick** (deduplicated against the event path within the same tick, so a
+  normal `Stop` never double-fires). History is replayed into the display but
+  never notified, on either path.
 - **Project-local agents and skills win over these.** A repo with its own
   `.claude/agents/` or `.claude/skills/` keeps using them, so adopting this
   system there does not change existing behaviour on its own — you get the hooks

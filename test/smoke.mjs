@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -47,10 +47,11 @@ const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } 
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYPASS_MARK } = await import(
   `${ROOT}/lib/marks.mjs`
 );
-const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed } = await import(
+const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
+const { readLiveStatuses, SESSIONS_DIR } = await import(`${ROOT}/lib/live-status.mjs`);
 const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE } = await import(`${ROOT}/lib/colors.mjs`);
 const worktrees = await import(`${ROOT}/lib/worktrees.mjs`);
 const sv = await import(`${ROOT}/lib/services.mjs`);
@@ -2868,6 +2869,222 @@ test('emit.mjs: UserPromptSubmit and SessionEnd never carry a transcript key, un
   assert.equal(ended.ev, 'session_end');
   assert.equal(ended.detail, 'clear');
   assert.equal(Object.prototype.hasOwnProperty.call(ended, 'transcript'), false);
+});
+
+// ── Live status override (#12) ───────────────────────────────────────
+// `readLiveStatuses` reads ~/.claude/sessions/*.json — sandboxed under TMP
+// by the same HOME override the rest of the suite relies on. Each test
+// clears SESSIONS_DIR first so the fixtures here are independent of run
+// order and never leak into the render()-level tests below, which always
+// inject an explicit liveStatuses array instead of depending on this dir.
+test('readLiveStatuses returns [] when ~/.claude/sessions does not exist, never throws', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  assert.deepEqual(readLiveStatuses(), []);
+});
+
+test('readLiveStatuses keeps a live pid, tolerates a malformed sibling file, and normalizes a missing waitingFor to null', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: '/some/lane/path', status: 'busy', statusUpdatedAt: 12345 }),
+  );
+  writeFileSync(join(SESSIONS_DIR, 'garbage.json'), '{ not json');
+  writeFileSync(join(SESSIONS_DIR, 'not-a-session.key'), 'irrelevant, not even .json');
+  assert.deepEqual(readLiveStatuses(), [
+    { cwd: '/some/lane/path', status: 'busy', waitingFor: null, statusUpdatedAt: 12345 },
+  ]);
+});
+
+test('readLiveStatuses drops an entry whose pid is no longer alive', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+  writeFileSync(
+    join(SESSIONS_DIR, `${dead.pid}.json`),
+    JSON.stringify({ pid: dead.pid, cwd: '/dead/lane', status: 'busy', statusUpdatedAt: 1 }),
+  );
+  assert.deepEqual(readLiveStatuses(), [], 'a dead pid must not appear, even though the file itself parses fine');
+  rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for the render()-level tests below to trip over
+});
+
+test('readLiveStatuses strips control/ANSI bytes from status too, not just waitingFor', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: '/some/lane/path', status: `idle${ESC}[31m\x07`, statusUpdatedAt: 1 }),
+  );
+  const [entry] = readLiveStatuses();
+  assert.equal(
+    entry.status,
+    'idle[31m',
+    'ESC (0x1b) and BEL (0x07) must be stripped from status at the source, same as waitingFor already was',
+  );
+  rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for the render()-level tests below to trip over
+});
+
+test('a live status overrides the folded ev/since/waitingFor, and FOR measures from the live statusUpdatedAt', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const liveStatuses = [{ cwd: join(wtDir, 'lane1'), status: 'waiting', waitingFor: 'input needed', statusUpdatedAt: 1000 }];
+  const frame = render(resolveContext(lane2), applyEvents(createState(), [ev(1, 'busy')]), 6000, fabricated, null, liveStatuses);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('waiting: input needed'), 'the live waitingFor must override the folded busy state');
+  assert.match(row, /\b5s\b/, 'FOR must measure from the live statusUpdatedAt (1000), not the folded busy since (1) — now (6000) - 1000 = 5s');
+});
+
+test('the live override never touches a protected lanes-specific state like commit_blocked', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const liveStatuses = [{ cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 999 }];
+  const state = applyEvents(createState(), [ev(1, 'commit_blocked')]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, liveStatuses);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('blocked, needs review'), 'commit_blocked must stay authoritative over a live busy status');
+  assert.ok(!row.includes('working'), 'the live status must not leak through onto a protected row');
+});
+
+test('the live override applies to agent_end (its render is byte-identical to busy, so a subagent interrupted mid-turn is no longer stuck showing "working")', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const liveStatuses = [{ cwd: join(wtDir, 'lane1'), status: 'idle', waitingFor: null, statusUpdatedAt: 1 }];
+  const state = applyEvents(createState(), [ev(1, 'agent_start', { agent: 'test-writer' }), ev(2, 'agent_end')]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, liveStatuses);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('waiting for you'), 'a live idle status must override agent_end\'s own "working" label');
+  assert.ok(!row.includes('working'), 'agent_end must not stay stuck on "working" once the live session actually went idle');
+});
+
+test('agent_start, unlike agent_end, stays protected against a live override', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const liveStatuses = [{ cwd: join(wtDir, 'lane1'), status: 'idle', waitingFor: null, statusUpdatedAt: 1 }];
+  const state = applyEvents(createState(), [ev(1, 'agent_start', { agent: 'test-writer' })]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, liveStatuses);
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('test-writer running'), 'agent_start must stay authoritative over a live idle status');
+  assert.ok(!row.includes('waiting for you'), 'the live status must not leak through onto agent_start');
+});
+
+test('render never crashes on a live status colliding with Object.prototype (e.g. "constructor"), and falls back to the unknown-event label instead of resolving Object off the prototype chain', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const liveStatuses = [{ cwd: join(wtDir, 'lane1'), status: 'constructor', waitingFor: null, statusUpdatedAt: 1 }];
+  const state = applyEvents(createState(), [ev(1, 'busy')]);
+  let frame;
+  assert.doesNotThrow(() => { frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, liveStatuses); });
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must have a row');
+  assert.ok(row.includes('· constructor'), 'a status that only resolves via Object.prototype must fall back to the unknown-event icon/label, not the inherited Object constructor');
+});
+
+test('render falls back to the folded state exactly when liveStatuses has no matching cwd (fallback path)', () => {
+  const state = applyEvents(createState(), [ev(1, 'idle')]);
+  const frame = render(resolveContext(lane2), state, Date.now(), undefined, null, []);
+  assert.ok(frame.includes('waiting for you'), 'idle must render normally with an empty liveStatuses array — no crash, no change');
+});
+
+// `sanitize()` in ui/dashboard.mjs only bounds length now — stripping
+// control/ANSI bytes moved to readLiveStatuses() itself (see the
+// readLiveStatuses tests above), so the only realistic way a hostile
+// waitingFor reaches render() is through that same boundary. Fabricating an
+// unsanitized liveStatuses entry straight into render(), bypassing
+// readLiveStatuses entirely, is not a path production code ever takes
+// (render()'s own default parameter *is* readLiveStatuses()) — so this goes
+// through the real file + real reader, like the other sanitization tests.
+test('a malicious waitingFor (control chars, an embedded ANSI escape, excessive length), sanitized end-to-end through readLiveStatuses, never breaks row layout', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const evil = `hijacked${ESC}[31m${'x'.repeat(1000)}\x07\x00`;
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: join(wtDir, 'lane1'), status: 'waiting', waitingFor: evil, statusUpdatedAt: 1 }),
+  );
+  const liveStatuses = readLiveStatuses();
+  assert.ok(!liveStatuses[0].waitingFor.includes(ESC), 'readLiveStatuses must strip the ESC byte at the trust boundary, before render() ever sees it');
+
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, liveStatuses);
+  assert.ok(!frame.includes('\x07'), 'the bell character must be stripped before render');
+  assert.ok(!frame.includes('\x00'), 'a null byte must be stripped before render');
+  assert.ok(!frame.includes(`hijacked${ESC}[31m`), 'an embedded ESC byte from waitingFor must not reach the terminal literally');
+  const stripped = frame.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  const row = stripped.split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row, 'lane1 must still have a row');
+  assert.ok(row.includes('waiting:'), 'the waiting state must still render despite the hostile payload');
+  assert.ok(row.length < 200, `the row must stay within the table's column budget, not balloon with the 1000-char payload (was ${row.length})`);
+  rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for tests below to trip over
+});
+
+test('liveTransitionNotifications stays silent on first observation, but still records the baseline', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1 }];
+  const prev = new Map();
+  const out = liveTransitionNotifications(rows, liveStatuses, prev, new Set());
+  assert.deepEqual(out, [], 'no prior baseline means nothing has "transitioned" yet');
+  assert.equal(prev.get('demo#lane1'), 'idle', 'the baseline itself must still be recorded for next tick');
+});
+
+test('liveTransitionNotifications fires once the live status actually changes from the tracked baseline', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  const prev = new Map([['demo#lane1', 'busy']]);
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1 }];
+  const out = liveTransitionNotifications(rows, liveStatuses, prev, new Set());
+  assert.equal(out.length, 1);
+  assert.equal(out[0].body, 'Waiting for you');
+  assert.equal(prev.get('demo#lane1'), 'idle');
+});
+
+test('liveTransitionNotifications reports the waitingFor detail for a transition into waiting', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  const prev = new Map([['demo#lane1', 'busy']]);
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'waiting', waitingFor: 'input needed', statusUpdatedAt: 1 }];
+  const out = liveTransitionNotifications(rows, liveStatuses, prev, new Set());
+  assert.equal(out[0].body, 'Needs your input: input needed');
+});
+
+test('liveTransitionNotifications is deduped against a lane already notified this tick via a raw event', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  const prev = new Map([['demo#lane1', 'busy']]);
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1 }];
+  const out = liveTransitionNotifications(rows, liveStatuses, prev, new Set(['demo#lane1']));
+  assert.deepEqual(out, [], 'a Stop event already notified this lane this tick, so the live transition must not double-fire');
+  assert.equal(prev.get('demo#lane1'), 'idle', 'the baseline must still update even though the notification itself was suppressed');
+});
+
+test('liveTransitionNotifications drops its tracked baseline once the row becomes protected, or its live match disappears', () => {
+  const prev = new Map([['demo#lane1', 'busy']]);
+  const protectedRows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'commit_blocked' }];
+  liveTransitionNotifications(protectedRows, [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1 }], prev, new Set());
+  assert.equal(prev.has('demo#lane1'), false, 'a protected state must drop the baseline rather than compare against it');
+
+  prev.set('demo#lane1', 'busy');
+  const noMatchRows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  liveTransitionNotifications(noMatchRows, [], prev, new Set());
+  assert.equal(prev.has('demo#lane1'), false, 'no live match this tick must drop the baseline too, so a later reattachment starts clean');
 });
 
 // ── Run ─────────────────────────────────────────────────────────────
