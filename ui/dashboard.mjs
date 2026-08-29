@@ -441,22 +441,46 @@ const PROTECTED_LIVE_OVERRIDE = new Set([
 
 /**
  * Prefix match, same idiom as lib/worktrees.mjs's own cwd->lane lookup.
- * Picks the first match when more than one live session's `cwd` resolves
- * under the same lane path (root plus a subdirectory launch, say) — an
- * assumption, not a guarantee: D20 frames a lane as one long-lived branch,
- * so this treats "one live session per lane" the same way. A genuine
- * multi-session lane resolves arbitrarily, by filesystem read order.
+ * Returns every live session whose `cwd` resolves under the lane path (root
+ * itself, or a subdirectory launch), ordered deterministically instead of by
+ * whatever order `readdirSync` happened to return them in (#14): an
+ * exact path match beats a merely-prefix one regardless of when either
+ * started, then ascending `startedAt` — oldest wins, not newest — so two
+ * entries tied on everything else still resolve the same way on every call.
+ * `[0]` is today's single override target; the rest exist for #14's
+ * extra-row rendering.
+ *
+ * Ascending, not descending: under D20 a lane is one long-lived branch, so
+ * its longest-running session is the one the row represents (missing/invalid
+ * `startedAt` sorts last via `Infinity` — an unknown start time is worse
+ * information than a real one, never better, so it can't win a tiebreak by
+ * default). A second, newer session in the same lane gets its own row in
+ * #14's later phases rather than displacing the primary one — descending
+ * order would make the row's identity jump every time a throwaway session is
+ * opened in the lane, reintroducing the instability this ordering exists to
+ * remove. `sessionId` is the final string-compare tiebreak, guaranteed
+ * present by D36.
  */
-function findLiveStatus(liveStatuses, lanePath) {
-  if (!lanePath) return null;
-  return liveStatuses.find((s) => s.cwd === lanePath || s.cwd.startsWith(`${lanePath}/`)) || null;
+function findLiveStatuses(liveStatuses, lanePath) {
+  if (!lanePath) return [];
+  return liveStatuses
+    .filter((s) => s.cwd === lanePath || s.cwd.startsWith(`${lanePath}/`))
+    .sort((a, b) => {
+      const aExact = a.cwd === lanePath ? 0 : 1;
+      const bExact = b.cwd === lanePath ? 0 : 1;
+      if (aExact !== bExact) return aExact - bExact;
+      const aStarted = Number.isFinite(a.startedAt) ? a.startedAt : Infinity;
+      const bStarted = Number.isFinite(b.startedAt) ? b.startedAt : Infinity;
+      if (aStarted !== bStarted) return aStarted - bStarted;
+      return a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0;
+    });
 }
 
-/** `rows` with each row's `ev`/`since`/`waitingFor` replaced by its live status, per the rule above. */
+/** `rows` with each row's `ev`/`since`/`waitingFor` replaced by its primary live status, per the rule above. */
 function withLiveOverride(rows, liveStatuses) {
   return rows.map((r) => {
     if (PROTECTED_LIVE_OVERRIDE.has(r.ev)) return r;
-    const live = findLiveStatus(liveStatuses, r.path);
+    const live = findLiveStatuses(liveStatuses, r.path)[0];
     if (!live) return r;
     return { ...r, ev: live.status, since: live.statusUpdatedAt ?? r.since, waitingFor: live.waitingFor };
   });
@@ -482,7 +506,7 @@ export function liveTransitionNotifications(rows, liveStatuses, prevLiveEv, noti
       prevLiveEv.delete(key);
       continue;
     }
-    const live = findLiveStatus(liveStatuses, r.path);
+    const live = findLiveStatuses(liveStatuses, r.path)[0];
     if (!live) {
       prevLiveEv.delete(key);
       continue;

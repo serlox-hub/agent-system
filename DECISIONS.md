@@ -17,27 +17,21 @@ reversed, never to make room.
 
 ---
 
+## D37 — Among a lane's live sessions, the oldest is primary: exact-cwd match first, then ascending `startedAt`, then `sessionId`
+`core` · 2026-08 · `ui/dashboard.mjs:findLiveStatuses` · #14
+Under D20 a lane is one long-lived branch, so its longest-running session is the one the lane's row represents; a session launched from the lane root outranks one launched from a subdirectory because it is the lane's own session rather than an incidental one; `sessionId` is the last resort D36 guarantees is always present.
+Rejected: descending `startedAt` (newest wins) or most-recent `statusUpdatedAt` — both make the row's identity jump every time a second session is opened in the lane or changes state, reintroducing the per-tick instability this phase set out to remove.
+
 ## D36 — `readLiveStatuses`' `sessionId` always falls back to `String(pid)`, never `null`
 `core` · 2026-08 · `lib/live-status.mjs:readLiveStatuses` · #14
 Every other new field (`name`, `startedAt`) normalizes an absent/wrong-typed value to `null`, matching this module's existing posture. `sessionId` is the one exception: issue #14's later phases (2's ordering tiebreak, 5's per-session notification dedup key) both assume every live entry has a real id to key on. The session file is literally named `<pid>.json` and the pid is already proven live by `isLivePid` above it, so it's a stable identity for exactly as long as the row must exist — falling back to it (rather than leaving `sessionId` nullable) makes that assumption true at the one place it's produced, instead of pushing it into phases that would otherwise be written believing it.
-Rejected: leaving `sessionId` nullable and keying later phases on `` `${sessionId ?? cwd}` `` instead — cheaper here, but two sessions from an old build with no `sessionId` field would collide on the same fallback key, silently reintroducing the same read-order non-determinism D34 already exists to fix.
+Rejected: leaving `sessionId` nullable and keying later phases on `` `${sessionId ?? cwd}` `` instead — cheaper here, but two sessions from an old build with no `sessionId` field would collide on the same fallback key, silently reintroducing the same `readdirSync`-order non-determinism `findLiveStatuses` exists to fix.
 
 ## D35 — `emit()`'s session field is resolved by `hasOwnProperty`, not nullish-coalescing
 `core` · 2026-08 · `lib/context.mjs:emit` · #13
 Hook emitters (`hooks/emit.mjs`, `hooks/commit-guard.mjs`) always pass an explicit `session` key from their own hook payload, even when its value is null — `hasOwnProperty` lets that win unconditionally, so a hook event with no `session_id` never silently inherits `CLAUDE_CODE_SESSION_ID` from the subprocess environment, which issue #13 explicitly ruled out as unverified for hook-driven events. CLI emitters (`bin/lanes.mjs`, via `emitWithContext`) never pass the key at all, so they always fall back to the env var — every call site gets real attribution with zero code changes there, present or future.
 Rejected: `event.session ?? process.env.CLAUDE_CODE_SESSION_ID ?? null` — cannot distinguish "the hook resolved no session" from "nobody set the key", so a hook's genuinely-null session would still inherit the ambient env value, reintroducing the exact leak the issue's constraint rules out.
 Rejected: threading the env fallback through each of the five `bin/lanes.mjs` call sites individually — a call site added later would silently emit unattributed, with no test to catch it.
-
-## D34 — `findLiveStatus` assumes one live Claude Code session per lane; a genuine second session resolves arbitrarily by filesystem read order
-`core` · 2026-08 · `ui/dashboard.mjs:findLiveStatus` · #12
-Matches D20's framing of a lane as one long-lived branch. Showing multiple
-concurrent sessions per lane would need a row-shape redesign (`STATE_WIDTH`,
-`NOTIFY`, `liveTransitionNotifications` all assume one `ev`/`since`/
-`waitingFor` per lane) — out of scope for a bug-accuracy fix.
-Rejected: picking a deterministic tie-break now (e.g. most-recent
-`statusUpdatedAt` wins) — would quietly paper over the two-sessions case
-instead of surfacing it as the real feature request it is; deferred to a
-separate issue instead.
 
 ## D33 — `agent_end` is excluded from `PROTECTED_LIVE_OVERRIDE`, but `agent_start` stays protected
 `core` · 2026-08 · `ui/dashboard.mjs:PROTECTED_LIVE_OVERRIDE` · #12
@@ -59,7 +53,7 @@ tempting since the field is right there, but reintroduces the per-tick
 subprocess spawn the 20-tick throttle on `laneInfo`/`ctxInfo` exists to avoid.
 
 ## D31 — The live-status join key is the lane's filesystem path (prefix match), not the session id
-`core` · 2026-08 · `ui/dashboard.mjs:findLiveStatus` · #12
+`core` · 2026-08 · `ui/dashboard.mjs:findLiveStatuses` · #12
 Every lane already has a `path` with no dependency on any event ever being
 logged, so the join works for a freshly created lane and survives log
 rotation; `session` is missing from `lane_reset`/`commit_*`/`reviewed` events
