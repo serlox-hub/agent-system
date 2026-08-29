@@ -21,6 +21,7 @@ import { laneColorFor } from '../lib/colors.mjs';
 import { enumerateLanes, laneMarks } from '../lib/worktrees.mjs';
 import { resolveServices, status as serviceStatus, boundPort } from '../lib/services.mjs';
 import { readContext } from '../lib/transcript.mjs';
+import { readLiveStatuses } from '../lib/live-status.mjs';
 
 const HISTORY_LIMIT = 12;
 
@@ -57,6 +58,17 @@ function fmtClock(ts) {
 function pad(s, w) {
   const str = String(s ?? '');
   return str.length > w ? `${str.slice(0, w - 1)}…` : str.padEnd(w);
+}
+
+// `waitingFor` comes straight from an undocumented external file
+// (lib/live-status.mjs), which already strips control/ANSI bytes at the trust
+// boundary — this only bounds the length, so `pad()` never has to truncate a
+// pathological value on every render tick.
+const WAITING_FOR_MAX = 200;
+
+function sanitize(s) {
+  if (typeof s !== 'string') return '';
+  return s.length > WAITING_FOR_MAX ? `${s.slice(0, WAITING_FOR_MAX - 1)}…` : s;
 }
 
 /** Incremental reader: keeps a byte offset so we only parse what is new. */
@@ -116,6 +128,7 @@ const STATES = {
   busy: { icon: '●', color: C.cyan, label: () => 'working' },
   stage: { icon: '◆', color: C.cyan, label: (e) => `stage: ${e.stage}` },
   idle: { icon: '▲', color: C.yellow, label: () => 'waiting for you' },
+  waiting: { icon: '?', color: C.yellow, label: (e) => (e.waitingFor ? `waiting: ${sanitize(e.waitingFor)}` : 'waiting for you') },
   reviewed: { icon: '✓', color: C.green, label: () => 'ready to commit' },
   commit_reviewed: { icon: '✓', color: C.green, label: () => 'committing' },
   commit_bypass: { icon: '✓', color: C.dim, label: () => 'committing (unreviewed)' },
@@ -134,12 +147,19 @@ function stateOf(ev) {
   // to land here: real progress was recorded with no session to attach it to,
   // so claiming a state — even "offline" — would overclaim.
   if (ev == null) return { icon: '·', color: C.dim, label: () => 'no session seen' };
-  return STATES[ev] || { icon: '·', color: C.dim, label: () => ev };
+  // `Object.hasOwn`, not `STATES[ev] ||` — `ev` can come straight from an
+  // untrusted live-status file (lib/live-status.mjs) once withLiveOverride
+  // assigns it, and a value like `constructor` resolves on the plain object
+  // literal via the prototype chain, returning a function where a state
+  // descriptor was expected and throwing inside render() the moment
+  // `s.label(r)` is called.
+  return Object.hasOwn(STATES, ev) ? STATES[ev] : { icon: '·', color: C.dim, label: () => ev };
 }
 
 /** Events worth a desktop notification when they arrive live. */
 const NOTIFY = {
   idle: () => 'Waiting for you',
+  waiting: (e) => (e.waitingFor ? `Needs your input: ${sanitize(e.waitingFor)}` : 'Needs your input'),
   commit_blocked: () => 'Commit blocked — needs review',
   agent_end: (e) => `${e.agent || 'Agent'} finished`,
 };
@@ -399,7 +419,84 @@ function ctxCell(r, ctxInfo) {
  * over-dims a real value; the deny-list this replaces defaulted to "live",
  * which lies.
  */
-const LIVE_EVENTS = new Set(['session_start', 'busy', 'idle', 'agent_start', 'agent_end']);
+const LIVE_EVENTS = new Set(['session_start', 'busy', 'idle', 'waiting', 'agent_start', 'agent_end']);
+
+/**
+ * Live status (busy/idle/waiting, from ~/.claude/sessions) is authoritative
+ * over a folded `busy`/`idle`/nothing, but must never override one of these
+ * richer, lanes-specific states — they come from the CLI or the commit
+ * guard, not from session liveness, and carry information a session file
+ * knows nothing about (which agent, which commit outcome, a review marker).
+ *
+ * `agent_end` is deliberately not in this set, unlike `agent_start`: its
+ * render (STATES.agent_end) is byte-identical to `busy`, so overriding it
+ * loses nothing, and protecting it left the interrupted-mid-subagent case —
+ * no `Stop` ever fires, so the row would otherwise stay stuck exactly like
+ * the bug #12 exists to fix.
+ */
+const PROTECTED_LIVE_OVERRIDE = new Set([
+  'agent_start', 'reviewed', 'commit_blocked', 'commit_reviewed',
+  'commit_bypass', 'lane_created', 'lane_removed', 'lane_reset',
+]);
+
+/**
+ * Prefix match, same idiom as lib/worktrees.mjs's own cwd->lane lookup.
+ * Picks the first match when more than one live session's `cwd` resolves
+ * under the same lane path (root plus a subdirectory launch, say) — an
+ * assumption, not a guarantee: D20 frames a lane as one long-lived branch,
+ * so this treats "one live session per lane" the same way. A genuine
+ * multi-session lane resolves arbitrarily, by filesystem read order.
+ */
+function findLiveStatus(liveStatuses, lanePath) {
+  if (!lanePath) return null;
+  return liveStatuses.find((s) => s.cwd === lanePath || s.cwd.startsWith(`${lanePath}/`)) || null;
+}
+
+/** `rows` with each row's `ev`/`since`/`waitingFor` replaced by its live status, per the rule above. */
+function withLiveOverride(rows, liveStatuses) {
+  return rows.map((r) => {
+    if (PROTECTED_LIVE_OVERRIDE.has(r.ev)) return r;
+    const live = findLiveStatus(liveStatuses, r.path);
+    if (!live) return r;
+    return { ...r, ev: live.status, since: live.statusUpdatedAt ?? r.since, waitingFor: live.waitingFor };
+  });
+}
+
+/**
+ * Compares this tick's live status per lane against the previous tick's
+ * (`prevLiveEv`, mutated in place — transient watch-loop state, never folded
+ * into `state` itself) and returns the notifications a transition earns.
+ * Skips a lane already covered by a raw-event notification this tick
+ * (`notifiedKeys`) so a normal `Stop` — which already notifies off the raw
+ * event — never double-fires just because the live file updated in the same
+ * tick. A lane with no live match this tick, or whose folded `ev` is one of
+ * the protected states above, drops its tracked baseline instead of keeping
+ * a stale one — so a later reattachment (or the protection lifting) starts
+ * clean rather than firing off a comparison against old data.
+ */
+export function liveTransitionNotifications(rows, liveStatuses, prevLiveEv, notifiedKeys) {
+  const out = [];
+  for (const r of rows) {
+    const key = `${r.project || '?'}#${r.worktree ?? '?'}`;
+    if (PROTECTED_LIVE_OVERRIDE.has(r.ev)) {
+      prevLiveEv.delete(key);
+      continue;
+    }
+    const live = findLiveStatus(liveStatuses, r.path);
+    if (!live) {
+      prevLiveEv.delete(key);
+      continue;
+    }
+    const seenBefore = prevLiveEv.has(key);
+    const changed = seenBefore && prevLiveEv.get(key) !== live.status;
+    prevLiveEv.set(key, live.status);
+    if (changed && !notifiedKeys.has(key)) {
+      const body = NOTIFY[live.status]?.({ ...r, waitingFor: live.waitingFor });
+      if (body) out.push({ title: notifyTitle(r), body });
+    }
+  }
+  return out;
+}
 
 const LANE_WIDTH = 3;
 // Fits every STATES label and every agent name this repo's own agents produce
@@ -416,8 +513,8 @@ const CTX_MIN_TERM_WIDTH = 85; // below this, drop the CTX column outright rathe
 const BRANCH_FLOOR = 20;
 
 /** Build the frame as a string. Callers decide whether to clear the screen. */
-export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config), ctxInfo = null) {
-  const rows = rowsFor(ctx, state.lanes, laneInfo);
+export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config), ctxInfo = null, liveStatuses = readLiveStatuses()) {
+  const rows = withLiveOverride(rowsFor(ctx, state.lanes, laneInfo), liveStatuses);
   const colorFor = laneColorFor();
   const width = Math.max(60, process.stdout.columns || 100);
   const out = [];
@@ -469,7 +566,7 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
       laneColor + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
       branchCell(r, branchWidth),
       s.color + pad(`${s.icon} ${s.label(r)}`, STATE_WIDTH) + C.reset,
-      (r.ev === 'idle' ? C.yellow : C.dim) + pad(r.since ? fmtElapsed(now - r.since) : '—', FOR_WIDTH) + C.reset,
+      (r.ev === 'idle' || r.ev === 'waiting' ? C.yellow : C.dim) + pad(r.since ? fmtElapsed(now - r.since) : '—', FOR_WIDTH) + C.reset,
     ];
     if (showCtx) {
       cells.push((live ? '' : C.dim) + pad(ctxCell(r, ctxInfo), CTX_WIDTH) + C.reset);
@@ -542,14 +639,20 @@ export async function watchStatus() {
   // Throttled on the same 20-tick cadence as laneInfo rather than read fresh
   // every paint; only the transcript paths currently on screen are read.
   let ctxInfo = new Map();
+  // Per-lane live status from the previous tick, so a transition (not just a
+  // value) can be detected — transient watch-loop state, never folded into
+  // `state` itself. See liveTransitionNotifications.
+  const prevLiveEv = new Map();
 
   const paint = () => {
     try {
       const fresh = tail.read();
+      const notifiedLanes = new Set();
       for (const e of fresh) {
         const body = NOTIFY[e.ev]?.(e);
         if (body) {
           notify(notifyTitle(e), body);
+          notifiedLanes.add(`${e.project || '?'}#${e.worktree ?? '?'}`);
         }
       }
       applyEvents(state, fresh);
@@ -562,10 +665,18 @@ export async function watchStatus() {
         }
         ctxInfo = next;
       }
+      // Read once per tick, unthrottled (unlike laneInfo/ctxInfo above) — a
+      // handful of small local JSON files, cheap even every second — and
+      // shared between the notification check and render() so both agree on
+      // the same snapshot within a tick.
+      const liveStatuses = readLiveStatuses();
+      for (const { title, body } of liveTransitionNotifications(rowsFor(ctx, state.lanes, laneInfo), liveStatuses, prevLiveEv, notifiedLanes)) {
+        notify(title, body);
+      }
       // Full redraw: cheap at this size, and it avoids every partial-update
       // artefact that incremental cursor movement would introduce.
       process.stdout.write(
-        `\x1b[2J\x1b[H${render(ctx, state, Date.now(), laneInfo, ctxInfo)}\n${C.dim}ctrl-c to quit${C.reset}\n`,
+        `\x1b[2J\x1b[H${render(ctx, state, Date.now(), laneInfo, ctxInfo, liveStatuses)}\n${C.dim}ctrl-c to quit${C.reset}\n`,
       );
     } catch {
       /* never let a render bug kill the dashboard */
