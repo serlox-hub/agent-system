@@ -49,6 +49,11 @@ session's transcript file path — used by the dashboard to show live context
 (token count + model) on each lane's row, read fresh at render time rather
 than computed by the hook.
 
+Every event also carries `session`, the id of the Claude Code session that
+produced it — taken from the hook payload for hook-driven events, from
+`CLAUDE_CODE_SESSION_ID` for the `lanes` CLI, and `null` when a `lanes`
+command is run outside Claude Code. Nothing reads it yet.
+
 The dashboard's displayed state is not purely event-derived: each render tick
 also reads `~/.claude/sessions/*.json`, Claude Code's own live per-session
 status file, and lets it override the folded `busy`/`idle`/nothing with the

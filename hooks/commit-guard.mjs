@@ -133,6 +133,7 @@ async function main() {
     worktree: ctx.worktree,
     branch: ctx.branch,
     issue: ctx.issue,
+    session: input?.session_id || null,
   };
 
   // One-shot bypass: consumed on use so it cannot linger into the next commit.
