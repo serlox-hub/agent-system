@@ -17,6 +17,12 @@ reversed, never to make room.
 
 ---
 
+## D31 — `emit()`'s session field is resolved by `hasOwnProperty`, not nullish-coalescing
+`core` · 2026-08 · `lib/context.mjs:emit` · #13
+Hook emitters (`hooks/emit.mjs`, `hooks/commit-guard.mjs`) always pass an explicit `session` key from their own hook payload, even when its value is null — `hasOwnProperty` lets that win unconditionally, so a hook event with no `session_id` never silently inherits `CLAUDE_CODE_SESSION_ID` from the subprocess environment, which issue #13 explicitly ruled out as unverified for hook-driven events. CLI emitters (`bin/lanes.mjs`, via `emitWithContext`) never pass the key at all, so they always fall back to the env var — every call site gets real attribution with zero code changes there, present or future.
+Rejected: `event.session ?? process.env.CLAUDE_CODE_SESSION_ID ?? null` — cannot distinguish "the hook resolved no session" from "nobody set the key", so a hook's genuinely-null session would still inherit the ambient env value, reintroducing the exact leak the issue's constraint rules out.
+Rejected: threading the env fallback through each of the five `bin/lanes.mjs` call sites individually — a call site added later would silently emit unattributed, with no test to catch it.
+
 ## D30 — `applyEvents`'s folded `stage` field stays, though nothing renders it
 `core` · 2026-08 · `ui/dashboard.mjs:applyEvents` · #9
 Dropping the STAGE column (#9) was a display decision; the field is the load-bearing half of the guard stopping a stage event from overwriting `ev`/`since`, and has its own test coverage.

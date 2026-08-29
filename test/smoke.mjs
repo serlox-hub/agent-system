@@ -44,7 +44,9 @@ const { resolveContext, issueFromBranch, resolveLane, findProject, LANES_DIR, em
 const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } = await import(
   `${ROOT}/lib/local-config.mjs`
 );
-const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK } = await import(`${ROOT}/lib/marks.mjs`);
+const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYPASS_MARK } = await import(
+  `${ROOT}/lib/marks.mjs`
+);
 const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
@@ -366,9 +368,19 @@ test('an unborn-HEAD repo (no commits yet) fingerprints what is actually staged,
 });
 
 // ── Commit guard, every branch ──────────────────────────────────────
-const guard = (cwd, command) => {
-  const payload = JSON.stringify({ cwd, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } });
-  const out = execFileSync('node', [join(ROOT, 'hooks', 'commit-guard.mjs')], { input: payload, encoding: 'utf8' });
+const guard = (cwd, command, opts = {}) => {
+  const payload = JSON.stringify({
+    cwd,
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Bash',
+    tool_input: { command },
+    ...(opts.session_id ? { session_id: opts.session_id } : {}),
+  });
+  const out = execFileSync('node', [join(ROOT, 'hooks', 'commit-guard.mjs')], {
+    input: payload,
+    encoding: 'utf8',
+    ...(opts.env ? { env: opts.env } : {}),
+  });
   return out.trim() ? JSON.parse(out).hookSpecificOutput.permissionDecision : 'allow';
 };
 
@@ -455,6 +467,110 @@ test('commitGuard: false disables the block entirely', () => {
   );
   writeFileSync(join(off, 'x.ts'), 'export const x = 1;\n');
   assert.equal(guard(off, 'git commit -m wip'), 'allow');
+});
+
+test('a commit blocked by the guard writes commit_blocked tagged with the session id from the hook\'s own payload (#13)', () => {
+  appendFileSync(join(lane2, 'src', 'a.ts'), 'export const sessionTag1 = 1;\n');
+  assert.equal(
+    guard(lane2, 'git commit -m wip', { session_id: 'guard-session-blocked' }),
+    'deny',
+    'an unreviewed diff must still be denied, session tagging must not change that',
+  );
+  const blocked = readEvents().findLast((e) => e.session === 'guard-session-blocked');
+  assert.ok(blocked, 'commit_blocked must carry the session id from the hook payload');
+  assert.equal(blocked.ev, 'commit_blocked');
+});
+
+test('the guard writes session: null, not a fabricated id, when the hook payload carries no session_id (#13)', () => {
+  appendFileSync(join(lane2, 'src', 'a.ts'), 'export const sessionTag2 = 2;\n');
+  const before = readEvents().length;
+  const env = { ...process.env };
+  delete env.CLAUDE_CODE_SESSION_ID;
+  assert.equal(guard(lane2, 'git commit -m wip', { env }), 'deny');
+  const events = readEvents();
+  assert.ok(events.length > before, 'guard must still block and emit');
+  assert.equal(events.at(-1).ev, 'commit_blocked');
+  assert.equal(events.at(-1).session, null, 'no session_id in the hook payload, and the env was unset — must be null, never throw');
+});
+
+test('a commit allowed by a fresh review mark writes commit_reviewed tagged with the session id from the hook payload (#13)', () => {
+  appendFileSync(join(lane2, 'src', 'a.ts'), 'export const sessionTag3 = 3;\n');
+  writeMark(lane2, REVIEW_MARK, diffFingerprint(lane2));
+  assert.equal(guard(lane2, 'git commit -m wip', { session_id: 'guard-session-reviewed' }), 'allow');
+  const reviewed = readEvents().findLast((e) => e.session === 'guard-session-reviewed');
+  assert.ok(reviewed, 'commit_reviewed must carry the session id from the hook payload, same as commit_blocked does');
+  assert.equal(reviewed.ev, 'commit_reviewed');
+});
+
+test('a commit allowed by a one-shot bypass mark writes commit_bypass tagged with the session id from the hook payload (#13)', () => {
+  appendFileSync(join(lane2, 'src', 'a.ts'), 'export const sessionTag4 = 4;\n');
+  writeMark(lane2, BYPASS_MARK, diffFingerprint(lane2));
+  assert.equal(guard(lane2, 'git commit -m wip', { session_id: 'guard-session-bypass' }), 'allow');
+  const bypassed = readEvents().findLast((e) => e.session === 'guard-session-bypass');
+  assert.ok(bypassed, 'commit_bypass must carry the session id from the hook payload, same as commit_blocked does');
+  assert.equal(bypassed.ev, 'commit_bypass');
+});
+
+// ── Session attribution (#13) ───────────────────────────────────────
+test('emit() falls back to CLAUDE_CODE_SESSION_ID only when the event carries no session of its own', () => {
+  const original = process.env.CLAUDE_CODE_SESSION_ID;
+  try {
+    process.env.CLAUDE_CODE_SESSION_ID = 'env-session-xyz';
+    emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', session: 'explicit-session', detail: 'explicit-wins' });
+    const explicit = readEvents().findLast((e) => e.detail === 'explicit-wins');
+    assert.equal(explicit.session, 'explicit-session', 'an event-provided session must win over the env fallback');
+
+    emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', detail: 'no-explicit-session' });
+    const fallback = readEvents().findLast((e) => e.detail === 'no-explicit-session');
+    assert.equal(fallback.session, 'env-session-xyz', 'with no session on the event, CLAUDE_CODE_SESSION_ID fills it in');
+  } finally {
+    if (original === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = original;
+  }
+});
+
+test('emit() writes session: null, never throws, when neither the event nor the environment has one', () => {
+  const original = process.env.CLAUDE_CODE_SESSION_ID;
+  try {
+    delete process.env.CLAUDE_CODE_SESSION_ID;
+    assert.doesNotThrow(() => emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', detail: 'no-session-anywhere' }));
+    const written = readEvents().findLast((e) => e.detail === 'no-session-anywhere');
+    assert.equal(written.session, null);
+  } finally {
+    if (original === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = original;
+  }
+});
+
+test('emit() treats an event with an explicit session: undefined as owning the key, so it still does not fall back to the env', () => {
+  // hasOwnProperty, not a truthy/nullish check, is what decides whose session
+  // wins (see the comment above emit()) — a key that is *present* but holds
+  // undefined must still count as the caller's own decision, exactly like a
+  // present `null` does for a hook that read no session_id. No real call site
+  // does this today (hooks always pass session or null; the CLI omits the key
+  // entirely), but the mechanism is what makes that split correct.
+  const original = process.env.CLAUDE_CODE_SESSION_ID;
+  try {
+    process.env.CLAUDE_CODE_SESSION_ID = 'env-session-should-be-ignored';
+    emit({ ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', session: undefined, detail: 'explicit-undefined-session' });
+    const line = readFileSync(join(LANES_DIR, 'events.jsonl'), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .findLast((l) => l.includes('explicit-undefined-session'));
+    assert.ok(line, 'the event must still be written');
+    assert.ok(
+      !line.includes('"session"'),
+      'JSON.stringify drops a key whose value is undefined, so an explicit session: undefined never persists as null or as the env value, only as an absent key',
+    );
+    const parsed = JSON.parse(line);
+    assert.equal(
+      parsed.session, undefined,
+      'own-property-but-undefined must not fall back to CLAUDE_CODE_SESSION_ID',
+    );
+  } finally {
+    if (original === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = original;
+  }
 });
 
 // ── Dashboard state ─────────────────────────────────────────────────
@@ -1871,6 +1987,55 @@ test('lanes reset detaches a lane back to a clean base state through the real CL
   assert.equal(emitted.worktree, 'lane1');
 });
 
+// ── Session attribution (#13): CLI-driven events ─────────────────────
+test('lanes reviewed/new/rm/reset each tag their emitted event with CLAUDE_CODE_SESSION_ID from the environment', () => {
+  const { main, wtd, cfg } = makeCliLanesFixture('cli-session-set', 1);
+  const withSession = { cwd: main, encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'cli-session-abc' } };
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['reviewed'], withSession);
+  const reviewed = readEvents().findLast((e) => e.ev === 'reviewed' && e.project === cfg.project);
+  assert.equal(reviewed.session, 'cli-session-abc', 'lanes reviewed must tag its event with the session from the environment');
+
+  const base = git(main, 'rev-parse', 'HEAD').trim();
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['new', '--from', base], withSession);
+  const created = readEvents().findLast((e) => e.ev === 'lane_created' && e.project === cfg.project);
+  assert.equal(created.session, 'cli-session-abc', 'lanes new must tag lane_created with the session');
+
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', String(created.lane)], withSession);
+  const removed = readEvents().findLast((e) => e.ev === 'lane_removed' && e.project === cfg.project);
+  assert.equal(removed.session, 'cli-session-abc', 'lanes rm must tag lane_removed with the session');
+
+  git(join(wtd, 'lane1'), 'checkout', '-b', 'feat/13-session-reset');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['reset', '1'], withSession);
+  const reset = readEvents().findLast((e) => e.ev === 'lane_reset' && e.project === cfg.project);
+  assert.equal(reset.session, 'cli-session-abc', 'lanes reset must tag lane_reset with the session');
+});
+
+test('the same four commands write session: null, and never throw, when CLAUDE_CODE_SESSION_ID is unset', () => {
+  const { main, wtd, cfg } = makeCliLanesFixture('cli-session-unset', 1);
+  const envWithoutSession = { ...process.env };
+  delete envWithoutSession.CLAUDE_CODE_SESSION_ID;
+  const noSession = { cwd: main, encoding: 'utf8', env: envWithoutSession };
+
+  assert.doesNotThrow(() => execFileSync(join(ROOT, 'bin', 'lanes'), ['reviewed'], noSession));
+  const reviewed = readEvents().findLast((e) => e.ev === 'reviewed' && e.project === cfg.project);
+  assert.equal(reviewed.session, null);
+
+  const base = git(main, 'rev-parse', 'HEAD').trim();
+  assert.doesNotThrow(() => execFileSync(join(ROOT, 'bin', 'lanes'), ['new', '--from', base], noSession));
+  const created = readEvents().findLast((e) => e.ev === 'lane_created' && e.project === cfg.project);
+  assert.equal(created.session, null);
+
+  assert.doesNotThrow(() => execFileSync(join(ROOT, 'bin', 'lanes'), ['rm', String(created.lane)], noSession));
+  const removed = readEvents().findLast((e) => e.ev === 'lane_removed' && e.project === cfg.project);
+  assert.equal(removed.session, null);
+
+  git(join(wtd, 'lane1'), 'checkout', '-b', 'feat/13-session-reset-unset');
+  assert.doesNotThrow(() => execFileSync(join(ROOT, 'bin', 'lanes'), ['reset', '1'], noSession));
+  const reset = readEvents().findLast((e) => e.ev === 'lane_reset' && e.project === cfg.project);
+  assert.equal(reset.session, null);
+});
+
 test('reset, switch and logs each refuse a multi-lane selector rather than silently acting on the first match', () => {
   const { main, wtd, cfg } = makeCliLanesFixture('cli-selectone', 3);
   for (const n of [1, 2, 3]) git(join(wtd, `lane${n}`), 'checkout', '-b', `feat/${n}-selectone`);
@@ -2379,24 +2544,34 @@ test('emit still writes ordinary multi-byte content that stays under both the ch
 test('emit draws the line exactly where the > 4000 byte check says: 4000 bytes in, 4001 bytes out', () => {
   const eventsPath = join(LANES_DIR, 'events.jsonl');
   const readRaw = () => (existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : '');
-  const base = { ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1' };
-  // ASCII padding is one byte per character, so the note length maps 1:1 onto
-  // the line's total byte size — that gives an exact target, unlike the
-  // multi-byte fixture above which only proves "well over", not the boundary.
-  const sizeWithNote = (note) => Buffer.byteLength(`${JSON.stringify({ ts: Date.now(), ...base, note })}\n`, 'utf8');
-  const baseSize = sizeWithNote('');
-  const note4000 = 'x'.repeat(4000 - baseSize);
-  const note4001 = 'x'.repeat(4000 - baseSize + 1);
-  assert.equal(sizeWithNote(note4000), 4000, 'fixture must land exactly on the boundary');
-  assert.equal(sizeWithNote(note4001), 4001, 'fixture must land exactly one byte past the boundary');
+  // Pin the env fallback so the record's byte size is deterministic regardless
+  // of whether the process this suite runs under happens to carry a real
+  // CLAUDE_CODE_SESSION_ID (it does, e.g., inside a Claude Code session).
+  const original = process.env.CLAUDE_CODE_SESSION_ID;
+  delete process.env.CLAUDE_CODE_SESSION_ID;
+  try {
+    const base = { ev: 'stage', project: 'demo', lane: 1, worktree: 'lane1', session: null };
+    // ASCII padding is one byte per character, so the note length maps 1:1 onto
+    // the line's total byte size — that gives an exact target, unlike the
+    // multi-byte fixture above which only proves "well over", not the boundary.
+    const sizeWithNote = (note) => Buffer.byteLength(`${JSON.stringify({ ts: Date.now(), ...base, note })}\n`, 'utf8');
+    const baseSize = sizeWithNote('');
+    const note4000 = 'x'.repeat(4000 - baseSize);
+    const note4001 = 'x'.repeat(4000 - baseSize + 1);
+    assert.equal(sizeWithNote(note4000), 4000, 'fixture must land exactly on the boundary');
+    assert.equal(sizeWithNote(note4001), 4001, 'fixture must land exactly one byte past the boundary');
 
-  const beforeAt = readRaw();
-  assert.equal(emit({ ...base, note: note4000 }), true, 'exactly 4000 bytes must be accepted — the check is `> 4000`, not `>=`');
-  assert.notEqual(readRaw(), beforeAt, 'the accepted boundary line must be appended');
+    const beforeAt = readRaw();
+    assert.equal(emit({ ...base, note: note4000 }), true, 'exactly 4000 bytes must be accepted — the check is `> 4000`, not `>=`');
+    assert.notEqual(readRaw(), beforeAt, 'the accepted boundary line must be appended');
 
-  const beforeOver = readRaw();
-  assert.equal(emit({ ...base, note: note4001 }), false, 'one byte past the boundary must be refused');
-  assert.equal(readRaw(), beforeOver, 'the refused line must not be appended');
+    const beforeOver = readRaw();
+    assert.equal(emit({ ...base, note: note4001 }), false, 'one byte past the boundary must be refused');
+    assert.equal(readRaw(), beforeOver, 'the refused line must not be appended');
+  } finally {
+    if (original === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = original;
+  }
 });
 
 test('emit truncates an oversized multi-byte detail before the byte check, so it is not refused for a length only the raw string had', () => {
