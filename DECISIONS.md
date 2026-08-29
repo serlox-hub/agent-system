@@ -17,6 +17,11 @@ reversed, never to make room.
 
 ---
 
+## D36 — `readLiveStatuses`' `sessionId` always falls back to `String(pid)`, never `null`
+`core` · 2026-08 · `lib/live-status.mjs:readLiveStatuses` · #14
+Every other new field (`name`, `startedAt`) normalizes an absent/wrong-typed value to `null`, matching this module's existing posture. `sessionId` is the one exception: issue #14's later phases (2's ordering tiebreak, 5's per-session notification dedup key) both assume every live entry has a real id to key on. The session file is literally named `<pid>.json` and the pid is already proven live by `isLivePid` above it, so it's a stable identity for exactly as long as the row must exist — falling back to it (rather than leaving `sessionId` nullable) makes that assumption true at the one place it's produced, instead of pushing it into phases that would otherwise be written believing it.
+Rejected: leaving `sessionId` nullable and keying later phases on `` `${sessionId ?? cwd}` `` instead — cheaper here, but two sessions from an old build with no `sessionId` field would collide on the same fallback key, silently reintroducing the same read-order non-determinism D34 already exists to fix.
+
 ## D35 — `emit()`'s session field is resolved by `hasOwnProperty`, not nullish-coalescing
 `core` · 2026-08 · `lib/context.mjs:emit` · #13
 Hook emitters (`hooks/emit.mjs`, `hooks/commit-guard.mjs`) always pass an explicit `session` key from their own hook payload, even when its value is null — `hasOwnProperty` lets that win unconditionally, so a hook event with no `session_id` never silently inherits `CLAUDE_CODE_SESSION_ID` from the subprocess environment, which issue #13 explicitly ruled out as unverified for hook-driven events. CLI emitters (`bin/lanes.mjs`, via `emitWithContext`) never pass the key at all, so they always fall back to the env var — every call site gets real attribution with zero code changes there, present or future.

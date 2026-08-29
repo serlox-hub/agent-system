@@ -2882,7 +2882,7 @@ test('readLiveStatuses returns [] when ~/.claude/sessions does not exist, never 
   assert.deepEqual(readLiveStatuses(), []);
 });
 
-test('readLiveStatuses keeps a live pid, tolerates a malformed sibling file, and normalizes a missing waitingFor to null', () => {
+test('readLiveStatuses keeps a live pid, tolerates a malformed sibling file, normalizes a missing waitingFor/name/startedAt to null, and falls back to the pid for sessionId', () => {
   rmSync(SESSIONS_DIR, { recursive: true, force: true });
   mkdirSync(SESSIONS_DIR, { recursive: true });
   writeFileSync(
@@ -2892,8 +2892,156 @@ test('readLiveStatuses keeps a live pid, tolerates a malformed sibling file, and
   writeFileSync(join(SESSIONS_DIR, 'garbage.json'), '{ not json');
   writeFileSync(join(SESSIONS_DIR, 'not-a-session.key'), 'irrelevant, not even .json');
   assert.deepEqual(readLiveStatuses(), [
-    { cwd: '/some/lane/path', status: 'busy', waitingFor: null, statusUpdatedAt: 12345 },
+    {
+      cwd: '/some/lane/path', status: 'busy', waitingFor: null, statusUpdatedAt: 12345,
+      sessionId: String(process.pid), name: null, startedAt: null,
+    },
   ]);
+});
+
+test('readLiveStatuses returns sessionId/name/startedAt correctly typed when present (#14)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid,
+      cwd: '/some/lane/path',
+      status: 'busy',
+      statusUpdatedAt: 12345,
+      sessionId: 'abc-123',
+      name: 'lane1-1a',
+      startedAt: 999,
+      kind: 'interactive',
+    }),
+  );
+  const [entry] = readLiveStatuses();
+  assert.equal(entry.sessionId, 'abc-123');
+  assert.equal(entry.name, 'lane1-1a');
+  assert.equal(entry.startedAt, 999);
+});
+
+test('readLiveStatuses falls back to the pid when sessionId is wrong-typed, and normalizes wrong-typed name/startedAt to null, never throwing (#14)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid,
+      cwd: '/some/lane/path',
+      status: 'busy',
+      sessionId: 42,
+      name: ['not', 'a', 'string'],
+      startedAt: 'not-a-number',
+    }),
+  );
+  const [entry] = readLiveStatuses();
+  assert.equal(entry.sessionId, String(process.pid), 'a wrong-typed sessionId falls back to the pid, never null — every returned entry has a real id to key on');
+  assert.equal(entry.name, null);
+  assert.equal(entry.startedAt, null);
+});
+
+test('readLiveStatuses still normalizes statusUpdatedAt to null when missing or wrong-typed, now that sessionId/name/startedAt sit next to it in the object literal (#14 regression check)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid, cwd: '/some/lane/path', status: 'busy',
+      sessionId: 'abc-123', name: 'lane1', startedAt: 999,
+    }),
+  );
+  assert.equal(
+    readLiveStatuses()[0].statusUpdatedAt,
+    null,
+    'a missing statusUpdatedAt must still normalize to null even with sessionId/name/startedAt present alongside it',
+  );
+
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: '/some/lane/path', status: 'busy', statusUpdatedAt: 'not-a-number' }),
+  );
+  assert.equal(readLiveStatuses()[0].statusUpdatedAt, null, 'a wrong-typed statusUpdatedAt must still normalize to null, same as before #14');
+});
+
+test('readLiveStatuses normalizes a name that strips down to the empty string to null, not "" — one falsy case, not two', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    // Only control bytes, no printable characters at all — stripControlBytes
+    // removes exactly \x00-\x1f and \x7f, so anything printable (including a
+    // literal "[31m") would survive and this fixture would not prove the
+    // empty-string case at all.
+    JSON.stringify({ pid: process.pid, cwd: '/some/lane/path', status: 'busy', name: `${ESC}\x07\x00` }),
+  );
+  const [entry] = readLiveStatuses();
+  assert.equal(entry.name, null, 'a name that is purely control bytes strips to "", which must normalize to null like an absent name');
+});
+
+test('readLiveStatuses normalizes an empty-after-stripping name to null without disturbing a simultaneously present, valid waitingFor (#14 — the two normalizations must not interfere)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({
+      pid: process.pid, cwd: '/some/lane/path', status: 'waiting',
+      waitingFor: 'input needed', name: `${ESC}\x07\x00`,
+    }),
+  );
+  const [entry] = readLiveStatuses();
+  assert.equal(entry.name, null, 'name that strips to "" still normalizes to null even with a valid waitingFor set alongside it');
+  assert.equal(entry.waitingFor, 'input needed', 'a valid waitingFor must survive untouched by the sibling name normalization');
+});
+
+test('readLiveStatuses never drops two live sessions sharing the same cwd — multiple sessions per lane is #14\'s whole premise, not a duplicate to collapse', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  // Both files claim the real, currently-running test process as their pid —
+  // isLivePid only checks liveness, not uniqueness, so this is enough to
+  // fabricate two simultaneously-live entries without spawning a real second
+  // process. Distinct filenames since the dir is keyed by filename, not pid.
+  writeFileSync(
+    join(SESSIONS_DIR, 'session-a.json'),
+    JSON.stringify({ pid: process.pid, cwd: '/shared/lane', status: 'busy', sessionId: 'session-a' }),
+  );
+  writeFileSync(
+    join(SESSIONS_DIR, 'session-b.json'),
+    JSON.stringify({ pid: process.pid, cwd: '/shared/lane', status: 'idle', sessionId: 'session-b' }),
+  );
+  const entries = readLiveStatuses();
+  assert.equal(entries.length, 2, 'both sessions rooted at the same cwd must survive — findLiveStatuses (Phase 2) is where selection happens, not here');
+  assert.deepEqual(entries.map((e) => e.sessionId).sort(), ['session-a', 'session-b']);
+});
+
+test('readLiveStatuses keeps an entry whose kind is present but not a string (e.g. null) — fails open, same posture as every other field here', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: '/odd-kind/lane', status: 'busy', kind: null }),
+  );
+  assert.equal(readLiveStatuses().length, 1, 'a wrong-typed kind must not hide a live session, same as a missing kind');
+});
+
+test('readLiveStatuses drops an entry whose kind is present and not "interactive", but keeps one with no kind field at all (#14)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: '/headless/lane', status: 'busy', kind: 'headless' }),
+  );
+  assert.deepEqual(readLiveStatuses(), [], 'a non-interactive kind must be dropped');
+
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: '/no-kind/lane', status: 'busy' }),
+  );
+  assert.equal(readLiveStatuses().length, 1, 'a missing kind must fail open, not be treated as non-interactive');
 });
 
 test('readLiveStatuses drops an entry whose pid is no longer alive', () => {
@@ -2921,6 +3069,18 @@ test('readLiveStatuses strips control/ANSI bytes from status too, not just waiti
     'idle[31m',
     'ESC (0x1b) and BEL (0x07) must be stripped from status at the source, same as waitingFor already was',
   );
+  rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for the render()-level tests below to trip over
+});
+
+test('readLiveStatuses strips control/ANSI bytes from name too (#14)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: '/some/lane/path', status: 'idle', name: `lane1${ESC}[31m\x07` }),
+  );
+  const [entry] = readLiveStatuses();
+  assert.equal(entry.name, 'lane1[31m', 'name gets the same stripControlBytes treatment as status/waitingFor');
   rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for the render()-level tests below to trip over
 });
 
