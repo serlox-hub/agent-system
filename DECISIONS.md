@@ -17,6 +17,46 @@ reversed, never to make room.
 
 ---
 
+## D34 — `findLiveStatus` assumes one live Claude Code session per lane; a genuine second session resolves arbitrarily by filesystem read order
+`core` · 2026-08 · `ui/dashboard.mjs:findLiveStatus` · #12
+Matches D20's framing of a lane as one long-lived branch. Showing multiple
+concurrent sessions per lane would need a row-shape redesign (`STATE_WIDTH`,
+`NOTIFY`, `liveTransitionNotifications` all assume one `ev`/`since`/
+`waitingFor` per lane) — out of scope for a bug-accuracy fix.
+Rejected: picking a deterministic tie-break now (e.g. most-recent
+`statusUpdatedAt` wins) — would quietly paper over the two-sessions case
+instead of surfacing it as the real feature request it is; deferred to a
+separate issue instead.
+
+## D33 — `agent_end` is excluded from `PROTECTED_LIVE_OVERRIDE`, but `agent_start` stays protected
+`core` · 2026-08 · `ui/dashboard.mjs:PROTECTED_LIVE_OVERRIDE` · #12
+`STATES.agent_end` renders byte-identical to `busy`, so overriding it with a
+live status loses no information, and protecting it left the
+interrupted-mid-subagent case stuck exactly like the bug #12 exists to fix.
+`agent_start` carries information (`e.agent`) a live status can't reproduce.
+Rejected: treating the two symmetrically (both protected, as the original
+issue #12 contract specified) — looks consistent, but leaves the most common
+interruption window broken.
+
+## D32 — Live-status PID liveness is `process.kill(pid, 0)` alone; `procStart` is deliberately not cross-checked against `ps`
+`core` · 2026-08 · `lib/live-status.mjs:isLivePid` · #12
+Closing the PID-reuse hole needs a `ps` subprocess per session file per
+one-second tick — a real, recurring cost for a failure nobody has observed.
+Accepted as residual risk (see issue #12's Constraints).
+Rejected: comparing the file's own `procStart` field against `ps` output —
+tempting since the field is right there, but reintroduces the per-tick
+subprocess spawn the 20-tick throttle on `laneInfo`/`ctxInfo` exists to avoid.
+
+## D31 — The live-status join key is the lane's filesystem path (prefix match), not the session id
+`core` · 2026-08 · `ui/dashboard.mjs:findLiveStatus` · #12
+Every lane already has a `path` with no dependency on any event ever being
+logged, so the join works for a freshly created lane and survives log
+rotation; `session` is missing from `lane_reset`/`commit_*`/`reviewed` events
+and would silently go stale.
+Rejected: joining on `sessionId` from the live-status file — looks more
+precise but makes the join depend on an event of the right type having been
+logged first.
+
 ## D30 — `applyEvents`'s folded `stage` field stays, though nothing renders it
 `core` · 2026-08 · `ui/dashboard.mjs:applyEvents` · #9
 Dropping the STAGE column (#9) was a display decision; the field is the load-bearing half of the guard stopping a stage event from overwriting `ev`/`since`, and has its own test coverage.
