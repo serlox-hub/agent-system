@@ -2941,6 +2941,20 @@ test('readLiveStatuses falls back to the pid when sessionId is wrong-typed, and 
   assert.equal(entry.startedAt, null);
 });
 
+test('readLiveStatuses falls back to the pid when sessionId is present but strips down to the empty string — not just when it is absent or wrong-typed (#14)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    // Only control bytes, no printable characters at all — stripControlBytes
+    // reduces this to '', which the pid fallback must treat the same as an
+    // absent sessionId, not key rows on an empty string.
+    JSON.stringify({ pid: process.pid, cwd: '/some/lane/path', status: 'busy', sessionId: `${ESC}\x07\x00` }),
+  );
+  const [entry] = readLiveStatuses();
+  assert.equal(entry.sessionId, String(process.pid), 'a sessionId that strips to "" must fall back to the pid, same as an absent or wrong-typed one');
+});
+
 test('readLiveStatuses still normalizes statusUpdatedAt to null when missing or wrong-typed, now that sessionId/name/startedAt sit next to it in the object literal (#14 regression check)', () => {
   rmSync(SESSIONS_DIR, { recursive: true, force: true });
   mkdirSync(SESSIONS_DIR, { recursive: true });
@@ -3158,6 +3172,147 @@ test('findLiveStatuses never matches a row with no recorded path — an undefine
   assert.ok(row, 'the pathless row must still render (fails open, per the existsSync liveness check)');
   assert.ok(row.includes('working'), 'the folded busy state must stand — findLiveStatuses([...], undefined) must return [] via its early `!lanePath` guard');
   assert.ok(!row.includes('should never surface'), 'a live status must never override a row that has no path to match against');
+});
+
+// ── Extra rows for additional live sessions (#14 Phase 3) ────────────
+test('two live sessions in one lane render as two adjacent rows, no blank line between them', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(idx !== -1, 'the primary row must exist');
+  assert.ok(lines[idx].includes('working'), 'the exact-cwd session (root, no subdirectory) is primary, per findLiveStatuses ordering');
+  const extraRow = lines[idx + 1];
+  assert.ok(extraRow !== '', 'no blank line between the primary row and the extra session row');
+  assert.ok(extraRow.startsWith('·'), 'the extra row\'s LANE cell is a bare "·", the same convention a lane-less ghost row already uses');
+  assert.ok(!extraRow.startsWith(' '), 'must not read as a service line, which is the only line allowed to start with a space');
+  assert.ok(extraRow.includes('lane1-1b'), 'the extra row\'s BRANCH cell shows the secondary session\'s own name');
+  assert.ok(extraRow.includes('waiting for you'), 'the extra row\'s STATE reflects that session\'s own live status (idle), independent of the primary row');
+});
+
+test('an extra row falls back to the session id when the session has no name of its own', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  // No `name` at all — the shape readLiveStatuses() actually returns for a
+  // session Claude Code has not named yet, not a fabricated edge case.
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: null };
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  const extraRow = lines[idx + 1];
+  assert.ok(extraRow.includes('sess-b'), 'with no name, the extra row must fall back to the session id rather than render a blank BRANCH cell');
+});
+
+test('extra session rows land directly beneath the lane\'s own row, with the service line pushed after them as the block\'s footer', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane2, lane 2 — declares a running 'web' service with a url template
+  const [web] = sv.resolveServices(svcCfg, lane);
+  const started = sv.start(web);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const ctx = { ...resolveContext(lane2), config: svcCfg };
+    const primary = { cwd: lane.path, status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane2-1a' };
+    const secondary = { cwd: join(lane.path, 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane2-1b' };
+    const frame = render(ctx, createState(), Date.now(), [lane], null, [primary, secondary]);
+    const lines = stripAnsi(frame).split('\n');
+    const idx = lines.findIndex((l) => l.startsWith(rowPrefix(lane.lane)));
+    assert.ok(idx !== -1, 'the lane row must exist');
+    assert.ok(
+      lines[idx + 1].startsWith('·') && lines[idx + 1].includes('lane2-1b'),
+      'the extra session row must be directly beneath the lane\'s own row, not separated from it by the service line',
+    );
+    assert.ok(
+      lines[idx + 2].trim().startsWith('http://localhost'),
+      'the service line must come after the session row(s), as the block\'s footer',
+    );
+  } finally {
+    sv.stop(web);
+  }
+});
+
+test('no extra row renders when the lane\'s own row is in a genuinely lane-wide protected state (commit_blocked)', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const state = applyEvents(createState(), [ev(1, 'commit_blocked')]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(lines[idx].includes('blocked, needs review'), 'commit_blocked must stay authoritative on the primary row, same as before #14');
+  assert.notEqual(lines[idx + 1], undefined);
+  assert.ok(!lines[idx + 1].includes('lane1-1b'), 'a commit_blocked/reviewed/lane_* state is a fact about the shared tree or worktree, not any one session — no extra row must render underneath it');
+});
+
+test('an extra row still renders when the lane\'s own row is agent_start — spawning a subagent is specific to that session, not the whole lane', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const state = applyEvents(createState(), [ev(1, 'agent_start', { agent: 'test-writer' })]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(lines[idx].includes('test-writer running'), 'agent_start must still stay authoritative on the primary row itself');
+  const extraRow = lines[idx + 1];
+  assert.ok(extraRow.startsWith('·') && extraRow.includes('lane1-1b'), 'unlike a lane-wide protected state, agent_start on the primary row must not suppress a genuinely independent second session\'s row');
+});
+
+test('three live sessions in one lane render two extra rows, not just one — the extra-row loop is not hardcoded to a single iteration', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const second = { cwd: join(wtDir, 'lane1', 'sub-b'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const third = { cwd: join(wtDir, 'lane1', 'sub-c'), status: 'idle', waitingFor: null, statusUpdatedAt: 3, sessionId: 'sess-c', startedAt: 3, name: 'lane1-1c' };
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, [primary, second, third]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(idx !== -1, 'the primary row must exist');
+  assert.ok(lines[idx + 1].startsWith('·') && lines[idx + 1].includes('lane1-1b'), 'the first extra row must be the second-started session, directly beneath the primary row');
+  assert.ok(lines[idx + 2].startsWith('·') && lines[idx + 2].includes('lane1-1c'), 'a second extra row must also render, for the third session — findLiveStatuses(...).slice(1) is fully iterated, not just read at index 1');
+});
+
+test('an extra row\'s STATE cell reflects that session\'s own "waiting" status and waitingFor text, independent of the primary row and of busy/idle', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'waiting', waitingFor: 'needs input', statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  const extraRow = lines[idx + 1];
+  assert.ok(lines[idx].includes('working'), 'the primary row must stay on its own busy status');
+  assert.ok(extraRow.includes('waiting: needs input'), 'the extra row must show that session\'s own waitingFor text, not fall back to "waiting for you" or leak the primary row\'s busy state');
+});
+
+test('render never crashes on an extra row\'s live status colliding with Object.prototype (e.g. "constructor"), and falls back the same way the primary row does', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'constructor', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  let frame;
+  assert.doesNotThrow(() => { frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, null, [primary, secondary]); });
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  const extraRow = lines[idx + 1];
+  assert.ok(extraRow.includes('· constructor'), 'stateAndForCells must resolve the extra row\'s status the same safe way as the primary row\'s — the unknown-event fallback, not the inherited Object constructor');
 });
 
 test('the live override never touches a protected lanes-specific state like commit_blocked', () => {
