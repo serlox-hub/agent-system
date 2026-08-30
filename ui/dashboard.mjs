@@ -186,7 +186,43 @@ function notify(title, body) {
 }
 
 export function createState() {
-  return { lanes: new Map(), history: [] };
+  return { lanes: new Map(), history: [], sessionHistory: new Map() };
+}
+
+// Lane-lifecycle events are facts about a worktree, not about whichever
+// session happened to type the command that produced them — `lanes new`/
+// `rm`/`reset` run in one session but name a possibly-unrelated lane. The
+// per-lane fold below is scoped by construction (its `key` IS that lane), so
+// this only matters for the per-session fold, which has no such scoping.
+const LANE_LIFECYCLE = new Set(['lane_created', 'lane_removed', 'lane_reset']);
+
+/**
+ * `ev` fold rule shared by the per-lane and per-session folds in
+ * `applyEvents`: `stage` is a pipeline milestone, not a liveness signal, and
+ * must not overwrite the last real state, or a row goes cyan "working" the
+ * moment a checkpoint fires and stays that way forever once the session
+ * behind it is gone.
+ *
+ * `LANE_LIFECYCLE` gets the same "must not overwrite" treatment too, but
+ * only where the per-session fold calls this — never for the per-lane fold.
+ * There, `ev` BECOMING `'lane_created'`/`'lane_reset'` on the row itself is
+ * the whole point of those two events (`render()`'s STATE cell shows "lane
+ * reset"), and `lane_removed` deletes the row outright rather than reaching
+ * this function at all.
+ */
+function foldEv(e, prev) {
+  return e.ev === 'stage' ? (prev.ev ?? null) : e.ev;
+}
+
+/**
+ * `transcript` fold rule shared by both folds: a new session start is
+ * authoritative, like `lane_created` is for the whole row — without this, a
+ * `session_start` with no `transcript_path` of its own (payload omitted or
+ * empty) would silently inherit the OUTGOING session's transcript via `??`,
+ * and render it in live tone as if it belonged to the new one.
+ */
+function foldTranscript(e, prev) {
+  return e.ev === 'session_start' ? (e.transcript ?? null) : (e.transcript ?? prev.transcript ?? null);
 }
 
 /**
@@ -224,17 +260,8 @@ export function applyEvents(state, events) {
         branch: e.branch ?? prev.branch,
         issue: e.issue ?? prev.issue,
         path: e.path ?? prev.path,
-        // A new session start is authoritative for transcript, like
-        // lane_created is for the whole row: without this, a session_start
-        // with no transcript_path of its own (payload omitted or empty) would
-        // silently inherit the OUTGOING session's transcript via `??`, and
-        // render it in live tone as if it belonged to the new one.
-        transcript: e.ev === 'session_start' ? (e.transcript ?? null) : (e.transcript ?? prev.transcript),
-        // `stage` is a pipeline milestone, not a liveness signal — it must not
-        // overwrite the last real session/agent state, or a lane goes cyan
-        // "working" the moment a checkpoint fires and stays that way forever
-        // once the session behind it is long gone.
-        ev: e.ev === 'stage' ? (prev.ev ?? null) : e.ev,
+        transcript: foldTranscript(e, prev),
+        ev: foldEv(e, prev),
         agent: e.ev === 'agent_start' ? e.agent : e.ev === 'agent_end' ? null : prev.agent,
         // Kept folded although render() no longer displays it (#9 dropped the
         // STAGE column) — RECENT reads a stage event's own `e.stage` straight
@@ -247,6 +274,22 @@ export function applyEvents(state, events) {
         since: e.ev === 'stage' ? (prev.since ?? e.ts) : e.ts,
       });
     }
+    // Per-session fold (#14 Phase 4), additive and independent of the
+    // per-lane fold above: a session can outlive the lane row it started in
+    // (or never even resolve to one, in principle), and #14's extra rows key
+    // on session identity, not lane identity. Every event with a `session`
+    // folds here, `busy` included — it is only excluded from `state.history`
+    // (the RECENT log) below, not from this fold, matching how `busy`
+    // already updates `state.lanes`'s own `ev`.
+    if (e.session) {
+      const prevS = state.sessionHistory.get(e.session) || {};
+      state.sessionHistory.set(e.session, {
+        transcript: foldTranscript(e, prevS),
+        // `LANE_LIFECYCLE` never overwrites a session's own `ev` — see its
+        // comment above — on top of `foldEv`'s shared `stage` exclusion.
+        ev: LANE_LIFECYCLE.has(e.ev) ? (prevS.ev ?? null) : foldEv(e, prevS),
+      });
+    }
     // `busy` fires on every user message; in the log it is noise.
     if (e.ev !== 'busy') {
       state.history.push(e);
@@ -254,6 +297,21 @@ export function applyEvents(state, events) {
     }
   }
   return state;
+}
+
+/**
+ * Drops any `state.sessionHistory` entry not in `onScreenSessionIds`,
+ * in place. `readLiveStatuses()` is global — every Claude Code session on
+ * the machine, any project, any window — so retaining every live session's
+ * history would keep `ctxInfo`'s throttled `readContext()` walk (see
+ * `watchStatus`) doing real per-tick work for sessions `render()` never
+ * looks at. `session_end` is not reliably observed (#12's own
+ * investigation), so this is the only eviction path `sessionHistory` has.
+ */
+export function pruneSessionHistory(state, onScreenSessionIds) {
+  for (const sessionId of state.sessionHistory.keys()) {
+    if (!onScreenSessionIds.has(sessionId)) state.sessionHistory.delete(sessionId);
+  }
 }
 
 function rowsFor(ctx, lanes, laneInfo) {
@@ -562,8 +620,9 @@ const BRANCH_FLOOR = 20;
 /**
  * The STATE and FOR cells, shared by a lane's own row and #14's extra
  * session rows — LANE, BRANCH and CTX differ enough between the two (lane
- * colour vs dim, a real branch vs a bare session name, live-toned CTX vs a
- * Phase 3 placeholder) that STATE/FOR are the only two cells genuinely the
+ * colour vs dim, a real branch vs a bare session name, and — even once both
+ * read a real transcript — the primary row's CTX dims when not live while an
+ * extra row's never does) that STATE/FOR are the only two cells genuinely the
  * same rule either way. Extracted so a status added to `STATES` only needs
  * its colour/label rule written once, instead of drifting between two
  * copies — the same failure mode `serviceLine`'s own docstring above
@@ -633,6 +692,11 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
     const live = LIVE_EVENTS.has(r.ev);
     const laneColor = colorFor(r.lane);
     const [stateCell, forCell] = stateAndForCells(r.ev, r, r.since, now);
+    // Every live session under this lane's path, computed once and reused
+    // below for both the primary row's CTX (`[0]`) and the extra rows
+    // (`.slice(1)`), rather than calling `findLiveStatuses` twice per lane.
+    const laneLive = findLiveStatuses(liveStatuses, r.path);
+    const primaryHist = laneLive[0] && state.sessionHistory.get(laneLive[0].sessionId);
     const cells = [
       laneColor + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
       branchCell(r, branchWidth),
@@ -640,7 +704,18 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
       forCell,
     ];
     if (showCtx) {
-      cells.push((live ? '' : C.dim) + pad(ctxCell(r, ctxInfo), CTX_WIDTH) + C.reset);
+      // Resolve CTX through the primary session's own history when known
+      // (#14 Phase 4), not `r.transcript` alone: `state.lanes`' transcript
+      // is last-write-wins across EVERY session in the worktree, not scoped
+      // by session, so with two live sessions sharing a lane it can silently
+      // hold the wrong one's transcript — invisible before extra rows
+      // existed to show the correct value right underneath it. Falls back to
+      // `r.transcript` when the primary session has no history of its own
+      // (no live match, or one that hasn't emitted a transcript-bearing
+      // event yet), so a single-session lane renders byte-identical to
+      // before this phase.
+      const ctxSource = primaryHist?.transcript ? primaryHist : r;
+      cells.push((live ? '' : C.dim) + pad(ctxCell(ctxSource, ctxInfo), CTX_WIDTH) + C.reset);
     }
     out.push(cells.join(' '));
 
@@ -652,22 +727,31 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
     // reads as the whole block's footer instead of splitting two session
     // rows apart. The blank line pushed at the top of this callback still
     // only separates one lane's whole block from the next.
-    if (!LANE_WIDE_PROTECTED.has(r.ev)) {
-      for (const extraLive of findLiveStatuses(liveStatuses, r.path).slice(1)) {
-        const [extraStateCell, extraForCell] = stateAndForCells(
-          extraLive.status, { waitingFor: extraLive.waitingFor }, extraLive.statusUpdatedAt, now,
-        );
-        const extraCells = [
-          C.dim + pad('·', LANE_WIDTH) + C.reset,
-          C.dim + pad(extraLive.name || extraLive.sessionId, branchWidth) + C.reset,
-          extraStateCell,
-          extraForCell,
-        ];
-        // Per-session CTX attribution is #14 Phase 4 — this placeholder never
-        // reads a transcript for an extra row.
-        if (showCtx) extraCells.push(C.dim + pad('—', CTX_WIDTH) + C.reset);
-        out.push(extraCells.join(' '));
-      }
+    //
+    // Gating is per-session (#14 Phase 4), not per row `[0]` like Phase 3's
+    // placeholder was: a session's own history — not the primary session's —
+    // decides whether ITS row is a lane-wide fact in disguise. A commit
+    // blocked by session A tags that event with A's own session id (#13), so
+    // it never touches B's fold here and B's row stays visible; if B itself
+    // is mid-commit-block, B's own history says so and B's row is the one
+    // that hides. Falls open (shows the row) when this session has no
+    // history yet — absence of evidence is not evidence of a lane-wide state.
+    for (const extraLive of laneLive.slice(1)) {
+      const sessionHist = state.sessionHistory.get(extraLive.sessionId);
+      if (sessionHist && LANE_WIDE_PROTECTED.has(sessionHist.ev)) continue;
+      const [extraStateCell, extraForCell] = stateAndForCells(
+        extraLive.status, { waitingFor: extraLive.waitingFor }, extraLive.statusUpdatedAt, now,
+      );
+      const extraCells = [
+        C.dim + pad('·', LANE_WIDTH) + C.reset,
+        C.dim + pad(extraLive.name || extraLive.sessionId, branchWidth) + C.reset,
+        extraStateCell,
+        extraForCell,
+      ];
+      // Always live-toned, never dimmed: unlike row `[0]`, an extra row only
+      // ever exists for a session `readLiveStatuses()` just confirmed is live.
+      if (showCtx) extraCells.push(pad(ctxCell({ transcript: sessionHist?.transcript }, ctxInfo), CTX_WIDTH));
+      out.push(extraCells.join(' '));
     }
 
     const svcLine = serviceLine(ctx, r);
@@ -755,19 +839,37 @@ export async function watchStatus() {
       }
       applyEvents(state, fresh);
       tick += 1;
+      // Read here, ABOVE the throttle block below, not after it as before
+      // #14 Phase 4 — the sessionHistory prune inside that block now needs
+      // it. Moving this back down under the block is a TDZ `ReferenceError`
+      // that `paint()`'s own `catch {}` swallows silently, freezing the
+      // dashboard on its last frame with no error printed anywhere.
+      // Otherwise unchanged: read once per tick, unthrottled (unlike
+      // laneInfo/ctxInfo below) — a handful of small local JSON files, cheap
+      // even every second — shared between the notification check, render(),
+      // and the throttled block, so everything agrees on one snapshot.
+      const liveStatuses = readLiveStatuses();
       if (tick % 20 === 0) {
         laneInfo = enumerateLanes(ctx.config);
         const next = new Map();
         for (const { transcript } of state.lanes.values()) {
           if (transcript && !next.has(transcript)) next.set(transcript, readContext(transcript));
         }
+        // "On screen" here means every live session matching ANY lane's
+        // path, primary (`[0]`) included, not just #14's extra rows: the
+        // primary row's own CTX can also resolve through a session's history
+        // now (see render()'s `primaryHist`). Scoped this way rather than to
+        // every live session `readLiveStatuses()` returns, which is global —
+        // see `pruneSessionHistory`'s own docstring for why.
+        const onScreenSessionIds = new Set(
+          rowsFor(ctx, state.lanes, laneInfo).flatMap((r) => findLiveStatuses(liveStatuses, r.path)).map((s) => s.sessionId),
+        );
+        pruneSessionHistory(state, onScreenSessionIds);
+        for (const { transcript } of state.sessionHistory.values()) {
+          if (transcript && !next.has(transcript)) next.set(transcript, readContext(transcript));
+        }
         ctxInfo = next;
       }
-      // Read once per tick, unthrottled (unlike laneInfo/ctxInfo above) — a
-      // handful of small local JSON files, cheap even every second — and
-      // shared between the notification check and render() so both agree on
-      // the same snapshot within a tick.
-      const liveStatuses = readLiveStatuses();
       for (const { title, body } of liveTransitionNotifications(rowsFor(ctx, state.lanes, laneInfo), liveStatuses, prevLiveEv, notifiedLanes)) {
         notify(title, body);
       }

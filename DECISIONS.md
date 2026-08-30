@@ -17,6 +17,21 @@ reversed, never to make room.
 
 ---
 
+## D40 — An extra session row is hidden based on that session's own folded state, not the primary row's
+`core` · 2026-08 · `ui/dashboard.mjs` · #14
+A state like `reviewed`/`commit_*` is a fact about the shared git tree, so a row asserting a different liveness state right next to it would contradict its own lane's row. Gating on the session's OWN history keeps that protection without hiding a genuinely independent session.
+Rejected: always showing every extra row unconditionally — the more literal reading of issue #14's own title, discussed directly with the user. Rejected because it would lose real protection exactly when session B itself (not A) is the one blocked by a commit.
+
+## D39 — Lane-lifecycle events never overwrite a session's own `ev`, but must still overwrite their own lane's
+`core` · 2026-08 · `ui/dashboard.mjs:applyEvents` · #14
+A `lane_created`/`removed`/`reset` event names a specific worktree — it says nothing about the session that triggered it, which may be working in a completely unrelated lane. The per-lane fold is already scoped to that lane by construction (its own key); the per-session fold is not, so it needs its own explicit exclusion.
+Rejected: applying the same exclusion to both folds for symmetry — looks cleaner, but breaks `lane_reset`/`lane_created`, where the row taking on that `ev` is literally the effect those two events exist to produce (this was actually introduced and caught mid-implementation of this same phase).
+
+## D38 — The primary row's CTX resolves through its own live session when known, not only the lane-level transcript
+`core` · 2026-08 · `ui/dashboard.mjs:render` · #14
+`state.lanes`'s `transcript` field is last-write-wins across every session sharing a worktree, not scoped per session — with two sessions in one lane it could silently show the wrong session's token count. Invisible until Phase 3 gave each session its own row to compare against.
+Rejected: leaving it "unchanged," as the Phase 4 spec text literally said — that would have preserved a bug this same phase makes visible for the first time (the same number shown twice, one of them mislabeled).
+
 ## D37 — Among a lane's live sessions, the oldest is primary: exact-cwd match first, then ascending `startedAt`, then `sessionId`
 `core` · 2026-08 · `ui/dashboard.mjs:findLiveStatuses` · #14
 Under D20 a lane is one long-lived branch, so its longest-running session is the one the lane's row represents; a session launched from the lane root outranks one launched from a subdirectory because it is the lane's own session rather than an incidental one; `sessionId` is the last resort D36 guarantees is always present.

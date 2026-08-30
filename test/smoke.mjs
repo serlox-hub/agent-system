@@ -47,7 +47,7 @@ const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } 
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYPASS_MARK } = await import(
   `${ROOT}/lib/marks.mjs`
 );
-const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications } = await import(
+const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications, pruneSessionHistory } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
@@ -631,6 +631,18 @@ test('lane_reset is treated like lane_created — the row starts fresh instead o
   assert.equal(row.issue, undefined, 'a reset lane must not keep the finished task\'s issue');
   assert.equal(row.stage, undefined, 'nor its stage');
   assert.equal(row.ev, 'lane_reset', 'the row itself reflects the reset, not the last session event');
+});
+
+test('lane_created also sets the row\'s own ev to lane_created, the same way lane_reset does — not just branch/issue/stage', () => {
+  // The only pre-existing assertion on lane_created (above, in "lane_removed
+  // deletes the lane outright") checks issue/stage/branch but never row.ev
+  // itself. LANE_LIFECYCLE (#14 Phase 4) must never touch this per-lane
+  // fold — this guards the case where that exclusion is accidentally scoped
+  // too broadly, since the sibling lane_reset assertion above only proves
+  // that specific event, not lane_created.
+  const s = applyEvents(createState(), [ev(1, 'lane_created', { branch: 'feat/999-other' })]);
+  const row = s.lanes.get('demo#lane1');
+  assert.equal(row.ev, 'lane_created', 'the per-lane fold must set ev on a lane_created event itself');
 });
 
 test('applyEvents is incremental — folding twice equals folding once', () => {
@@ -2740,6 +2752,63 @@ test('applyEvents resets transcript on session_start, so a new session never inh
   assert.equal(withPath.lanes.get('demo#lane1').transcript, '/tmp/new-session.jsonl');
 });
 
+test('applyEvents folds state.sessionHistory per session id, additively alongside state.lanes (#14 Phase 4)', () => {
+  const s = applyEvents(createState(), [
+    ev(1, 'session_start', { session: 'sess-a', transcript: '/tmp/a.jsonl' }),
+    ev(2, 'idle', { session: 'sess-a' }),
+  ]);
+  assert.deepEqual(s.sessionHistory.get('sess-a'), { transcript: '/tmp/a.jsonl', ev: 'idle' });
+  assert.ok(s.lanes.get('demo#lane1'), 'the existing per-lane fold must still happen, untouched');
+});
+
+test('applyEvents ignores an event with no session field for state.sessionHistory, but still folds it into state.lanes as before', () => {
+  const s = applyEvents(createState(), [ev(1, 'idle')]);
+  assert.equal(s.sessionHistory.size, 0, 'no session tag means nothing to key sessionHistory on');
+  assert.ok(s.lanes.get('demo#lane1'), 'state.lanes folding is untouched by the absence of a session tag');
+});
+
+test('applyEvents: a stage event must not overwrite a session\'s folded ev, same rule as the per-lane fold', () => {
+  const s = applyEvents(createState(), [
+    ev(1, 'busy', { session: 'sess-a' }),
+    ev(2, 'stage', { session: 'sess-a', stage: 'review' }),
+  ]);
+  assert.equal(s.sessionHistory.get('sess-a').ev, 'busy', 'a stage marker must not read as a liveness state for the session either');
+});
+
+test('applyEvents: session_start is authoritative for a session\'s own transcript, same rule as the per-lane fold', () => {
+  const s = applyEvents(createState(), [
+    ev(1, 'session_start', { session: 'sess-a', transcript: '/tmp/old.jsonl' }),
+    ev(2, 'session_start', { session: 'sess-a', transcript: null }),
+  ]);
+  assert.equal(s.sessionHistory.get('sess-a').transcript, null, 'must not inherit the outgoing session\'s transcript via ??');
+});
+
+test('applyEvents: a lane_created/removed/reset event must not overwrite a session\'s own folded ev, unlike a regular event (#14 Phase 4 rc-1)', () => {
+  // Session B (in lane1) runs `lanes new`, which names an unrelated lane5 —
+  // the event is tagged with B's session id (per #13) purely because B is
+  // the one who typed the command, not because it says anything about B's
+  // own liveness. Without this guard, B's extra row in lane1 would vanish
+  // the moment it ran any `lanes new`/`rm`/`reset` command anywhere.
+  for (const laneEv of ['lane_created', 'lane_removed', 'lane_reset']) {
+    const s = applyEvents(createState(), [
+      ev(1, 'busy', { session: 'sess-b' }),
+      { ts: 2, ev: laneEv, project: 'demo', lane: 5, worktree: 'lane5', session: 'sess-b' },
+    ]);
+    assert.equal(s.sessionHistory.get('sess-b').ev, 'busy', `${laneEv} must not read as sess-b's own liveness state`);
+  }
+});
+
+test('pruneSessionHistory drops an entry not in the keep-set, and keeps one that is (#14 Phase 4 rc-6)', () => {
+  const state = applyEvents(createState(), [
+    ev(1, 'idle', { session: 'sess-live' }),
+    ev(2, 'idle', { session: 'sess-dead' }),
+  ]);
+  assert.ok(state.sessionHistory.has('sess-live') && state.sessionHistory.has('sess-dead'), 'precondition: both entries exist before pruning');
+  pruneSessionHistory(state, new Set(['sess-live']));
+  assert.ok(state.sessionHistory.has('sess-live'), 'a session still in the keep-set must survive');
+  assert.ok(!state.sessionHistory.has('sess-dead'), 'a session no longer in the keep-set must be dropped');
+});
+
 test('render puts ctx on the lane\'s own row, live-toned while the session is active', () => {
   const p = writeTranscript('live.jsonl', [
     assistantLine('claude-sonnet-5', { input_tokens: 43000, cache_creation_input_tokens: 100000, cache_read_input_tokens: 0 }),
@@ -3237,36 +3306,204 @@ test('extra session rows land directly beneath the lane\'s own row, with the ser
   }
 });
 
-test('no extra row renders when the lane\'s own row is in a genuinely lane-wide protected state (commit_blocked)', () => {
+test('a session\'s own commit_blocked hides only its own extra row — Phase 4\'s per-session gating replaces Phase 3\'s primary-row gating', () => {
   const fabricated = [{
     lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
     isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
   }];
   const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
   const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
-  const state = applyEvents(createState(), [ev(1, 'commit_blocked')]);
+  // sess-b's OWN commit_blocked — tagged with its own session id, exactly
+  // how #13 tags every emitted event. The commit guard operates on the
+  // shared worktree, so the event still updates the primary row's own
+  // ev (from state.lanes, keyed by project+worktree, not by session) —
+  // that half is unchanged from before #14. What #14 Phase 4 changes is
+  // whether the SECOND session's own row is also hidden by it.
+  const state = applyEvents(createState(), [ev(1, 'commit_blocked', { session: 'sess-b' })]);
   const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, [primary, secondary]);
   const lines = stripAnsi(frame).split('\n');
   const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
-  assert.ok(lines[idx].includes('blocked, needs review'), 'commit_blocked must stay authoritative on the primary row, same as before #14');
-  assert.notEqual(lines[idx + 1], undefined);
-  assert.ok(!lines[idx + 1].includes('lane1-1b'), 'a commit_blocked/reviewed/lane_* state is a fact about the shared tree or worktree, not any one session — no extra row must render underneath it');
+  assert.ok(lines[idx].includes('blocked, needs review'), 'the primary row reflects the shared worktree\'s commit_blocked state, regardless of which session triggered it');
+  assert.notEqual(lines[idx + 1], undefined, 'a next line must still exist (RECENT or the next lane), even though it is not the extra session row');
+  assert.ok(!lines[idx + 1].includes('lane1-1b'), 'sess-b\'s own commit_blocked (from its own session history) must hide sess-b\'s own row');
 });
 
-test('an extra row still renders when the lane\'s own row is agent_start — spawning a subagent is specific to that session, not the whole lane', () => {
+test('a session\'s own reviewed state also hides its extra row — LANE_WIDE_PROTECTED gates by the whole set, not just commit_blocked', () => {
+  // commit_blocked is the only LANE_WIDE_PROTECTED member exercised above;
+  // this proves render() checks membership in the set (LANE_WIDE_PROTECTED.has(...))
+  // rather than something narrowed to that one value.
   const fabricated = [{
     lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
     isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
   }];
   const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
   const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const state = applyEvents(createState(), [ev(1, 'reviewed', { session: 'sess-b' })]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  assert.notEqual(lines[idx + 1], undefined, 'a next line must still exist, even though it is not the extra session row');
+  assert.ok(!lines[idx + 1].includes('lane1-1b'), 'sess-b\'s own reviewed state must hide its own extra row, same as commit_blocked does');
+});
+
+test('a commit_blocked tagged with a DIFFERENT session\'s id does not hide this session\'s extra row', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  // sess-a's own commit_blocked, not sess-b's.
+  const state = applyEvents(createState(), [ev(1, 'commit_blocked', { session: 'sess-a' })]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(lines[idx].includes('blocked, needs review'), 'the primary row (sess-a) shows commit_blocked, from state.lanes, unchanged from before #14');
+  const extraRow = lines[idx + 1];
+  assert.ok(
+    extraRow.startsWith('·') && extraRow.includes('lane1-1b'),
+    'sess-b is genuinely unaffected by sess-a\'s commit_blocked and must keep its own row — the exact case that made Phase 3\'s primary-row gating too coarse',
+  );
+});
+
+test('an extra row with no session history at all still renders, falling open rather than assuming a lane-wide state', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  // agent_start with no `session` tag at all — state.sessionHistory ends up
+  // empty; absence of evidence is not evidence of a lane-wide state.
   const state = applyEvents(createState(), [ev(1, 'agent_start', { agent: 'test-writer' })]);
   const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, [primary, secondary]);
   const lines = stripAnsi(frame).split('\n');
   const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
   assert.ok(lines[idx].includes('test-writer running'), 'agent_start must still stay authoritative on the primary row itself');
   const extraRow = lines[idx + 1];
-  assert.ok(extraRow.startsWith('·') && extraRow.includes('lane1-1b'), 'unlike a lane-wide protected state, agent_start on the primary row must not suppress a genuinely independent second session\'s row');
+  assert.ok(extraRow.startsWith('·') && extraRow.includes('lane1-1b'), 'with no history for sess-b at all, its row must still render');
+});
+
+test('sess-b\'s extra row survives running a lane-lifecycle command for an unrelated lane (#14 Phase 4 rc-1)', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  // sess-b runs `lanes new`, which names lane5 — nothing to do with lane1.
+  const state = applyEvents(createState(), [
+    { ts: 1, ev: 'lane_created', project: 'demo', lane: 5, worktree: 'lane5', session: 'sess-b' },
+  ]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, null, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  const extraRow = lines[idx + 1];
+  assert.ok(
+    extraRow.startsWith('·') && extraRow.includes('lane1-1b'),
+    'lane_created for a different lane must not read as sess-b\'s own liveness state and hide its row in lane1',
+  );
+});
+
+test('an extra row\'s CTX reflects that session\'s own transcript via state.sessionHistory, not a hardcoded placeholder', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const state = applyEvents(createState(), [ev(1, 'idle', { session: 'sess-b', transcript: '/sess-b/transcript.jsonl' })]);
+  const ctxInfo = new Map([['/sess-b/transcript.jsonl', { tokens: 5000, model: 'claude-sonnet-5' }]]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, ctxInfo, [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  const extraRow = lines[idx + 1];
+  assert.ok(extraRow.includes('lane1-1b'));
+  assert.ok(
+    extraRow.includes('5K·sonnet-5'),
+    'the extra row\'s CTX must come from sess-b\'s own recorded transcript via the supplied ctxInfo map, not the Phase 3 "—" placeholder',
+  );
+});
+
+test('an extra row shows — in CTX when its session has no recorded transcript, same fallback the primary row already uses', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primary = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondary = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const frame = render(resolveContext(lane2), createState(), Date.now(), fabricated, new Map(), [primary, secondary]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  const extraRow = lines[idx + 1];
+  assert.ok(extraRow.trim().endsWith('—'), 'no session history at all for sess-b means no transcript to show, not a crash');
+});
+
+test('the primary row\'s CTX resolves through its own session when two sessions share a lane, not the lane-level transcript last-write-wins across both (#14 Phase 4 rc-2)', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primaryLive = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondaryLive = { cwd: join(wtDir, 'lane1', 'sub'), status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  // sess-b's idle (fired second) overwrites state.lanes' own transcript
+  // field via the pre-existing, session-unaware per-lane fold — exactly the
+  // scenario that made this wrong number invisible before #14 gave sess-b
+  // its own row to compare against.
+  const state = applyEvents(createState(), [
+    ev(1, 'session_start', { session: 'sess-a', transcript: '/sess-a/t.jsonl' }),
+    ev(2, 'idle', { session: 'sess-b', transcript: '/sess-b/t.jsonl' }),
+  ]);
+  assert.equal(
+    state.lanes.get('demo#lane1').transcript, '/sess-b/t.jsonl',
+    'precondition: the lane-level fold really does hold the wrong session\'s transcript here',
+  );
+  const ctxInfo = new Map([
+    ['/sess-a/t.jsonl', { tokens: 40000, model: 'claude-sonnet-5' }],
+    ['/sess-b/t.jsonl', { tokens: 310000, model: 'claude-sonnet-5' }],
+  ]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, ctxInfo, [primaryLive, secondaryLive]);
+  const lines = stripAnsi(frame).split('\n');
+  const idx = lines.findIndex((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(lines[idx].includes('40K'), 'the primary row (sess-a, the exact-cwd session) must show its OWN token count, not sess-b\'s');
+  assert.ok(!lines[idx].includes('310K'), 'must not show sess-b\'s count mislabeled as sess-a\'s');
+  const extraRow = lines[idx + 1];
+  assert.ok(extraRow.includes('310K'), 'sess-b\'s own extra row still correctly shows its own count');
+});
+
+test('a single-session lane\'s CTX still renders from r.transcript unchanged, when there is no live session to resolve through', () => {
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const state = applyEvents(createState(), [ev(1, 'idle', { transcript: '/tmp/only-session.jsonl' })]); // no `session` tag at all
+  const ctxInfo = new Map([['/tmp/only-session.jsonl', { tokens: 12000, model: 'claude-sonnet-5' }]]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, ctxInfo, []);
+  const row = stripAnsi(frame).split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row.includes('12K'), 'with no live session at all, CTX must fall back to r.transcript exactly as before #14');
+});
+
+test('the primary row\'s CTX falls back to r.transcript when a live session\'s own history exists but has no transcript of its own yet', () => {
+  // Distinct from the "no live session at all" fallback above: here
+  // `primaryHist` (state.sessionHistory.get(sess-a)) IS a real object, it
+  // just has a falsy transcript — the one branch of render()'s
+  // `primaryHist?.transcript ? primaryHist : r` ternary that a regression
+  // narrowing the check to bare `primaryHist ? ... : r` truthiness would
+  // silently break (rendering '—' instead of falling through to r).
+  const fabricated = [{
+    lane: 1, name: 'lane1', path: join(wtDir, 'lane1'), branch: 'feat/1-x',
+    isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  }];
+  const primaryLive = { cwd: join(wtDir, 'lane1'), status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const state = applyEvents(createState(), [
+    ev(1, 'busy', { session: 'sess-a' }), // tags sess-a's own history, but with no transcript field
+    ev(2, 'idle', { transcript: '/tmp/lane-level.jsonl' }), // no `session` tag — only state.lanes sees this
+  ]);
+  assert.equal(state.sessionHistory.get('sess-a').transcript, null, 'precondition: sess-a has a history entry, but no transcript of its own');
+  const ctxInfo = new Map([['/tmp/lane-level.jsonl', { tokens: 12000, model: 'claude-sonnet-5' }]]);
+  const frame = render(resolveContext(lane2), state, Date.now(), fabricated, ctxInfo, [primaryLive]);
+  const row = stripAnsi(frame).split('\n').find((l) => l.startsWith(rowPrefix(1)));
+  assert.ok(row.includes('12K'), 'must fall back to r.transcript\'s real value, not blank, when the live session\'s own history has no transcript');
 });
 
 test('three live sessions in one lane render two extra rows, not just one — the extra-row loop is not hardcoded to a single iteration', () => {
