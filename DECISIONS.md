@@ -17,6 +17,11 @@ reversed, never to make room.
 
 ---
 
+## D41 — The primary session's notifications stay gated by the lane's own `ev`, not that session's own history
+`core` · 2026-08 · `ui/dashboard.mjs:liveTransitionNotifications` · #14
+The lane's own row displays lane-scoped state (`commit_blocked`, `lane_reset`), so its notifications must agree with what the row shows. `PROTECTED_LIVE_OVERRIDE` also deliberately covers states (`agent_start`, the lane-lifecycle set) that `LANE_WIDE_PROTECTED` does not.
+Rejected: unifying both gates on the session's own history now that `sessionHistory` exists, for symmetry with the extra-row gate. Loses twice: D39 excludes lane-lifecycle events from the session fold entirely, so the primary would lose that protection right after a `lane_reset`; and `agent_start` would stop protecting the primary row.
+
 ## D40 — An extra session row is hidden based on that session's own folded state, not the primary row's
 `core` · 2026-08 · `ui/dashboard.mjs` · #14
 A state like `reviewed`/`commit_*` is a fact about the shared git tree, so a row asserting a different liveness state right next to it would contradict its own lane's row. Gating on the session's OWN history keeps that protection without hiding a genuinely independent session.

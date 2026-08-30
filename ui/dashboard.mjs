@@ -521,6 +521,19 @@ const LANE_WIDE_PROTECTED = new Set([
 ]);
 
 /**
+ * Whether a specific session's own folded history (`state.sessionHistory`,
+ * #14 Phase 4) says it's currently in a lane-wide-fact state. Shared by
+ * `render()`'s extra rows and `liveTransitionNotifications`' per-session
+ * gating (#14 Phase 5) — both need the exact same rule, and a second inline
+ * copy is what lets the two drift the next time a state is added to
+ * `LANE_WIDE_PROTECTED`.
+ */
+function isSessionProtected(sessionHistory, sessionId) {
+  const hist = sessionHistory.get(sessionId);
+  return Boolean(hist && LANE_WIDE_PROTECTED.has(hist.ev));
+}
+
+/**
  * Prefix match, same idiom as lib/worktrees.mjs's own cwd->lane lookup.
  * Returns every live session whose `cwd` resolves under the lane path (root
  * itself, or a subdirectory launch), ordered deterministically instead of by
@@ -568,37 +581,61 @@ function withLiveOverride(rows, liveStatuses) {
 }
 
 /**
- * Compares this tick's live status per lane against the previous tick's
- * (`prevLiveEv`, mutated in place — transient watch-loop state, never folded
- * into `state` itself) and returns the notifications a transition earns.
- * Skips a lane already covered by a raw-event notification this tick
- * (`notifiedKeys`) so a normal `Stop` — which already notifies off the raw
- * event — never double-fires just because the live file updated in the same
- * tick. A lane with no live match this tick, or whose folded `ev` is one of
- * the protected states above, drops its tracked baseline instead of keeping
- * a stale one — so a later reattachment (or the protection lifting) starts
- * clean rather than firing off a comparison against old data.
+ * Compares this tick's live status per SESSION — not just per lane — against
+ * the previous tick's (`prevLiveEv`, mutated in place — transient watch-loop
+ * state, never folded into `state` itself) and returns the notifications a
+ * transition earns (#14 Phase 5: every live match under a row's path, not
+ * only the primary `[0]`). Baseline key is `` `${laneKey}#${sessionId}` ``,
+ * not just `laneKey`, so two sessions in one lane track independent
+ * baselines and a transition on one is never compared against the other's
+ * last value. Skips a session already covered by a raw-event notification
+ * this tick (`notifiedKeys`, keyed to match by `watchStatus`) so a normal
+ * `Stop` — which already notifies off the raw event — never double-fires
+ * just because the live file updated in the same tick.
+ *
+ * Gating: the primary session uses the same `r.ev`/`PROTECTED_LIVE_OVERRIDE`
+ * rule as before #14 (row `[0]`'s protection is unchanged, per Phase 4); an
+ * extra session uses its own history via `isSessionProtected`, same as
+ * `render()`'s rows. A protected or no-longer-live session's baseline is
+ * dropped rather than kept stale, in one pass at the end (comparing every
+ * tracked key against the ones just proven valid this tick) — so a later
+ * reattachment, or the protection lifting, starts clean instead of firing a
+ * comparison against old data, and `prevLiveEv` never grows unbounded.
+ *
+ * Callers must pass the COMPLETE row set: the final pass treats any tracked
+ * key not re-validated this call as gone, so a filtered `rows` would
+ * silently drop the omitted lanes' baselines. The one caller (`watchStatus`)
+ * always passes `rowsFor(...)` whole.
  */
-export function liveTransitionNotifications(rows, liveStatuses, prevLiveEv, notifiedKeys) {
+export function liveTransitionNotifications(rows, liveStatuses, sessionHistory, prevLiveEv, notifiedKeys) {
   const out = [];
+  const validKeys = new Set();
   for (const r of rows) {
-    const key = `${r.project || '?'}#${r.worktree ?? '?'}`;
-    if (PROTECTED_LIVE_OVERRIDE.has(r.ev)) {
-      prevLiveEv.delete(key);
-      continue;
-    }
-    const live = findLiveStatuses(liveStatuses, r.path)[0];
-    if (!live) {
-      prevLiveEv.delete(key);
-      continue;
-    }
-    const seenBefore = prevLiveEv.has(key);
-    const changed = seenBefore && prevLiveEv.get(key) !== live.status;
-    prevLiveEv.set(key, live.status);
-    if (changed && !notifiedKeys.has(key)) {
-      const body = NOTIFY[live.status]?.({ ...r, waitingFor: live.waitingFor });
-      if (body) out.push({ title: notifyTitle(r), body });
-    }
+    const laneKey = `${r.project || '?'}#${r.worktree ?? '?'}`;
+    findLiveStatuses(liveStatuses, r.path).forEach((live, idx) => {
+      const isPrimary = idx === 0;
+      const protectedNow = isPrimary ? PROTECTED_LIVE_OVERRIDE.has(r.ev) : isSessionProtected(sessionHistory, live.sessionId);
+      if (protectedNow) return;
+      const key = `${laneKey}#${live.sessionId}`;
+      // A duplicate sessionId under one lane (two live files somehow sharing
+      // an id) must not fight over one baseline — each would see the
+      // other's write as a "transition" every tick, notifying forever.
+      if (validKeys.has(key)) return;
+      validKeys.add(key);
+      const seenBefore = prevLiveEv.has(key);
+      const changed = seenBefore && prevLiveEv.get(key) !== live.status;
+      prevLiveEv.set(key, live.status);
+      if (changed && !notifiedKeys.has(key)) {
+        const body = NOTIFY[live.status]?.({ ...r, waitingFor: live.waitingFor });
+        if (body) {
+          const title = isPrimary ? notifyTitle(r) : `${notifyTitle(r)} · ${live.name || live.sessionId}`;
+          out.push({ title, body });
+        }
+      }
+    });
+  }
+  for (const key of prevLiveEv.keys()) {
+    if (!validKeys.has(key)) prevLiveEv.delete(key);
   }
   return out;
 }
@@ -737,8 +774,8 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
     // that hides. Falls open (shows the row) when this session has no
     // history yet — absence of evidence is not evidence of a lane-wide state.
     for (const extraLive of laneLive.slice(1)) {
+      if (isSessionProtected(state.sessionHistory, extraLive.sessionId)) continue;
       const sessionHist = state.sessionHistory.get(extraLive.sessionId);
-      if (sessionHist && LANE_WIDE_PROTECTED.has(sessionHist.ev)) continue;
       const [extraStateCell, extraForCell] = stateAndForCells(
         extraLive.status, { waitingFor: extraLive.waitingFor }, extraLive.statusUpdatedAt, now,
       );
@@ -821,20 +858,28 @@ export async function watchStatus() {
   // Throttled on the same 20-tick cadence as laneInfo rather than read fresh
   // every paint; only the transcript paths currently on screen are read.
   let ctxInfo = new Map();
-  // Per-lane live status from the previous tick, so a transition (not just a
-  // value) can be detected — transient watch-loop state, never folded into
-  // `state` itself. See liveTransitionNotifications.
+  // Per-session live status from the previous tick, keyed
+  // `${project}#${worktree}#${sessionId}` (#14 Phase 5), so a transition
+  // (not just a value) can be detected per session, not just per lane —
+  // transient watch-loop state, never folded into `state` itself. See
+  // liveTransitionNotifications.
   const prevLiveEv = new Map();
 
   const paint = () => {
     try {
       const fresh = tail.read();
-      const notifiedLanes = new Set();
+      // Keyed per session (#14 Phase 5), matching liveTransitionNotifications'
+      // own `${laneKey}#${sessionId}` baseline key — `session ?? 'primary'`
+      // falls back to the literal string only for an event with no session
+      // tag at all (pre-#13 or a source that never sends one); every event
+      // #13 itself emits already carries a real id, which is what actually
+      // dedupes against the live-session check below for the common case.
+      const notifiedKeys = new Set();
       for (const e of fresh) {
         const body = NOTIFY[e.ev]?.(e);
         if (body) {
           notify(notifyTitle(e), body);
-          notifiedLanes.add(`${e.project || '?'}#${e.worktree ?? '?'}`);
+          notifiedKeys.add(`${e.project || '?'}#${e.worktree ?? '?'}#${e.session ?? 'primary'}`);
         }
       }
       applyEvents(state, fresh);
@@ -870,7 +915,7 @@ export async function watchStatus() {
         }
         ctxInfo = next;
       }
-      for (const { title, body } of liveTransitionNotifications(rowsFor(ctx, state.lanes, laneInfo), liveStatuses, prevLiveEv, notifiedLanes)) {
+      for (const { title, body } of liveTransitionNotifications(rowsFor(ctx, state.lanes, laneInfo), liveStatuses, state.sessionHistory, prevLiveEv, notifiedKeys)) {
         notify(title, body);
       }
       // Full redraw: cheap at this size, and it avoids every partial-update

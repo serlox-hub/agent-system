@@ -52,7 +52,9 @@ than computed by the hook.
 Every event also carries `session`, the id of the Claude Code session that
 produced it — taken from the hook payload for hook-driven events, from
 `CLAUDE_CODE_SESSION_ID` for the `lanes` CLI, and `null` when a `lanes`
-command is run outside Claude Code. Nothing reads it yet.
+command is run outside Claude Code. Read by the dashboard: it attributes
+folded state per session (`state.sessionHistory`) and keys same-tick
+notification dedup, so an untagged event double-notifies.
 
 The dashboard's displayed state is not purely event-derived: each render tick
 also reads `~/.claude/sessions/*.json`, Claude Code's own live per-session
