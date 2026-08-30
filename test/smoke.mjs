@@ -3655,50 +3655,52 @@ test('a malicious waitingFor (control chars, an embedded ANSI escape, excessive 
 
 test('liveTransitionNotifications stays silent on first observation, but still records the baseline', () => {
   const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
-  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1 }];
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a' }];
   const prev = new Map();
-  const out = liveTransitionNotifications(rows, liveStatuses, prev, new Set());
+  const out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set());
   assert.deepEqual(out, [], 'no prior baseline means nothing has "transitioned" yet');
-  assert.equal(prev.get('demo#lane1'), 'idle', 'the baseline itself must still be recorded for next tick');
+  assert.equal(prev.get('demo#lane1#sess-a'), 'idle', 'the baseline itself must still be recorded for next tick, keyed by session now (#14)');
 });
 
 test('liveTransitionNotifications fires once the live status actually changes from the tracked baseline', () => {
   const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
-  const prev = new Map([['demo#lane1', 'busy']]);
-  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1 }];
-  const out = liveTransitionNotifications(rows, liveStatuses, prev, new Set());
+  const prev = new Map([['demo#lane1#sess-a', 'busy']]);
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a' }];
+  const out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set());
   assert.equal(out.length, 1);
   assert.equal(out[0].body, 'Waiting for you');
-  assert.equal(prev.get('demo#lane1'), 'idle');
+  assert.equal(prev.get('demo#lane1#sess-a'), 'idle');
 });
 
 test('liveTransitionNotifications reports the waitingFor detail for a transition into waiting', () => {
   const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
-  const prev = new Map([['demo#lane1', 'busy']]);
-  const liveStatuses = [{ cwd: '/p/lane1', status: 'waiting', waitingFor: 'input needed', statusUpdatedAt: 1 }];
-  const out = liveTransitionNotifications(rows, liveStatuses, prev, new Set());
+  const prev = new Map([['demo#lane1#sess-a', 'busy']]);
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'waiting', waitingFor: 'input needed', statusUpdatedAt: 1, sessionId: 'sess-a' }];
+  const out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set());
   assert.equal(out[0].body, 'Needs your input: input needed');
 });
 
-test('liveTransitionNotifications is deduped against a lane already notified this tick via a raw event', () => {
+test('liveTransitionNotifications is deduped against a session already notified this tick via a raw event', () => {
   const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
-  const prev = new Map([['demo#lane1', 'busy']]);
-  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1 }];
-  const out = liveTransitionNotifications(rows, liveStatuses, prev, new Set(['demo#lane1']));
-  assert.deepEqual(out, [], 'a Stop event already notified this lane this tick, so the live transition must not double-fire');
-  assert.equal(prev.get('demo#lane1'), 'idle', 'the baseline must still update even though the notification itself was suppressed');
+  const prev = new Map([['demo#lane1#sess-a', 'busy']]);
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a' }];
+  const out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set(['demo#lane1#sess-a']));
+  assert.deepEqual(out, [], 'a Stop event already notified this session this tick, so the live transition must not double-fire');
+  assert.equal(prev.get('demo#lane1#sess-a'), 'idle', 'the baseline must still update even though the notification itself was suppressed');
 });
 
 test('liveTransitionNotifications drops its tracked baseline once the row becomes protected, or its live match disappears', () => {
-  const prev = new Map([['demo#lane1', 'busy']]);
+  const prev = new Map([['demo#lane1#sess-a', 'busy']]);
   const protectedRows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'commit_blocked' }];
-  liveTransitionNotifications(protectedRows, [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1 }], prev, new Set());
-  assert.equal(prev.has('demo#lane1'), false, 'a protected state must drop the baseline rather than compare against it');
+  liveTransitionNotifications(
+    protectedRows, [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a' }], new Map(), prev, new Set(),
+  );
+  assert.equal(prev.has('demo#lane1#sess-a'), false, 'a protected state must drop the baseline rather than compare against it');
 
-  prev.set('demo#lane1', 'busy');
+  prev.set('demo#lane1#sess-a', 'busy');
   const noMatchRows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
-  liveTransitionNotifications(noMatchRows, [], prev, new Set());
-  assert.equal(prev.has('demo#lane1'), false, 'no live match this tick must drop the baseline too, so a later reattachment starts clean');
+  liveTransitionNotifications(noMatchRows, [], new Map(), prev, new Set());
+  assert.equal(prev.has('demo#lane1#sess-a'), false, 'no live match this tick must drop the baseline too, so a later reattachment starts clean');
 });
 
 test('liveTransitionNotifications picks the same deterministic match as render — this is a separate call site, not exercised by the render-path ordering tests above (#14)', () => {
@@ -3711,12 +3713,98 @@ test('liveTransitionNotifications picks the same deterministic match as render �
   const earlier = { cwd: '/p/lane1/sub-a', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-z', startedAt: 100 };
   const later = { cwd: '/p/lane1/sub-b', status: 'busy', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-a', startedAt: 500 };
   const baselineAfter = (liveStatuses) => {
-    const prev = new Map([['demo#lane1', 'busy']]);
-    liveTransitionNotifications(rows, liveStatuses, prev, new Set());
-    return prev.get('demo#lane1');
+    // 'earlier' (sess-z) must win the [0]/primary slot via ascending startedAt.
+    const prev = new Map([['demo#lane1#sess-z', 'busy']]);
+    liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set());
+    return prev.get('demo#lane1#sess-z');
   };
   assert.equal(baselineAfter([earlier, later]), 'idle', 'the earlier-started session must win, array order [earlier, later]');
   assert.equal(baselineAfter([later, earlier]), 'idle', 'and the same session must win with the array reversed — [later, earlier]');
+});
+
+test('a second session going waiting fires its own notification, titled distinctly via its own name (#14 Phase 5)', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', lane: 1, path: '/p/lane1', ev: 'busy' }];
+  const prev = new Map([
+    ['demo#lane1#sess-a', 'busy'],
+    ['demo#lane1#sess-b', 'busy'],
+  ]);
+  const primaryLive = { cwd: '/p/lane1', status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondaryLive = { cwd: '/p/lane1/sub', status: 'waiting', waitingFor: 'input needed', statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  const out = liveTransitionNotifications(rows, [primaryLive, secondaryLive], new Map(), prev, new Set());
+  assert.equal(out.length, 1, 'only the secondary session actually transitioned (primary is still busy, unchanged)');
+  assert.equal(out[0].body, 'Needs your input: input needed');
+  assert.equal(out[0].title, `${notifyTitle(rows[0])} · lane1-1b`, 'a non-primary session\'s title appends its own name');
+});
+
+test('a session\'s notification is deduped only against a raw event for that SAME session, not the whole lane (#14 Phase 5)', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', lane: 1, path: '/p/lane1', ev: 'busy' }];
+  const prev = new Map([
+    ['demo#lane1#sess-a', 'busy'],
+    ['demo#lane1#sess-b', 'busy'],
+  ]);
+  const primaryLive = { cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'lane1-1a' };
+  const secondaryLive = { cwd: '/p/lane1/sub', status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'lane1-1b' };
+  // Only sess-b was already covered by a raw-event notification this tick.
+  const out = liveTransitionNotifications(rows, [primaryLive, secondaryLive], new Map(), prev, new Set(['demo#lane1#sess-b']));
+  assert.equal(out.length, 1, 'sess-a must still notify — deduping sess-b must not suppress a different session sharing the same lane');
+  assert.equal(out[0].title, notifyTitle(rows[0]), 'the primary session\'s own title carries no name suffix');
+  assert.equal(prev.get('demo#lane1#sess-b'), 'idle', 'sess-b\'s own baseline must still advance even though its notification was suppressed — multi-session echo of the single-session case above');
+});
+
+test('an extra session in a lane-wide protected state notifies for nobody but itself, and its stale baseline is dropped (#14 Phase 5)', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', lane: 1, path: '/p/lane1', ev: 'busy' }];
+  const primaryLive = { cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'a' };
+  const extraLive = { cwd: '/p/lane1/sub', status: 'idle', waitingFor: null, statusUpdatedAt: 2, sessionId: 'sess-b', startedAt: 2, name: 'b' };
+
+  const commitBlocked = new Map([['sess-b', { transcript: null, ev: 'commit_blocked' }]]);
+  const prev1 = new Map([['demo#lane1#sess-a', 'busy'], ['demo#lane1#sess-b', 'busy']]);
+  const out1 = liveTransitionNotifications(rows, [primaryLive, extraLive], commitBlocked, prev1, new Set());
+  assert.equal(out1.length, 1, 'sess-b is commit_blocked in its OWN history, so only sess-a notifies');
+  assert.equal(out1[0].title, notifyTitle(rows[0]));
+  assert.equal(prev1.has('demo#lane1#sess-b'), false, 'sess-b\'s stale baseline must be dropped, not kept around');
+
+  // Discriminates LANE_WIDE_PROTECTED from PROTECTED_LIVE_OVERRIDE: agent_start
+  // is in the latter (protects the primary row) but deliberately not the
+  // former, so it must NOT suppress an extra session's own notification.
+  const agentStart = new Map([['sess-b', { transcript: null, ev: 'agent_start' }]]);
+  const prev2 = new Map([['demo#lane1#sess-a', 'busy'], ['demo#lane1#sess-b', 'busy']]);
+  const out2 = liveTransitionNotifications(rows, [primaryLive, extraLive], agentStart, prev2, new Set());
+  assert.equal(out2.length, 2, 'agent_start is not in LANE_WIDE_PROTECTED, so sess-b must still notify');
+});
+
+test('two live entries sharing one sessionId under a lane do not fight over the baseline — only the first (primary) is processed, the duplicate is a no-op (#14 Phase 5)', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', lane: 1, path: '/p/lane1', ev: 'busy' }];
+  const prev = new Map([['demo#lane1#sess-dup', 'busy']]);
+  // Same sessionId on both entries; cwd exactness makes the primary
+  // deterministic (findLiveStatuses sorts an exact cwd match first), so
+  // idx 0 is always the one below, not a coin flip on array order.
+  const primaryLive = { cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-dup', startedAt: 1, name: 'dup' };
+  const duplicateLive = { cwd: '/p/lane1/sub', status: 'waiting', waitingFor: 'ignored', statusUpdatedAt: 2, sessionId: 'sess-dup', startedAt: 2, name: 'dup' };
+  const out = liveTransitionNotifications(rows, [primaryLive, duplicateLive], new Map(), prev, new Set());
+  assert.equal(out.length, 1, 'the duplicate must not fire a second, conflicting notification for the same key');
+  assert.equal(out[0].body, 'Waiting for you', 'the notification reflects the primary (first-processed) entry, not the duplicate');
+  assert.equal(prev.get('demo#lane1#sess-dup'), 'idle', 'the baseline must end at the primary\'s status — the duplicate must never get to overwrite it');
+});
+
+test('the baseline sweep drops only the sessions that actually vanished, across every lane in one pass (#14 Phase 5)', () => {
+  const rows = [
+    { project: 'demo', worktree: 'lane1', lane: 1, path: '/p/lane1', ev: 'busy' },
+    { project: 'demo', worktree: 'lane2', lane: 2, path: '/p/lane2', ev: 'busy' },
+  ];
+  const prev = new Map([
+    ['demo#lane1#sess-a', 'busy'], ['demo#lane1#sess-b', 'busy'], ['demo#lane2#sess-c', 'busy'],
+  ]);
+  // lane1's second session (sess-b) is gone this tick; lane2's sole session
+  // (sess-c) is still live and must survive the same sweep pass.
+  const live = [
+    { cwd: '/p/lane1', status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a', startedAt: 1, name: 'a' },
+    { cwd: '/p/lane2', status: 'busy', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-c', startedAt: 1, name: 'c' },
+  ];
+  liveTransitionNotifications(rows, live, new Map(), prev, new Set());
+  assert.deepEqual(
+    [...prev.keys()].sort(), ['demo#lane1#sess-a', 'demo#lane2#sess-c'],
+    'only the dead second session loses its baseline — a different lane\'s live session must survive the same sweep',
+  );
 });
 
 // ── Run ─────────────────────────────────────────────────────────────
