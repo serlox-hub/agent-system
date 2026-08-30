@@ -440,6 +440,29 @@ const PROTECTED_LIVE_OVERRIDE = new Set([
 ]);
 
 /**
+ * States that also suppress #14's extra session rows, not just the primary
+ * row's own live override. Each is a fact about the shared git tree or the
+ * worktree's own lifecycle (a blocked/reviewed commit, the lane itself being
+ * created/removed/reset) — true for every session in the lane alike, so a
+ * second session's row would be misleading noise underneath them.
+ * `agent_start` (in `PROTECTED_LIVE_OVERRIDE` above, deliberately NOT here)
+ * is an action specific to *that* session, not a fact about the lane, so a
+ * genuinely independent second session must still get its own row.
+ *
+ * Spelled out as its own literal, not derived from `PROTECTED_LIVE_OVERRIDE`
+ * by subtraction: a future state added there is session-scoped far more
+ * often than lane-wide (most of this file's own states are), so deriving
+ * "suppress" as the default direction would silently hide a live session
+ * the moment someone adds an unrelated protected state — the opposite of
+ * what #14 exists to fix. Spelling it out instead makes "also suppress
+ * extra rows" an opt-in edit made right here, next to the reasoning above.
+ */
+const LANE_WIDE_PROTECTED = new Set([
+  'reviewed', 'commit_blocked', 'commit_reviewed',
+  'commit_bypass', 'lane_created', 'lane_removed', 'lane_reset',
+]);
+
+/**
  * Prefix match, same idiom as lib/worktrees.mjs's own cwd->lane lookup.
  * Returns every live session whose `cwd` resolves under the lane path (root
  * itself, or a subdirectory launch), ordered deterministically instead of by
@@ -536,6 +559,30 @@ const CTX_WIDTH = 24; // fits the worst realistic model id after stripping "clau
 const CTX_MIN_TERM_WIDTH = 85; // below this, drop the CTX column outright rather than starve BRANCH
 const BRANCH_FLOOR = 20;
 
+/**
+ * The STATE and FOR cells, shared by a lane's own row and #14's extra
+ * session rows — LANE, BRANCH and CTX differ enough between the two (lane
+ * colour vs dim, a real branch vs a bare session name, live-toned CTX vs a
+ * Phase 3 placeholder) that STATE/FOR are the only two cells genuinely the
+ * same rule either way. Extracted so a status added to `STATES` only needs
+ * its colour/label rule written once, instead of drifting between two
+ * copies — the same failure mode `serviceLine`'s own docstring above
+ * documents having already been paid for once, when its two halves were
+ * independently re-derived and disagreed.
+ *
+ * `labelInput` is whatever `STATES[ev].label` expects: the whole row `r` for
+ * the primary row (`agent_start`'s `e.agent`, `stage`'s `e.stage`, …), or
+ * just `{ waitingFor }` for an extra row, which only ever carries a live
+ * busy/idle/waiting status and has no `agent`/`stage` of its own.
+ */
+function stateAndForCells(ev, labelInput, since, now) {
+  const s = stateOf(ev);
+  return [
+    s.color + pad(`${s.icon} ${s.label(labelInput)}`, STATE_WIDTH) + C.reset,
+    (ev === 'idle' || ev === 'waiting' ? C.yellow : C.dim) + pad(since ? fmtElapsed(now - since) : '—', FOR_WIDTH) + C.reset,
+  ];
+}
+
 /** Build the frame as a string. Callers decide whether to clear the screen. */
 export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config), ctxInfo = null, liveStatuses = readLiveStatuses()) {
   const rows = withLiveOverride(rowsFor(ctx, state.lanes, laneInfo), liveStatuses);
@@ -583,19 +630,46 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
   // before RECENT, in both the populated and empty-lanes cases.
   rows.forEach((r, i) => {
     if (i > 0) out.push('');
-    const s = stateOf(r.ev);
     const live = LIVE_EVENTS.has(r.ev);
     const laneColor = colorFor(r.lane);
+    const [stateCell, forCell] = stateAndForCells(r.ev, r, r.since, now);
     const cells = [
       laneColor + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
       branchCell(r, branchWidth),
-      s.color + pad(`${s.icon} ${s.label(r)}`, STATE_WIDTH) + C.reset,
-      (r.ev === 'idle' || r.ev === 'waiting' ? C.yellow : C.dim) + pad(r.since ? fmtElapsed(now - r.since) : '—', FOR_WIDTH) + C.reset,
+      stateCell,
+      forCell,
     ];
     if (showCtx) {
       cells.push((live ? '' : C.dim) + pad(ctxCell(r, ctxInfo), CTX_WIDTH) + C.reset);
     }
     out.push(cells.join(' '));
+
+    // Extra rows: one per additional live session sharing this lane's path,
+    // beyond the primary `[0]` match `withLiveOverride` already folded into
+    // `r` above (#14). Directly beneath — no blank line, and before the
+    // service line below, so a lane's session rows stay adjacent to its own
+    // row; the service line (one dev-server URL per lane, not per session)
+    // reads as the whole block's footer instead of splitting two session
+    // rows apart. The blank line pushed at the top of this callback still
+    // only separates one lane's whole block from the next.
+    if (!LANE_WIDE_PROTECTED.has(r.ev)) {
+      for (const extraLive of findLiveStatuses(liveStatuses, r.path).slice(1)) {
+        const [extraStateCell, extraForCell] = stateAndForCells(
+          extraLive.status, { waitingFor: extraLive.waitingFor }, extraLive.statusUpdatedAt, now,
+        );
+        const extraCells = [
+          C.dim + pad('·', LANE_WIDTH) + C.reset,
+          C.dim + pad(extraLive.name || extraLive.sessionId, branchWidth) + C.reset,
+          extraStateCell,
+          extraForCell,
+        ];
+        // Per-session CTX attribution is #14 Phase 4 — this placeholder never
+        // reads a transcript for an extra row.
+        if (showCtx) extraCells.push(C.dim + pad('—', CTX_WIDTH) + C.reset);
+        out.push(extraCells.join(' '));
+      }
+    }
+
     const svcLine = serviceLine(ctx, r);
     if (svcLine) {
       out.push(`${' '.repeat(LANE_WIDTH + 1)}${C.dim}${svcLine}${C.reset}`);
