@@ -52,7 +52,9 @@ than computed by the hook.
 Every event also carries `session`, the id of the Claude Code session that
 produced it — taken from the hook payload for hook-driven events, from
 `CLAUDE_CODE_SESSION_ID` for the `lanes` CLI, and `null` when a `lanes`
-command is run outside Claude Code. Nothing reads it yet.
+command is run outside Claude Code. Read by the dashboard: it attributes
+folded state per session (`state.sessionHistory`) and keys same-tick
+notification dedup, so an untagged event double-notifies.
 
 The dashboard's displayed state is not purely event-derived: each render tick
 also reads `~/.claude/sessions/*.json`, Claude Code's own live per-session
@@ -61,6 +63,19 @@ session's real-time `busy`/`idle`/`waiting` — catching an interrupted turn (no
 `Stop` ever fires) or a pending `AskUserQuestion`, neither of which produces
 an event above. The richer, lanes-specific states (`agent_start`, `reviewed`,
 `commit_*`, `lane_*`) stay authoritative and are never overridden.
+
+More than one live session can share a lane — its own root plus a
+subdirectory launch, say. A session launched at the lane root outranks one
+launched from a subdirectory; among sessions tied on that, the oldest is
+primary (session id breaks a remaining tie). The primary drives the lane's
+own row; every other one renders as its own row directly beneath, showing
+that session's own name — its session id when Claude Code gave it none —
+its live busy/idle/waiting status, and its own context, never the lane's. An
+extra row is hidden only when *that* session's own history is a lane-wide
+fact (any commit-guard outcome — blocked, reviewed or bypassed — or the lane
+itself created/removed/reset), never because the primary session happens to
+be in one of those states: the two sessions are otherwise independent, and
+each is what earns it its own row.
 
 ## Known limitations
 
@@ -81,9 +96,12 @@ Stated plainly, because finding these yourself later is worse:
   somewhere else.
 - **Notifications fire for events that arrive while `lanes status` is running,
   and for live-status transitions read from `~/.claude/sessions/*.json` each
-  tick** (deduplicated against the event path within the same tick, so a
-  normal `Stop` never double-fires). History is replayed into the display but
-  never notified, on either path.
+  tick** (deduplicated per session, keyed `project#worktree#sessionId`, within
+  the same tick — so a normal `Stop` never double-fires, and two sessions
+  sharing a lane never suppress each other's notification. A session file
+  carrying no id of its own is keyed by pid instead, so — like an untagged
+  event, above — its `Stop` can double-fire too). History is
+  replayed into the display but never notified, on either path.
 - **Project-local agents and skills win over these.** A repo with its own
   `.claude/agents/` or `.claude/skills/` keeps using them, so adopting this
   system there does not change existing behaviour on its own — you get the hooks
