@@ -186,7 +186,43 @@ function notify(title, body) {
 }
 
 export function createState() {
-  return { lanes: new Map(), history: [] };
+  return { lanes: new Map(), history: [], sessionHistory: new Map() };
+}
+
+// Lane-lifecycle events are facts about a worktree, not about whichever
+// session happened to type the command that produced them — `lanes new`/
+// `rm`/`reset` run in one session but name a possibly-unrelated lane. The
+// per-lane fold below is scoped by construction (its `key` IS that lane), so
+// this only matters for the per-session fold, which has no such scoping.
+const LANE_LIFECYCLE = new Set(['lane_created', 'lane_removed', 'lane_reset']);
+
+/**
+ * `ev` fold rule shared by the per-lane and per-session folds in
+ * `applyEvents`: `stage` is a pipeline milestone, not a liveness signal, and
+ * must not overwrite the last real state, or a row goes cyan "working" the
+ * moment a checkpoint fires and stays that way forever once the session
+ * behind it is gone.
+ *
+ * `LANE_LIFECYCLE` gets the same "must not overwrite" treatment too, but
+ * only where the per-session fold calls this — never for the per-lane fold.
+ * There, `ev` BECOMING `'lane_created'`/`'lane_reset'` on the row itself is
+ * the whole point of those two events (`render()`'s STATE cell shows "lane
+ * reset"), and `lane_removed` deletes the row outright rather than reaching
+ * this function at all.
+ */
+function foldEv(e, prev) {
+  return e.ev === 'stage' ? (prev.ev ?? null) : e.ev;
+}
+
+/**
+ * `transcript` fold rule shared by both folds: a new session start is
+ * authoritative, like `lane_created` is for the whole row — without this, a
+ * `session_start` with no `transcript_path` of its own (payload omitted or
+ * empty) would silently inherit the OUTGOING session's transcript via `??`,
+ * and render it in live tone as if it belonged to the new one.
+ */
+function foldTranscript(e, prev) {
+  return e.ev === 'session_start' ? (e.transcript ?? null) : (e.transcript ?? prev.transcript ?? null);
 }
 
 /**
@@ -224,17 +260,8 @@ export function applyEvents(state, events) {
         branch: e.branch ?? prev.branch,
         issue: e.issue ?? prev.issue,
         path: e.path ?? prev.path,
-        // A new session start is authoritative for transcript, like
-        // lane_created is for the whole row: without this, a session_start
-        // with no transcript_path of its own (payload omitted or empty) would
-        // silently inherit the OUTGOING session's transcript via `??`, and
-        // render it in live tone as if it belonged to the new one.
-        transcript: e.ev === 'session_start' ? (e.transcript ?? null) : (e.transcript ?? prev.transcript),
-        // `stage` is a pipeline milestone, not a liveness signal — it must not
-        // overwrite the last real session/agent state, or a lane goes cyan
-        // "working" the moment a checkpoint fires and stays that way forever
-        // once the session behind it is long gone.
-        ev: e.ev === 'stage' ? (prev.ev ?? null) : e.ev,
+        transcript: foldTranscript(e, prev),
+        ev: foldEv(e, prev),
         agent: e.ev === 'agent_start' ? e.agent : e.ev === 'agent_end' ? null : prev.agent,
         // Kept folded although render() no longer displays it (#9 dropped the
         // STAGE column) — RECENT reads a stage event's own `e.stage` straight
@@ -247,6 +274,22 @@ export function applyEvents(state, events) {
         since: e.ev === 'stage' ? (prev.since ?? e.ts) : e.ts,
       });
     }
+    // Per-session fold (#14 Phase 4), additive and independent of the
+    // per-lane fold above: a session can outlive the lane row it started in
+    // (or never even resolve to one, in principle), and #14's extra rows key
+    // on session identity, not lane identity. Every event with a `session`
+    // folds here, `busy` included — it is only excluded from `state.history`
+    // (the RECENT log) below, not from this fold, matching how `busy`
+    // already updates `state.lanes`'s own `ev`.
+    if (e.session) {
+      const prevS = state.sessionHistory.get(e.session) || {};
+      state.sessionHistory.set(e.session, {
+        transcript: foldTranscript(e, prevS),
+        // `LANE_LIFECYCLE` never overwrites a session's own `ev` — see its
+        // comment above — on top of `foldEv`'s shared `stage` exclusion.
+        ev: LANE_LIFECYCLE.has(e.ev) ? (prevS.ev ?? null) : foldEv(e, prevS),
+      });
+    }
     // `busy` fires on every user message; in the log it is noise.
     if (e.ev !== 'busy') {
       state.history.push(e);
@@ -254,6 +297,21 @@ export function applyEvents(state, events) {
     }
   }
   return state;
+}
+
+/**
+ * Drops any `state.sessionHistory` entry not in `onScreenSessionIds`,
+ * in place. `readLiveStatuses()` is global — every Claude Code session on
+ * the machine, any project, any window — so retaining every live session's
+ * history would keep `ctxInfo`'s throttled `readContext()` walk (see
+ * `watchStatus`) doing real per-tick work for sessions `render()` never
+ * looks at. `session_end` is not reliably observed (#12's own
+ * investigation), so this is the only eviction path `sessionHistory` has.
+ */
+export function pruneSessionHistory(state, onScreenSessionIds) {
+  for (const sessionId of state.sessionHistory.keys()) {
+    if (!onScreenSessionIds.has(sessionId)) state.sessionHistory.delete(sessionId);
+  }
 }
 
 function rowsFor(ctx, lanes, laneInfo) {
@@ -440,60 +498,144 @@ const PROTECTED_LIVE_OVERRIDE = new Set([
 ]);
 
 /**
- * Prefix match, same idiom as lib/worktrees.mjs's own cwd->lane lookup.
- * Picks the first match when more than one live session's `cwd` resolves
- * under the same lane path (root plus a subdirectory launch, say) — an
- * assumption, not a guarantee: D20 frames a lane as one long-lived branch,
- * so this treats "one live session per lane" the same way. A genuine
- * multi-session lane resolves arbitrarily, by filesystem read order.
+ * States that also suppress #14's extra session rows, not just the primary
+ * row's own live override. Each is a fact about the shared git tree or the
+ * worktree's own lifecycle (a blocked/reviewed commit, the lane itself being
+ * created/removed/reset) — true for every session in the lane alike, so a
+ * second session's row would be misleading noise underneath them.
+ * `agent_start` (in `PROTECTED_LIVE_OVERRIDE` above, deliberately NOT here)
+ * is an action specific to *that* session, not a fact about the lane, so a
+ * genuinely independent second session must still get its own row.
+ *
+ * Spelled out as its own literal, not derived from `PROTECTED_LIVE_OVERRIDE`
+ * by subtraction: a future state added there is session-scoped far more
+ * often than lane-wide (most of this file's own states are), so deriving
+ * "suppress" as the default direction would silently hide a live session
+ * the moment someone adds an unrelated protected state — the opposite of
+ * what #14 exists to fix. Spelling it out instead makes "also suppress
+ * extra rows" an opt-in edit made right here, next to the reasoning above.
  */
-function findLiveStatus(liveStatuses, lanePath) {
-  if (!lanePath) return null;
-  return liveStatuses.find((s) => s.cwd === lanePath || s.cwd.startsWith(`${lanePath}/`)) || null;
+const LANE_WIDE_PROTECTED = new Set([
+  'reviewed', 'commit_blocked', 'commit_reviewed',
+  'commit_bypass', 'lane_created', 'lane_removed', 'lane_reset',
+]);
+
+/**
+ * Whether a specific session's own folded history (`state.sessionHistory`,
+ * #14 Phase 4) says it's currently in a lane-wide-fact state. Shared by
+ * `render()`'s extra rows and `liveTransitionNotifications`' per-session
+ * gating (#14 Phase 5) — both need the exact same rule, and a second inline
+ * copy is what lets the two drift the next time a state is added to
+ * `LANE_WIDE_PROTECTED`.
+ */
+function isSessionProtected(sessionHistory, sessionId) {
+  const hist = sessionHistory.get(sessionId);
+  return Boolean(hist && LANE_WIDE_PROTECTED.has(hist.ev));
 }
 
-/** `rows` with each row's `ev`/`since`/`waitingFor` replaced by its live status, per the rule above. */
+/**
+ * Prefix match, same idiom as lib/worktrees.mjs's own cwd->lane lookup.
+ * Returns every live session whose `cwd` resolves under the lane path (root
+ * itself, or a subdirectory launch), ordered deterministically instead of by
+ * whatever order `readdirSync` happened to return them in (#14): an
+ * exact path match beats a merely-prefix one regardless of when either
+ * started, then ascending `startedAt` — oldest wins, not newest — so two
+ * entries tied on everything else still resolve the same way on every call.
+ * `[0]` is today's single override target; the rest exist for #14's
+ * extra-row rendering.
+ *
+ * Ascending, not descending: under D20 a lane is one long-lived branch, so
+ * its longest-running session is the one the row represents (missing/invalid
+ * `startedAt` sorts last via `Infinity` — an unknown start time is worse
+ * information than a real one, never better, so it can't win a tiebreak by
+ * default). A second, newer session in the same lane gets its own row in
+ * #14's later phases rather than displacing the primary one — descending
+ * order would make the row's identity jump every time a throwaway session is
+ * opened in the lane, reintroducing the instability this ordering exists to
+ * remove. `sessionId` is the final string-compare tiebreak, guaranteed
+ * present by D36.
+ */
+function findLiveStatuses(liveStatuses, lanePath) {
+  if (!lanePath) return [];
+  return liveStatuses
+    .filter((s) => s.cwd === lanePath || s.cwd.startsWith(`${lanePath}/`))
+    .sort((a, b) => {
+      const aExact = a.cwd === lanePath ? 0 : 1;
+      const bExact = b.cwd === lanePath ? 0 : 1;
+      if (aExact !== bExact) return aExact - bExact;
+      const aStarted = Number.isFinite(a.startedAt) ? a.startedAt : Infinity;
+      const bStarted = Number.isFinite(b.startedAt) ? b.startedAt : Infinity;
+      if (aStarted !== bStarted) return aStarted - bStarted;
+      return a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0;
+    });
+}
+
+/** `rows` with each row's `ev`/`since`/`waitingFor` replaced by its primary live status, per the rule above. */
 function withLiveOverride(rows, liveStatuses) {
   return rows.map((r) => {
     if (PROTECTED_LIVE_OVERRIDE.has(r.ev)) return r;
-    const live = findLiveStatus(liveStatuses, r.path);
+    const live = findLiveStatuses(liveStatuses, r.path)[0];
     if (!live) return r;
     return { ...r, ev: live.status, since: live.statusUpdatedAt ?? r.since, waitingFor: live.waitingFor };
   });
 }
 
 /**
- * Compares this tick's live status per lane against the previous tick's
- * (`prevLiveEv`, mutated in place — transient watch-loop state, never folded
- * into `state` itself) and returns the notifications a transition earns.
- * Skips a lane already covered by a raw-event notification this tick
- * (`notifiedKeys`) so a normal `Stop` — which already notifies off the raw
- * event — never double-fires just because the live file updated in the same
- * tick. A lane with no live match this tick, or whose folded `ev` is one of
- * the protected states above, drops its tracked baseline instead of keeping
- * a stale one — so a later reattachment (or the protection lifting) starts
- * clean rather than firing off a comparison against old data.
+ * Compares this tick's live status per SESSION — not just per lane — against
+ * the previous tick's (`prevLiveEv`, mutated in place — transient watch-loop
+ * state, never folded into `state` itself) and returns the notifications a
+ * transition earns (#14 Phase 5: every live match under a row's path, not
+ * only the primary `[0]`). Baseline key is `` `${laneKey}#${sessionId}` ``,
+ * not just `laneKey`, so two sessions in one lane track independent
+ * baselines and a transition on one is never compared against the other's
+ * last value. Skips a session already covered by a raw-event notification
+ * this tick (`notifiedKeys`, keyed to match by `watchStatus`) so a normal
+ * `Stop` — which already notifies off the raw event — never double-fires
+ * just because the live file updated in the same tick.
+ *
+ * Gating: the primary session uses the same `r.ev`/`PROTECTED_LIVE_OVERRIDE`
+ * rule as before #14 (row `[0]`'s protection is unchanged, per Phase 4); an
+ * extra session uses its own history via `isSessionProtected`, same as
+ * `render()`'s rows. A protected or no-longer-live session's baseline is
+ * dropped rather than kept stale, in one pass at the end (comparing every
+ * tracked key against the ones just proven valid this tick) — so a later
+ * reattachment, or the protection lifting, starts clean instead of firing a
+ * comparison against old data, and `prevLiveEv` never grows unbounded.
+ *
+ * Callers must pass the COMPLETE row set: the final pass treats any tracked
+ * key not re-validated this call as gone, so a filtered `rows` would
+ * silently drop the omitted lanes' baselines. The one caller (`watchStatus`)
+ * always passes `rowsFor(...)` whole.
  */
-export function liveTransitionNotifications(rows, liveStatuses, prevLiveEv, notifiedKeys) {
+export function liveTransitionNotifications(rows, liveStatuses, sessionHistory, prevLiveEv, notifiedKeys) {
   const out = [];
+  const validKeys = new Set();
   for (const r of rows) {
-    const key = `${r.project || '?'}#${r.worktree ?? '?'}`;
-    if (PROTECTED_LIVE_OVERRIDE.has(r.ev)) {
-      prevLiveEv.delete(key);
-      continue;
-    }
-    const live = findLiveStatus(liveStatuses, r.path);
-    if (!live) {
-      prevLiveEv.delete(key);
-      continue;
-    }
-    const seenBefore = prevLiveEv.has(key);
-    const changed = seenBefore && prevLiveEv.get(key) !== live.status;
-    prevLiveEv.set(key, live.status);
-    if (changed && !notifiedKeys.has(key)) {
-      const body = NOTIFY[live.status]?.({ ...r, waitingFor: live.waitingFor });
-      if (body) out.push({ title: notifyTitle(r), body });
-    }
+    const laneKey = `${r.project || '?'}#${r.worktree ?? '?'}`;
+    findLiveStatuses(liveStatuses, r.path).forEach((live, idx) => {
+      const isPrimary = idx === 0;
+      const protectedNow = isPrimary ? PROTECTED_LIVE_OVERRIDE.has(r.ev) : isSessionProtected(sessionHistory, live.sessionId);
+      if (protectedNow) return;
+      const key = `${laneKey}#${live.sessionId}`;
+      // A duplicate sessionId under one lane (two live files somehow sharing
+      // an id) must not fight over one baseline — each would see the
+      // other's write as a "transition" every tick, notifying forever.
+      if (validKeys.has(key)) return;
+      validKeys.add(key);
+      const seenBefore = prevLiveEv.has(key);
+      const changed = seenBefore && prevLiveEv.get(key) !== live.status;
+      prevLiveEv.set(key, live.status);
+      if (changed && !notifiedKeys.has(key)) {
+        const body = NOTIFY[live.status]?.({ ...r, waitingFor: live.waitingFor });
+        if (body) {
+          const title = isPrimary ? notifyTitle(r) : `${notifyTitle(r)} · ${live.name || live.sessionId}`;
+          out.push({ title, body });
+        }
+      }
+    });
+  }
+  for (const key of prevLiveEv.keys()) {
+    if (!validKeys.has(key)) prevLiveEv.delete(key);
   }
   return out;
 }
@@ -511,6 +653,31 @@ const FOR_WIDTH = 7;
 const CTX_WIDTH = 24; // fits the worst realistic model id after stripping "claude-" (~19 chars) + tokens
 const CTX_MIN_TERM_WIDTH = 85; // below this, drop the CTX column outright rather than starve BRANCH
 const BRANCH_FLOOR = 20;
+
+/**
+ * The STATE and FOR cells, shared by a lane's own row and #14's extra
+ * session rows — LANE, BRANCH and CTX differ enough between the two (lane
+ * colour vs dim, a real branch vs a bare session name, and — even once both
+ * read a real transcript — the primary row's CTX dims when not live while an
+ * extra row's never does) that STATE/FOR are the only two cells genuinely the
+ * same rule either way. Extracted so a status added to `STATES` only needs
+ * its colour/label rule written once, instead of drifting between two
+ * copies — the same failure mode `serviceLine`'s own docstring above
+ * documents having already been paid for once, when its two halves were
+ * independently re-derived and disagreed.
+ *
+ * `labelInput` is whatever `STATES[ev].label` expects: the whole row `r` for
+ * the primary row (`agent_start`'s `e.agent`, `stage`'s `e.stage`, …), or
+ * just `{ waitingFor }` for an extra row, which only ever carries a live
+ * busy/idle/waiting status and has no `agent`/`stage` of its own.
+ */
+function stateAndForCells(ev, labelInput, since, now) {
+  const s = stateOf(ev);
+  return [
+    s.color + pad(`${s.icon} ${s.label(labelInput)}`, STATE_WIDTH) + C.reset,
+    (ev === 'idle' || ev === 'waiting' ? C.yellow : C.dim) + pad(since ? fmtElapsed(now - since) : '—', FOR_WIDTH) + C.reset,
+  ];
+}
 
 /** Build the frame as a string. Callers decide whether to clear the screen. */
 export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config), ctxInfo = null, liveStatuses = readLiveStatuses()) {
@@ -559,19 +726,71 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
   // before RECENT, in both the populated and empty-lanes cases.
   rows.forEach((r, i) => {
     if (i > 0) out.push('');
-    const s = stateOf(r.ev);
     const live = LIVE_EVENTS.has(r.ev);
     const laneColor = colorFor(r.lane);
+    const [stateCell, forCell] = stateAndForCells(r.ev, r, r.since, now);
+    // Every live session under this lane's path, computed once and reused
+    // below for both the primary row's CTX (`[0]`) and the extra rows
+    // (`.slice(1)`), rather than calling `findLiveStatuses` twice per lane.
+    const laneLive = findLiveStatuses(liveStatuses, r.path);
+    const primaryHist = laneLive[0] && state.sessionHistory.get(laneLive[0].sessionId);
     const cells = [
       laneColor + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
       branchCell(r, branchWidth),
-      s.color + pad(`${s.icon} ${s.label(r)}`, STATE_WIDTH) + C.reset,
-      (r.ev === 'idle' || r.ev === 'waiting' ? C.yellow : C.dim) + pad(r.since ? fmtElapsed(now - r.since) : '—', FOR_WIDTH) + C.reset,
+      stateCell,
+      forCell,
     ];
     if (showCtx) {
-      cells.push((live ? '' : C.dim) + pad(ctxCell(r, ctxInfo), CTX_WIDTH) + C.reset);
+      // Resolve CTX through the primary session's own history when known
+      // (#14 Phase 4), not `r.transcript` alone: `state.lanes`' transcript
+      // is last-write-wins across EVERY session in the worktree, not scoped
+      // by session, so with two live sessions sharing a lane it can silently
+      // hold the wrong one's transcript — invisible before extra rows
+      // existed to show the correct value right underneath it. Falls back to
+      // `r.transcript` when the primary session has no history of its own
+      // (no live match, or one that hasn't emitted a transcript-bearing
+      // event yet), so a single-session lane renders byte-identical to
+      // before this phase.
+      const ctxSource = primaryHist?.transcript ? primaryHist : r;
+      cells.push((live ? '' : C.dim) + pad(ctxCell(ctxSource, ctxInfo), CTX_WIDTH) + C.reset);
     }
     out.push(cells.join(' '));
+
+    // Extra rows: one per additional live session sharing this lane's path,
+    // beyond the primary `[0]` match `withLiveOverride` already folded into
+    // `r` above (#14). Directly beneath — no blank line, and before the
+    // service line below, so a lane's session rows stay adjacent to its own
+    // row; the service line (one dev-server URL per lane, not per session)
+    // reads as the whole block's footer instead of splitting two session
+    // rows apart. The blank line pushed at the top of this callback still
+    // only separates one lane's whole block from the next.
+    //
+    // Gating is per-session (#14 Phase 4), not per row `[0]` like Phase 3's
+    // placeholder was: a session's own history — not the primary session's —
+    // decides whether ITS row is a lane-wide fact in disguise. A commit
+    // blocked by session A tags that event with A's own session id (#13), so
+    // it never touches B's fold here and B's row stays visible; if B itself
+    // is mid-commit-block, B's own history says so and B's row is the one
+    // that hides. Falls open (shows the row) when this session has no
+    // history yet — absence of evidence is not evidence of a lane-wide state.
+    for (const extraLive of laneLive.slice(1)) {
+      if (isSessionProtected(state.sessionHistory, extraLive.sessionId)) continue;
+      const sessionHist = state.sessionHistory.get(extraLive.sessionId);
+      const [extraStateCell, extraForCell] = stateAndForCells(
+        extraLive.status, { waitingFor: extraLive.waitingFor }, extraLive.statusUpdatedAt, now,
+      );
+      const extraCells = [
+        C.dim + pad('·', LANE_WIDTH) + C.reset,
+        C.dim + pad(extraLive.name || extraLive.sessionId, branchWidth) + C.reset,
+        extraStateCell,
+        extraForCell,
+      ];
+      // Always live-toned, never dimmed: unlike row `[0]`, an extra row only
+      // ever exists for a session `readLiveStatuses()` just confirmed is live.
+      if (showCtx) extraCells.push(pad(ctxCell({ transcript: sessionHist?.transcript }, ctxInfo), CTX_WIDTH));
+      out.push(extraCells.join(' '));
+    }
+
     const svcLine = serviceLine(ctx, r);
     if (svcLine) {
       out.push(`${' '.repeat(LANE_WIDTH + 1)}${C.dim}${svcLine}${C.reset}`);
@@ -639,38 +858,64 @@ export async function watchStatus() {
   // Throttled on the same 20-tick cadence as laneInfo rather than read fresh
   // every paint; only the transcript paths currently on screen are read.
   let ctxInfo = new Map();
-  // Per-lane live status from the previous tick, so a transition (not just a
-  // value) can be detected — transient watch-loop state, never folded into
-  // `state` itself. See liveTransitionNotifications.
+  // Per-session live status from the previous tick, keyed
+  // `${project}#${worktree}#${sessionId}` (#14 Phase 5), so a transition
+  // (not just a value) can be detected per session, not just per lane —
+  // transient watch-loop state, never folded into `state` itself. See
+  // liveTransitionNotifications.
   const prevLiveEv = new Map();
 
   const paint = () => {
     try {
       const fresh = tail.read();
-      const notifiedLanes = new Set();
+      // Keyed per session (#14 Phase 5), matching liveTransitionNotifications'
+      // own `${laneKey}#${sessionId}` baseline key — `session ?? 'primary'`
+      // falls back to the literal string only for an event with no session
+      // tag at all (pre-#13 or a source that never sends one); every event
+      // #13 itself emits already carries a real id, which is what actually
+      // dedupes against the live-session check below for the common case.
+      const notifiedKeys = new Set();
       for (const e of fresh) {
         const body = NOTIFY[e.ev]?.(e);
         if (body) {
           notify(notifyTitle(e), body);
-          notifiedLanes.add(`${e.project || '?'}#${e.worktree ?? '?'}`);
+          notifiedKeys.add(`${e.project || '?'}#${e.worktree ?? '?'}#${e.session ?? 'primary'}`);
         }
       }
       applyEvents(state, fresh);
       tick += 1;
+      // Read here, ABOVE the throttle block below, not after it as before
+      // #14 Phase 4 — the sessionHistory prune inside that block now needs
+      // it. Moving this back down under the block is a TDZ `ReferenceError`
+      // that `paint()`'s own `catch {}` swallows silently, freezing the
+      // dashboard on its last frame with no error printed anywhere.
+      // Otherwise unchanged: read once per tick, unthrottled (unlike
+      // laneInfo/ctxInfo below) — a handful of small local JSON files, cheap
+      // even every second — shared between the notification check, render(),
+      // and the throttled block, so everything agrees on one snapshot.
+      const liveStatuses = readLiveStatuses();
       if (tick % 20 === 0) {
         laneInfo = enumerateLanes(ctx.config);
         const next = new Map();
         for (const { transcript } of state.lanes.values()) {
           if (transcript && !next.has(transcript)) next.set(transcript, readContext(transcript));
         }
+        // "On screen" here means every live session matching ANY lane's
+        // path, primary (`[0]`) included, not just #14's extra rows: the
+        // primary row's own CTX can also resolve through a session's history
+        // now (see render()'s `primaryHist`). Scoped this way rather than to
+        // every live session `readLiveStatuses()` returns, which is global —
+        // see `pruneSessionHistory`'s own docstring for why.
+        const onScreenSessionIds = new Set(
+          rowsFor(ctx, state.lanes, laneInfo).flatMap((r) => findLiveStatuses(liveStatuses, r.path)).map((s) => s.sessionId),
+        );
+        pruneSessionHistory(state, onScreenSessionIds);
+        for (const { transcript } of state.sessionHistory.values()) {
+          if (transcript && !next.has(transcript)) next.set(transcript, readContext(transcript));
+        }
         ctxInfo = next;
       }
-      // Read once per tick, unthrottled (unlike laneInfo/ctxInfo above) — a
-      // handful of small local JSON files, cheap even every second — and
-      // shared between the notification check and render() so both agree on
-      // the same snapshot within a tick.
-      const liveStatuses = readLiveStatuses();
-      for (const { title, body } of liveTransitionNotifications(rowsFor(ctx, state.lanes, laneInfo), liveStatuses, prevLiveEv, notifiedLanes)) {
+      for (const { title, body } of liveTransitionNotifications(rowsFor(ctx, state.lanes, laneInfo), liveStatuses, state.sessionHistory, prevLiveEv, notifiedKeys)) {
         notify(title, body);
       }
       // Full redraw: cheap at this size, and it avoids every partial-update
