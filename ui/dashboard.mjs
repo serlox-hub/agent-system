@@ -325,11 +325,17 @@ function rowsFor(ctx, lanes, laneInfo) {
     const prev = lanes.get(key) || { ev: 'session_end' };
     // `lane`/`worktree`/`dirty`/`ahead`/`behind`/`baseKnown` always come from
     // the live git read, never from the stored event — stored events never
-    // carried divergence data at all.
+    // carried divergence data at all. `project` is likewise never taken from
+    // `prev`: this row came from `laneInfo`, i.e. from `ctx`'s own
+    // `worktreesDir`, so it belongs to `project` regardless of whether any
+    // event ever fired for this exact lane (a fresh lane's `prev` fallback
+    // carries no `project` field at all) — without this, a never-touched own
+    // lane and a foreign one look identical to the grouping below.
     rows.push({
       ...prev,
       ...l,
       worktree: l.name,
+      project,
       // A transient git failure (fresh value `null`) must never blank a
       // previously-known-good branch — hence nullish, not `||`.
       branch: l.branch ?? prev.branch,
@@ -377,6 +383,11 @@ const MARKS_TONE = { danger: `${C.bold}${C.red}`, dirty: C.yellow, ahead: C.gree
  * one identifier that always exists (matches `notifyTitle`'s fallback), but
  * still shows a carried-forward issue or marks: a failed *branch* read must
  * not blank an issue number `rowsFor` already decided to keep.
+ *
+ * Carries no project identity of its own — a row from another project (D8:
+ * the events log and live-status dir are both machine-global, so `rowsFor`
+ * can surface one) is disambiguated by `render()`'s project grouping instead,
+ * a header line rather than eating into this cell's already-tight width.
  */
 function branchCell(r, width) {
   const issuePrefix = r.issue ? `[#${r.issue}] ` : '';
@@ -719,96 +730,157 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
     out.push(`${C.dim}  No lanes yet. Start a Claude Code session in a configured worktree.${C.reset}`);
   }
 
+  // Grouped by project: `rows` can mix in lanes from other projects (D8 —
+  // the events log and live-status dir are both machine-global), and rather
+  // than tagging every such row individually within the tight BRANCH budget,
+  // a dim header names each group instead — `ctx`'s own project included, so
+  // it reads the same way RECENT's per-line tag does: every row's project is
+  // stated, not just the ones that would otherwise be ambiguous.
+  const rawGroups = new Map();
+  for (const r of rows) {
+    const key = r.project || ctx?.project || '?';
+    if (!rawGroups.has(key)) rawGroups.set(key, []);
+    rawGroups.get(key).push(r);
+  }
+  // `ctx`'s own group is hoisted to the front rather than trusted to land
+  // there by insertion order: `rowsFor`'s first loop (over `laneInfo`, always
+  // `ctx.project`) only runs when a declared `lane<N>` worktree exists — with
+  // none yet (before the first `lanes new`) or `ctx` unresolved (an
+  // unadopted directory), every row comes from its second loop instead,
+  // ordered by first-event-arrival across every project on the machine, and
+  // a foreign group could insert before this one. A user's own project
+  // reading first is the point of the header at all; this makes it true
+  // regardless of lane state instead of merely whenever it already happened
+  // to be.
+  const ownKey = ctx?.project;
+  const groups = ownKey && rawGroups.has(ownKey)
+    ? new Map([[ownKey, rawGroups.get(ownKey)], ...[...rawGroups].filter(([k]) => k !== ownKey)])
+    : rawGroups;
+
   // Blank between lanes, not after every one: keeps the visual grouping this
   // loop exists for, and is what binds an optional service line to the row
   // above it now that most lanes are back down to a single row. Leaves the
   // trailing `out.push('')` below as the single, unconditional separator
-  // before RECENT, in both the populated and empty-lanes cases.
-  rows.forEach((r, i) => {
-    if (i > 0) out.push('');
-    const live = LIVE_EVENTS.has(r.ev);
-    const laneColor = colorFor(r.lane);
-    const [stateCell, forCell] = stateAndForCells(r.ev, r, r.since, now);
-    // Every live session under this lane's path, computed once and reused
-    // below for both the primary row's CTX (`[0]`) and the extra rows
-    // (`.slice(1)`), rather than calling `findLiveStatuses` twice per lane.
-    const laneLive = findLiveStatuses(liveStatuses, r.path);
-    const primaryHist = laneLive[0] && state.sessionHistory.get(laneLive[0].sessionId);
-    const cells = [
-      laneColor + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
-      branchCell(r, branchWidth),
-      stateCell,
-      forCell,
-    ];
-    if (showCtx) {
-      // Resolve CTX through the primary session's own history when known
-      // (#14 Phase 4), not `r.transcript` alone: `state.lanes`' transcript
-      // is last-write-wins across EVERY session in the worktree, not scoped
-      // by session, so with two live sessions sharing a lane it can silently
-      // hold the wrong one's transcript — invisible before extra rows
-      // existed to show the correct value right underneath it. Falls back to
-      // `r.transcript` when the primary session has no history of its own
-      // (no live match, or one that hasn't emitted a transcript-bearing
-      // event yet), so a single-session lane renders byte-identical to
-      // before this phase.
-      const ctxSource = primaryHist?.transcript ? primaryHist : r;
-      cells.push((live ? '' : C.dim) + pad(ctxCell(ctxSource, ctxInfo), CTX_WIDTH) + C.reset);
-    }
-    out.push(cells.join(' '));
+  // before RECENT, in both the populated and empty-lanes cases. A new
+  // project group gets the same blank-line separator before it, with its
+  // header line taking the place of the group's first row for that purpose.
+  let firstBlock = true;
+  for (const [project, groupRows] of groups) {
+    if (!firstBlock) out.push('');
+    out.push(`${C.dim}${project}${C.reset}`);
+    firstBlock = false;
 
-    // Extra rows: one per additional live session sharing this lane's path,
-    // beyond the primary `[0]` match `withLiveOverride` already folded into
-    // `r` above (#14). Directly beneath — no blank line, and before the
-    // service line below, so a lane's session rows stay adjacent to its own
-    // row; the service line (one dev-server URL per lane, not per session)
-    // reads as the whole block's footer instead of splitting two session
-    // rows apart. The blank line pushed at the top of this callback still
-    // only separates one lane's whole block from the next.
-    //
-    // Gating is per-session (#14 Phase 4), not per row `[0]` like Phase 3's
-    // placeholder was: a session's own history — not the primary session's —
-    // decides whether ITS row is a lane-wide fact in disguise. A commit
-    // blocked by session A tags that event with A's own session id (#13), so
-    // it never touches B's fold here and B's row stays visible; if B itself
-    // is mid-commit-block, B's own history says so and B's row is the one
-    // that hides. Falls open (shows the row) when this session has no
-    // history yet — absence of evidence is not evidence of a lane-wide state.
-    for (const extraLive of laneLive.slice(1)) {
-      if (isSessionProtected(state.sessionHistory, extraLive.sessionId)) continue;
-      const sessionHist = state.sessionHistory.get(extraLive.sessionId);
-      const [extraStateCell, extraForCell] = stateAndForCells(
-        extraLive.status, { waitingFor: extraLive.waitingFor }, extraLive.statusUpdatedAt, now,
-      );
-      const extraCells = [
-        C.dim + pad('·', LANE_WIDTH) + C.reset,
-        C.dim + pad(extraLive.name || extraLive.sessionId, branchWidth) + C.reset,
-        extraStateCell,
-        extraForCell,
+    groupRows.forEach((r, i) => {
+      if (i > 0) out.push('');
+      const live = LIVE_EVENTS.has(r.ev);
+      const laneColor = colorFor(r.lane);
+      const [stateCell, forCell] = stateAndForCells(r.ev, r, r.since, now);
+      // Every live session under this lane's path, computed once and reused
+      // below for both the primary row's CTX (`[0]`) and the extra rows
+      // (`.slice(1)`), rather than calling `findLiveStatuses` twice per lane.
+      const laneLive = findLiveStatuses(liveStatuses, r.path);
+      const primaryHist = laneLive[0] && state.sessionHistory.get(laneLive[0].sessionId);
+      const cells = [
+        laneColor + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
+        branchCell(r, branchWidth),
+        stateCell,
+        forCell,
       ];
-      // Always live-toned, never dimmed: unlike row `[0]`, an extra row only
-      // ever exists for a session `readLiveStatuses()` just confirmed is live.
-      if (showCtx) extraCells.push(pad(ctxCell({ transcript: sessionHist?.transcript }, ctxInfo), CTX_WIDTH));
-      out.push(extraCells.join(' '));
-    }
+      if (showCtx) {
+        // Resolve CTX through the primary session's own history when known
+        // (#14 Phase 4), not `r.transcript` alone: `state.lanes`' transcript
+        // is last-write-wins across EVERY session in the worktree, not scoped
+        // by session, so with two live sessions sharing a lane it can silently
+        // hold the wrong one's transcript — invisible before extra rows
+        // existed to show the correct value right underneath it. Falls back to
+        // `r.transcript` when the primary session has no history of its own
+        // (no live match, or one that hasn't emitted a transcript-bearing
+        // event yet), so a single-session lane renders byte-identical to
+        // before this phase.
+        const ctxSource = primaryHist?.transcript ? primaryHist : r;
+        cells.push((live ? '' : C.dim) + pad(ctxCell(ctxSource, ctxInfo), CTX_WIDTH) + C.reset);
+      }
+      out.push(cells.join(' '));
 
-    const svcLine = serviceLine(ctx, r);
-    if (svcLine) {
-      out.push(`${' '.repeat(LANE_WIDTH + 1)}${C.dim}${svcLine}${C.reset}`);
-    }
-  });
+      // Extra rows: one per additional live session sharing this lane's path,
+      // beyond the primary `[0]` match `withLiveOverride` already folded into
+      // `r` above (#14). Directly beneath — no blank line, and before the
+      // service line below, so a lane's session rows stay adjacent to its own
+      // row; the service line (one dev-server URL per lane, not per session)
+      // reads as the whole block's footer instead of splitting two session
+      // rows apart. The blank line pushed at the top of this callback still
+      // only separates one lane's whole block from the next.
+      //
+      // Gating is per-session (#14 Phase 4), not per row `[0]` like Phase 3's
+      // placeholder was: a session's own history — not the primary session's —
+      // decides whether ITS row is a lane-wide fact in disguise. A commit
+      // blocked by session A tags that event with A's own session id (#13), so
+      // it never touches B's fold here and B's row stays visible; if B itself
+      // is mid-commit-block, B's own history says so and B's row is the one
+      // that hides. Falls open (shows the row) when this session has no
+      // history yet — absence of evidence is not evidence of a lane-wide state.
+      for (const extraLive of laneLive.slice(1)) {
+        if (isSessionProtected(state.sessionHistory, extraLive.sessionId)) continue;
+        const sessionHist = state.sessionHistory.get(extraLive.sessionId);
+        const [extraStateCell, extraForCell] = stateAndForCells(
+          extraLive.status, { waitingFor: extraLive.waitingFor }, extraLive.statusUpdatedAt, now,
+        );
+        const extraCells = [
+          C.dim + pad('·', LANE_WIDTH) + C.reset,
+          C.dim + pad(extraLive.name || extraLive.sessionId, branchWidth) + C.reset,
+          extraStateCell,
+          extraForCell,
+        ];
+        // Always live-toned, never dimmed: unlike row `[0]`, an extra row only
+        // ever exists for a session `readLiveStatuses()` just confirmed is live.
+        if (showCtx) extraCells.push(pad(ctxCell({ transcript: sessionHist?.transcript }, ctxInfo), CTX_WIDTH));
+        out.push(extraCells.join(' '));
+      }
+
+      const svcLine = serviceLine(ctx, r);
+      if (svcLine) {
+        out.push(`${' '.repeat(LANE_WIDTH + 1)}${C.dim}${svcLine}${C.reset}`);
+      }
+    });
+  }
 
   out.push('');
   out.push(`${C.bold}RECENT${C.reset}`);
   if (state.history.length === 0) out.push(`${C.dim}  (nothing yet)${C.reset}`);
+  // Unlike the lane table above, RECENT is one chronological log — grouping
+  // by project would break the ordering that makes it useful, so every entry
+  // (D8: the events log is machine-global, so this can mix in another
+  // project's own) gets a per-line project tag instead, `ctx.project`'s own
+  // rows included — unlike the table, nothing here already names the current
+  // project once for the whole block, so leaving it out would make the
+  // exact-same-project rows the unlabelled special case instead of the
+  // labelled one. Unconditional, unlike an earlier version gated on whether
+  // `state.history` currently mixes projects: that flag flips as the
+  // HISTORY_LIMIT-capped window rolls, reflowing all 12 lines by a column
+  // width on every tick a foreign event enters or leaves it — visible jitter
+  // with no state change the user caused, exactly what D29/D37 already rule
+  // against elsewhere in this file. RECENT lines carry no fixed-width cap
+  // (`detail` alone runs to 300 chars), so the always-on column costs
+  // nothing the frame was protecting.
   for (const e of state.history.slice().reverse()) {
     const s = stateOf(e.ev);
     // Fall back to worktree name when there is no lane number — same fallback
     // as `branchCell`'s ghost-row case and `notifyTitle`, so a row is never
     // reduced to the bare `·` placeholder with nothing to identify it by.
-    const who = e.lane ?? e.worktree ?? '·';
+    const rawWho = e.lane ?? e.worktree ?? '·';
+    // An event with no lane falls back to its worktree name (above), which
+    // for a main-repo/non-lane session is that repo's own directory name —
+    // the same string `projectTag` always shows right next to it now that
+    // the tag is unconditional. Collapsing `who` to `·` only in that exact
+    // collision avoids printing e.g. "agent-system agent-system" side by
+    // side, without touching the fallback for every other case (a real lane
+    // number never collides).
+    const projectText = e.project || '';
+    const who = projectText && projectText === rawWho ? '·' : rawWho;
     const whoColor = e.lane != null ? colorFor(e.lane) : C.dim;
+    const projectTag = `${C.dim}${pad(projectText, 12)} ${C.reset}`;
     out.push(
-      `${C.dim}${fmtClock(e.ts)}${C.reset}  ${whoColor}${pad(who, 13)}${C.reset}${s.color}${s.icon} ${pad(s.label(e), 30)}${C.reset}${C.dim}${e.detail || ''}${C.reset}`,
+      `${C.dim}${fmtClock(e.ts)}${C.reset}  ${projectTag}${whoColor}${pad(who, 13)}${C.reset}${s.color}${s.icon} ${pad(s.label(e), 30)}${C.reset}${C.dim}${e.detail || ''}${C.reset}`,
     );
   }
   return out.join('\n');

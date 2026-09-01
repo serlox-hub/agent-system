@@ -1735,11 +1735,12 @@ test('render puts no blank line before a single lane\'s block, and exactly one b
   const frame = render(resolveContext(lane2), createState(), Date.now(), single);
   const lines = stripAnsi(frame).split('\n');
   const sepIdx = lines.findIndex((l) => /^─+$/.test(l));
-  assert.ok(lines[sepIdx + 1].startsWith(rowPrefix(1)), 'the only lane\'s row must start right after the rule, with no leading blank');
+  assert.equal(lines[sepIdx + 1], 'demo', 'the project group header must start right after the rule, with no leading blank');
+  assert.ok(lines[sepIdx + 2].startsWith(rowPrefix(1)), 'the only lane\'s row must follow directly under its project header');
   // No service declared, so no conditional line follows the row — the blank
   // separator comes right after it, not one line further down.
-  assert.equal(lines[sepIdx + 2], '', 'exactly one blank line must separate the only lane\'s block from RECENT');
-  assert.ok(lines[sepIdx + 3].includes('RECENT'));
+  assert.equal(lines[sepIdx + 3], '', 'exactly one blank line must separate the only lane\'s block from RECENT');
+  assert.ok(lines[sepIdx + 4].includes('RECENT'));
 });
 
 test('render inserts exactly one blank line between two lanes, and one more before RECENT after the last', () => {
@@ -1750,11 +1751,99 @@ test('render inserts exactly one blank line between two lanes, and one more befo
   const frame = render(resolveContext(lane2), createState(), Date.now(), two);
   const lines = stripAnsi(frame).split('\n');
   const sepIdx = lines.findIndex((l) => /^─+$/.test(l));
-  assert.ok(lines[sepIdx + 1].startsWith(rowPrefix(1)), 'no leading blank before the first lane');
-  assert.equal(lines[sepIdx + 2], '', 'exactly one blank line between the first lane\'s block and the second\'s');
-  assert.ok(lines[sepIdx + 3].startsWith(rowPrefix(2)), 'the second lane follows right after that single blank');
-  assert.equal(lines[sepIdx + 4], '', 'one blank line before RECENT after the last lane');
-  assert.ok(lines[sepIdx + 5].includes('RECENT'));
+  assert.equal(lines[sepIdx + 1], 'demo', 'the project group header must start right after the rule, with no leading blank');
+  assert.ok(lines[sepIdx + 2].startsWith(rowPrefix(1)), 'no leading blank between the header and the first lane');
+  assert.equal(lines[sepIdx + 3], '', 'exactly one blank line between the first lane\'s block and the second\'s');
+  assert.ok(lines[sepIdx + 4].startsWith(rowPrefix(2)), 'the second lane follows right after that single blank');
+  assert.equal(lines[sepIdx + 5], '', 'one blank line before RECENT after the last lane');
+  assert.ok(lines[sepIdx + 6].includes('RECENT'));
+});
+
+test('a foreign-project row gets its own group header in the lane table, with the current project sorting first', () => {
+  const state = createState();
+  state.lanes.set('other#some-worktree', { project: 'other', worktree: 'some-worktree', ev: 'busy', since: 1 });
+  const frame = render(resolveContext(lane2), state);
+  const lines = stripAnsi(frame).split('\n');
+  const demoIdx = lines.indexOf('demo');
+  const otherIdx = lines.indexOf('other');
+  assert.ok(demoIdx !== -1, 'the current project must get its own group header');
+  assert.ok(otherIdx !== -1, 'the foreign project must get its own group header');
+  assert.ok(demoIdx < otherIdx, "the current project's group must sort first, regardless of Map insertion order");
+});
+
+test('RECENT still identifies a lane-less row via its project tag, even in an all-one-project log (rc-1 regression)', () => {
+  const state = applyEvents(createState(), [
+    { ts: 5, ev: 'commit_blocked', project: 'demo', lane: null, worktree: 'demo' },
+  ]);
+  const frame = render(resolveContext(lane2), state);
+  const lines = stripAnsi(frame).split('\n');
+  // Scoped to RECENT, not the whole frame: the same synthetic event also
+  // surfaces as an extra row in the lane table above (branch falls back to
+  // its worktree name, "demo"), which would satisfy a substring search on
+  // its own and mask a broken RECENT tag.
+  const recentLines = lines.slice(lines.indexOf(lines.find((l) => l.includes('RECENT'))));
+  const line = recentLines.find((l) => l.includes('blocked, needs review'));
+  assert.ok(line, 'the RECENT line must exist');
+  assert.ok(line.includes('demo'), 'the project tag must identify the row even though `who` collapses to · here (worktree name === project name)');
+});
+
+test('RECENT tags every line with its project once the log mixes projects, own rows included', () => {
+  const state = applyEvents(createState(), [
+    { ts: 5, ev: 'commit_blocked', project: 'demo', lane: 1, worktree: 'lane1' },
+    { ts: 6, ev: 'lane_created', project: 'other', lane: 2, worktree: 'lane2' },
+  ]);
+  const frame = render(resolveContext(lane2), state);
+  const lines = stripAnsi(frame).split('\n');
+  // Scoped to RECENT — see the previous test for why: the lane table above
+  // renders "blocked, needs review" for lane1's own STATE cell regardless.
+  const recentLines = lines.slice(lines.indexOf(lines.find((l) => l.includes('RECENT'))));
+  const demoLine = recentLines.find((l) => l.includes('blocked, needs review'));
+  const otherLine = recentLines.find((l) => l.includes('lane created'));
+  assert.ok(demoLine?.includes('demo'), 'the own-project RECENT line must carry its project tag too, not just foreign ones');
+  assert.ok(otherLine?.includes('other'), 'the foreign RECENT line must carry its project tag');
+});
+
+test('when the current project has no rows at all, only the foreign group renders — no header for an empty own group', () => {
+  const state = createState();
+  state.lanes.set('other#some-worktree', { project: 'other', worktree: 'some-worktree', ev: 'busy', since: 1 });
+  // laneInfo=[] starves rowsFor's own-project loop, and no `demo` entry ever
+  // went into state.lanes either — so rawGroups never gets a 'demo' key at
+  // all, the one case `ownKey && rawGroups.has(ownKey)` guards against.
+  const frame = render(resolveContext(lane2), state, Date.now(), []);
+  const lines = stripAnsi(frame).split('\n');
+  assert.equal(lines.indexOf('demo'), -1, 'ctx.project has zero rows, so no header should render for it');
+  assert.ok(lines.includes('other'), 'the foreign group must still get its own header');
+});
+
+test('hoisting the current project to the front leaves the remaining groups in their original insertion order, with 3+ projects', () => {
+  const state = createState();
+  // Inserted zzz before aaa: if the hoist ever sorted the remainder instead
+  // of merely moving `ownKey` to the front, aaa would land before zzz and
+  // this would catch it.
+  state.lanes.set('zzz-foreign#w1', { project: 'zzz-foreign', worktree: 'w1', ev: 'busy', since: 1 });
+  state.lanes.set('aaa-foreign#w2', { project: 'aaa-foreign', worktree: 'w2', ev: 'busy', since: 1 });
+  const frame = render(resolveContext(lane2), state);
+  const lines = stripAnsi(frame).split('\n');
+  const demoIdx = lines.indexOf('demo');
+  const zzzIdx = lines.indexOf('zzz-foreign');
+  const aaaIdx = lines.indexOf('aaa-foreign');
+  assert.ok(demoIdx !== -1 && zzzIdx !== -1 && aaaIdx !== -1, 'all three project headers must be present');
+  assert.ok(demoIdx < zzzIdx, "the current project's group must still sort first among 3+ groups");
+  assert.ok(zzzIdx < aaaIdx, 'the two foreign groups must keep their original insertion order, not be sorted alphabetically');
+});
+
+test('RECENT project tag truncates a project name longer than its 12-column width, same as pad() truncates every other cell', () => {
+  const longName = 'a-very-long-project-name';
+  const state = applyEvents(createState(), [
+    { ts: 5, ev: 'commit_blocked', project: longName, lane: 1, worktree: 'lane1' },
+  ]);
+  const frame = render(resolveContext(lane2), state);
+  const lines = stripAnsi(frame).split('\n');
+  const recentLines = lines.slice(lines.indexOf(lines.find((l) => l.includes('RECENT'))));
+  const line = recentLines.find((l) => l.includes('blocked, needs review'));
+  assert.ok(line, 'the RECENT line must exist');
+  assert.ok(line.includes(`${longName.slice(0, 11)}…`), 'the project tag must truncate at 12 columns with an ellipsis');
+  assert.ok(!line.includes(longName), 'the full un-truncated name must not appear — it is 13 chars wider than the column');
 });
 
 // ── Lane colours ────────────────────────────────────────────────────
