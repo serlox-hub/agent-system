@@ -77,6 +77,14 @@ itself created/removed/reset), never because the primary session happens to
 be in one of those states: the two sessions are otherwise independent, and
 each is what earns it its own row.
 
+Both the events log and `~/.claude/sessions/*.json` are per-machine, not
+per-project, so a lane from any other repo that has adopted agent-system can
+appear in the same dashboard. Rows are grouped by project under a dim header
+line, the current project's group always sorting first; RECENT — a single
+chronological log, so it cannot group without breaking the ordering that makes
+it useful — tags each line with its project instead, current-project rows
+included.
+
 ## Known limitations
 
 Stated plainly, because finding these yourself later is worse:
