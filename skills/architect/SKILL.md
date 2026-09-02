@@ -58,11 +58,21 @@ lanes stage architect
 ```
 
 Read `.claude/agent-system.json` from the repo root for `architect.specSections`,
-`branch.prefixes` and `architect.challengeSpec`. If the file is missing, tell the
-user the project has not opted in and stop — do not guess conventions.
+`branch.prefixes`, `architect.challengeSpec` and
+`architect.suggestImplementationModel`. If the file is missing, tell the user
+the project has not opted in and stop — do not guess conventions.
 
 Read the repo's `CLAUDE.md` if present. The project's own rules outrank anything
 you would otherwise assume.
+
+Once the task is confirmed as non-trivial (see *When NOT to use this skill*),
+check which model this session is running as (stated in your environment
+context). If it is not Opus, tell the user plainly and recommend switching with
+`/model opus` before continuing — Step 1's interrogation is the part of this
+skill that depends most on the session's own reasoning (the `spec-challenger`
+agent in Step 3 is already pinned to `opus` in its own frontmatter, so it is
+unaffected either way), and switching mid-conversation costs nothing. Continue
+in whatever model the user chooses; this is a recommendation, not a gate.
 
 ## Step 1 — Interrogate
 
@@ -102,6 +112,19 @@ default sections:
 - **Out of scope** — explicitly. This is what stops scope creep mid-implementation.
 - **Acceptance** — observable criteria a reviewer can check without asking you.
 
+If `architect.suggestImplementationModel` is not `false`, append one more line
+after Acceptance, not gated by `specSections`:
+
+- **Suggested implementation model** — Sonnet or Opus, one line of reasoning.
+  Default to **Sonnet**: the whole point of the Contract section above is to
+  remove the ambiguity Opus is for, so a well-specified issue is normally
+  mechanical to implement. Suggest **Opus** only when real design judgment will
+  still be needed *during* implementation, not just during design — a refactor
+  touching many interdependent modules, a close call in Approach that
+  implementation may have to re-litigate, or acceptance criteria that cannot be
+  checked mechanically. This travels with the spec into the issue body, so
+  whoever picks up the implementation sees it without asking.
+
 Show the draft to the user in the conversation. Do not create the issue yet.
 
 ## Step 3 — Have it attacked
@@ -136,6 +159,7 @@ Spec ready — <title>
 Challenger raised N objections: A accepted, B rejected (reasons above).
 Cheapest alternative considered: <one line> — rejected because <one line>.
 Biggest remaining risk: <one line>.
+Suggested implementation model: <Sonnet|Opus> — <one line reason>.
 ```
 
 Ask for explicit confirmation before creating anything. If the user wants
@@ -245,8 +269,11 @@ Print, and then **stop**:
 Issue:  #<number> — <url>
 Branch: <name>
 Lane:   <n> — <worktree name>   <path>
+Model:  <Sonnet|Opus> (suggested)
 Next:   implement, then /gate before committing.
 ```
+
+Omit the `Model:` line when `architect.suggestImplementationModel` is `false`.
 
 **If the lane is not the worktree this session is running in, say so first and
 loudly** — the branch is somewhere else, and continuing here would write to the

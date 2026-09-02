@@ -66,6 +66,7 @@
   "architect": {
     "issueProvider": "github",
     "specSections": ["Problem", "Constraints", "Approach", "Contract", "Out of scope", "Acceptance"],
-    "challengeSpec": true
+    "challengeSpec": true,
+    "suggestImplementationModel": true
   }
 }

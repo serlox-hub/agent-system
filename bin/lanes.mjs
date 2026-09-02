@@ -377,6 +377,7 @@ switch (cmd) {
         issueProvider: 'github',
         specSections: ['Problem', 'Constraints', 'Approach', 'Contract', 'Out of scope', 'Acceptance'],
         challengeSpec: true,
+        suggestImplementationModel: true,
       },
     };
 
