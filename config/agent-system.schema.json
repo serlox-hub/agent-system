@@ -157,11 +157,15 @@
           "items": {
             "type": "string"
           },
-          "description": "Section headings /architect fills in, in order, when writing the spec."
+          "description": "Section headings /architect fills in, in order, when writing the spec. /architect also appends a 'Suggested implementation model' line after the last section when architect.suggestImplementationModel is not false; that line is not one of these headings and this array does not control it."
         },
         "challengeSpec": {
           "type": "boolean",
           "description": "Run the spec-challenger agent against the draft spec before creating the issue. Default true."
+        },
+        "suggestImplementationModel": {
+          "type": "boolean",
+          "description": "Append a 'Suggested implementation model' (Sonnet or Opus, with one line of reasoning) after the spec's last section, and carry it into the issue body, the confirmation summary and the final handoff. Default true."
         }
       }
     },

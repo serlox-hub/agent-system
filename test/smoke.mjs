@@ -1930,6 +1930,7 @@ test('lanes adopt writes a config a fresh repo can be verified against', () => {
   assert.equal(cfg.commands.typecheck, null, 'a script that does not exist stays null');
   assert.equal(cfg.worktreesDir, undefined, 'a single-worktree repo gets no lanes');
   assert.deepEqual(cfg.review.domainAxes, [], 'the one field a human must fill in');
+  assert.equal(cfg.architect.suggestImplementationModel, true, 'architect suggests an implementation model by default');
 });
 
 test('lanes adopt refuses to clobber an existing config without --force', () => {
