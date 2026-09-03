@@ -82,16 +82,14 @@ adopt` through a tool without a terminal) always skips it and leaves
 `worktreesDir` unset, same as before — set it later with `lanes worktrees-dir
 <path>` in that case.
 
-**Now open the generated file and fill it in.** It ships with `"$schema"` already
-pointing at this install, so every field shows its own documentation on hover in
-your editor — that's the full field reference, no separate doc page to keep in
-sync. (Not using an editor with JSON-schema support? Read
-[`config/agent-system.schema.json`](../config/agent-system.schema.json) directly,
-or [`config/example.agent-system.json`](../config/example.agent-system.json) for
-a filled-in reference.)
+**Now open the generated file and fill it in.** Field-by-field documentation
+lives in [`config/agent-system.schema.json`](../config/agent-system.schema.json)
+— read it directly, or see
+[`config/example.agent-system.json`](../config/example.agent-system.json) for a
+filled-in reference.
 
 One field `lanes adopt` cannot guess for you: **`review.domainAxes`**. Leave it
-empty and the reviewer only finds what your linter already finds. Its hover doc
+empty and the reviewer only finds what your linter already finds. The schema
 explains how to write it (short version: read your team's last 10-20 real review
 comments, keep the ones that needed product knowledge, write 3-4 of those as
 axes).

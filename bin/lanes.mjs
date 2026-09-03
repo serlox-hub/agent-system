@@ -350,10 +350,6 @@ switch (cmd) {
       }
     }
     const config = {
-      // Points editors (VSCode etc.) at this install's schema for hover docs and
-      // autocomplete on every field — the config documents itself, no separate
-      // doc page to keep in sync. Absolute, since it must resolve from any repo.
-      $schema: join(ROOT, 'config', 'agent-system.schema.json'),
       project: projectName,
       commands,
       // A guess, and flagged as one below: `--port` is right for Vite and Next
@@ -433,8 +429,7 @@ switch (cmd) {
     out(`${WARN} review.domainAxes is empty, and it is the field that decides whether`);
     out('  the reviewer is worth running. Without it you get a generic reviewer that');
     out('  finds only what your linter already found. Fill it in before relying on');
-    out('  /gate — hover the field in your editor (this file ships with $schema),');
-    out('  or read config/agent-system.schema.json, for how to write them.');
+    out(`  /gate — read ${join(ROOT, 'config', 'agent-system.schema.json')} for how to write them.`);
     out();
     out('Then: lanes doctor');
     break;

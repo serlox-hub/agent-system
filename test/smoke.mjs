@@ -2286,6 +2286,7 @@ test('lanes adopt writes an auto-detected worktreesDir to the local override, ne
   const cfg = JSON.parse(readFileSync(join(src, '.claude', 'agent-system.json'), 'utf8'));
   assert.equal(cfg.worktreesDir, undefined, 'never written into the committed config');
   assert.equal(cfg.basePort, undefined, 'basePort is per-machine too — same as worktreesDir (D22)');
+  assert.equal(cfg.$schema, undefined, 'no install-absolute path in the committed config — it rots on every other machine');
   assert.deepEqual(
     readLocalOverride(src),
     { worktreesDir: parent, basePort: 300 },

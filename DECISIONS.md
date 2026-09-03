@@ -17,6 +17,11 @@ reversed, never to make room.
 
 ---
 
+## D42 — `lanes adopt`'s generated config carries no `$schema`
+`product` · 2026-09 · `bin/lanes.mjs:adopt`
+The only `$schema` value that resolves from an arbitrary repo is an absolute path into this install, and that path lands in a file meant to be committed and shared — wrong on every teammate's machine, and it rots on your own the moment the clone moves (this repo's own config proved it, pointing at a pre-move path). Same reasoning as D22, applied to a field D22 doesn't name.
+Rejected: a raw.githubusercontent.com URL derived from the repo's own remote — investigated across several rounds of adversarial review (issue #18, closed): 404s on a private fork, needs a network call inside `adopt`, and host/branch derivation proved unreliable to get right. Also rejected: restoring the field-doc prose `c3b3dd2` removed from `docs/SETUP.md` — reintroduces the two-lists-that-drift problem D27 warns about.
+
 ## D41 — The primary session's notifications stay gated by the lane's own `ev`, not that session's own history
 `core` · 2026-08 · `ui/dashboard.mjs:liveTransitionNotifications` · #14
 The lane's own row displays lane-scoped state (`commit_blocked`, `lane_reset`), so its notifications must agree with what the row shows. `PROTECTED_LIVE_OVERRIDE` also deliberately covers states (`agent_start`, the lane-lifecycle set) that `LANE_WIDE_PROTECTED` does not.
