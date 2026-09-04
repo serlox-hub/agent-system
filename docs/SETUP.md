@@ -91,8 +91,9 @@ filled-in reference.
 One field `lanes adopt` cannot guess for you: **`review.domainAxes`**. Leave it
 empty and the reviewer only finds what your linter already finds. The schema
 explains how to write it (short version: read your team's last 10-20 real review
-comments, keep the ones that needed product knowledge, write 3-4 of those as
-axes).
+comments and your project's own guides, keep what needed product knowledge a
+linter couldn't have, write those as axes — no target count, quality sets the
+size of the list).
 
 ---
 
