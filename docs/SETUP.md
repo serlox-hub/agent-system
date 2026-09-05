@@ -200,10 +200,11 @@ entry in your shell profile, every `.claude/agent-system.json` in your repos.
 
 ## Other repo-level opt-ins (not config fields)
 
-- **`DECISIONS.md`** — if present at the repo root, `/gate` and `/architect`
-  propose entries for decisions a future session would plausibly reverse, and
-  the reviewer flags diffs that contradict a live one. Absent, they skip it
-  silently. See this repo's own `DECISIONS.md` + `CLAUDE.md` for the format.
+- **A decisions log** — `/gate` and `/architect` propose entries for decisions
+  a future session would plausibly reverse, and the reviewer flags diffs that
+  contradict a live one. It is the file itself that opts you in: no file, and
+  they skip it silently. Set `review.decisionsFile` if yours is not at the repo
+  root. See this repo's own `DECISIONS.md` + `CLAUDE.md` for the format.
 - **Lane colours** — `lanes color` — live in `~/.claude/lanes/colors`
   (`N=hex`, one per machine), deliberately *not* in the committed config: lane
   numbers come from your own worktree names, so lane 3 is a different branch on

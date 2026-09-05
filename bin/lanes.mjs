@@ -764,10 +764,11 @@ switch (cmd) {
       if (!ctx.config?.project) bad('config.project', 'missing — required');
 
       const cmds = ctx.config?.commands || {};
-      const missing = ['lint', 'typecheck', 'test'].filter((k) => !cmds[k]);
+      const gates = ctx.config?.review?.gates ?? ['lintFix', 'typecheck', 'lint', 'test'];
+      const missing = gates.filter((k) => !cmds[k]);
       missing.length
         ? warn('commands', `missing: ${missing.join(', ')} — /gate will skip those gates`)
-        : row(OK, 'commands', `lint, typecheck, test all set`);
+        : row(OK, 'commands', `${gates.join(', ')} all set`);
 
       const axes = ctx.config?.review?.domainAxes || [];
       axes.length

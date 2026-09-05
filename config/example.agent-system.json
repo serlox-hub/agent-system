@@ -54,7 +54,8 @@
       "Money paths: anything touching price, tax or discount must keep the calculation in one place and record the inputs it used. A second copy of the formula is a defect even when it agrees today.",
       "Offline-first. Users are on flaky connections — flag anything that assumes a request succeeds, or that loses local state on a failed sync.",
       "Both themes. Dark mode is the common case for our users, not an afterthought; any visual change has to be checked in both."
-    ]
+    ],
+    "gates": ["lintFix", "typecheck", "lint", "test", "build"]
   },
 
   "tests": {

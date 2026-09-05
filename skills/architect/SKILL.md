@@ -243,8 +243,10 @@ fact.
 
 ## Step 6 — Record the product decision, if there is one
 
-Only when the repo has a `DECISIONS.md`. **This step is yours because `/gate`
-cannot do it:** a `product` decision — what the tool does to its users, what it
+Only when the project has a decisions log — `review.decisionsFile` in
+`.claude/agent-system.json` names it (default `DECISIONS.md` at the repo root;
+null, or a path naming a file that is not on disk, opts out — never create the
+log uninvited). **This step is yours because `/gate` cannot do it:** a `product` decision — what the tool does to its users, what it
 refuses to do, where a boundary sits — is made in this conversation and often
 barely shows up in the diff. A reviewer reading only code will miss it every time.
 
