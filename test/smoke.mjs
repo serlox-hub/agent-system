@@ -1917,6 +1917,50 @@ test('lanes doctor blocks when worktreesDir is missing and so is its parent', ()
   assert.doesNotMatch(output, /will create it/);
 });
 
+test('lanes doctor commands row falls back to the default gate list when review.gates is unset', () => {
+  const dir = join(TMP, 'doctor-gates-default');
+  mkdirSync(dir);
+  git(dir, 'init', '-q');
+  mkdirSync(join(dir, '.claude'));
+  writeFileSync(
+    join(dir, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'doctor-gates-default', commands: { lintFix: 'x', typecheck: 'x', lint: 'x', test: 'x' } }),
+  );
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: dir, encoding: 'utf8' });
+  assert.match(output, /commands\s+lintFix, typecheck, lint, test all set/);
+});
+
+test('lanes doctor commands row lists the default gates missing from commands', () => {
+  const dir = join(TMP, 'doctor-gates-missing-default');
+  mkdirSync(dir);
+  git(dir, 'init', '-q');
+  mkdirSync(join(dir, '.claude'));
+  writeFileSync(
+    join(dir, '.claude', 'agent-system.json'),
+    JSON.stringify({ project: 'doctor-gates-missing-default', commands: { test: 'x' } }),
+  );
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: dir, encoding: 'utf8' });
+  assert.match(output, /commands\s+missing: lintFix, typecheck, lint — \/gate will skip those gates/);
+});
+
+test('lanes doctor commands row checks review.gates instead of the default list when set', () => {
+  const dir = join(TMP, 'doctor-gates-custom');
+  mkdirSync(dir);
+  git(dir, 'init', '-q');
+  mkdirSync(join(dir, '.claude'));
+  writeFileSync(
+    join(dir, '.claude', 'agent-system.json'),
+    JSON.stringify({
+      project: 'doctor-gates-custom',
+      commands: { test: 'x', build: 'x' },
+      review: { gates: ['test', 'build', 'e2e'] },
+    }),
+  );
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: dir, encoding: 'utf8' });
+  assert.match(output, /commands\s+missing: e2e — \/gate will skip those gates/);
+  assert.doesNotMatch(output, /lintFix|typecheck/, 'lintFix/typecheck are not in review.gates, so must not be checked');
+});
+
 test('lanes adopt writes a config a fresh repo can be verified against', () => {
   const fresh = join(TMP, 'fresh');
   mkdirSync(fresh);

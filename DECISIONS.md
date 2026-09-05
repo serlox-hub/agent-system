@@ -17,6 +17,27 @@ reversed, never to make room.
 
 ---
 
+## D44 — The decisions log's path is config, not a root-only convention
+`product` · 2026-09 · `agents/code-reviewer.md`, `skills/gate/SKILL.md`, `skills/architect/SKILL.md`, `config/agent-system.schema.json`
+Three places hardcoded `DECISIONS.md` at the repo root, so a consuming repo that
+keeps its log at `docs/DECISIONS.md` had the whole mechanism silently off: no
+`decision-conflict` findings, no proposed entries, and nothing saying so.
+`review.decisionsFile` names it; the file's absence still opts you out.
+Rejected: a root symlink in the consuming repo — fixes that one repo, leaves the
+next one failing the same way, and a tracked symlink is its own surprise.
+
+## D43 — `/gate`'s Phase 5 gate list is config, and `build` is opt-in
+`product` · 2026-09 · `skills/gate/SKILL.md`, `bin/lanes.mjs:doctor`, `config/agent-system.schema.json`
+`commands.build` was in the schema and `lanes adopt` generated it, but Phase 5
+hardcoded four steps and never ran it: a configured gate that silently never
+fired. `review.gates` names the ordered keys instead, so a project adds `build`,
+`e2e` or a coverage floor itself.
+Rejected: hardcoding `build` as a fifth step — same trap one project later.
+Rejected: promoting it into the default, which looks like the obvious fix for the
+bug above — `build` is free on some stacks and minutes on others, and a changed
+default silently re-prices every commit in every consuming repo. Only the project
+knows which it is, so the project says so.
+
 ## D42 — `lanes adopt`'s generated config carries no `$schema`
 `product` · 2026-09 · `bin/lanes.mjs:adopt`
 The only `$schema` value that resolves from an arbitrary repo is an absolute path into this install, and that path lands in a file meant to be committed and shared — wrong on every teammate's machine, and it rots on your own the moment the clone moves (this repo's own config proved it, pointing at a pre-move path). Same reasoning as D22, applied to a field D22 doesn't name.

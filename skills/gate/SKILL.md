@@ -22,8 +22,14 @@ user the project has not opted in, point them at
 `config/example.agent-system.json` in the agent-system repo, and stop. Do not
 invent commands — running the wrong test command is worse than running none.
 
-Bind: `$LINT`, `$LINT_FIX`, `$TYPECHECK`, `$TEST`, `$EXCLUDE` (from
-`review.excludePattern`).
+Bind `$EXCLUDE` (from `review.excludePattern`) and `$DECISIONS` (from
+`review.decisionsFile`, default `DECISIONS.md` at the repo root).
+
+Bind `$GATES` — the ordered `commands` keys from `review.gates`, defaulting to
+`lintFix, typecheck, lint, test` when the field is absent. Resolve each against
+`commands`; a key with no command, or a null one, is a gate you skip and name as
+skipped. A configured `commands.build` that `review.gates` does not list is not
+an oversight to correct: running it is the project's call, not yours.
 
 ## Phase 1 — Scope and review
 
@@ -118,16 +124,23 @@ Phases 3 and 4 modify the tree, so validating earlier would validate a state tha
 no longer exists. **This is the only place the gates run** — `code-reviewer` is
 explicitly forbidden from running them, so there is no duplicate pass.
 
-1. `$LINT_FIX` — autofix without asking.
-2. `$TYPECHECK` — no autofix. Surface errors as warnings in the summary,
+Run `$GATES` in order. Four keys carry fixed semantics:
+
+1. `lintFix` — autofix without asking.
+2. `typecheck` — no autofix. Surface errors as warnings in the summary,
    **not blocking**. Churn after a refactor is normal and the user decides.
-3. `$LINT` again — report residual warnings that `--fix` could not resolve.
-4. `$TEST` — the full suite. Phase 4 only ran the tests it wrote; this is the
+3. `lint` — report residual warnings that `--fix` could not resolve.
+4. `test` — the full suite. Phase 4 only ran the tests it wrote; this is the
    run that catches what the change broke elsewhere. Report failures as warnings
    with the failing test names, not as a block: the user decides whether a
    failure is churn or a real regression.
 
-Skip any step whose command is not configured, and say which you skipped —
+Any other key — `build`, `e2e`, whatever the project named it — runs as
+configured, and its failure is reported the same way: a warning carrying the
+actual error, never a block. Nothing in this phase stops a commit; the summary
+is what the user acts on.
+
+Skip any gate whose command is not configured, and say which you skipped —
 a silently skipped gate reads as a passing gate.
 
 ## Phase 6 — Record the decision, if there is one
@@ -149,8 +162,9 @@ For each surviving candidate, ask the user with `AskUserQuestion` (batch them
 into one call): the proposed entry text as the option `description`, plus a
 `Skip` option. Do not write an entry they did not approve.
 
-On approval, prepend the entry to `DECISIONS.md`. **If the repo has no
-`DECISIONS.md`, skip this phase entirely** rather than creating one uninvited.
+On approval, prepend the entry to `$DECISIONS`. **If `review.decisionsFile` is
+null, or the file it names is not on disk, skip this phase entirely** rather than
+creating one uninvited.
 
 Match the conventions already visible in that file. If it has none — the entries
 are freeform — use this shape, which is what the format is for:
@@ -173,7 +187,7 @@ doing the thing that was already ruled out.
 ## Phase 7 — Mark reviewed
 
 **Order matters: this must be the last thing that touches the tree** — after
-Phase 6's `DECISIONS.md` edit included. The marker is keyed to a fingerprint of
+Phase 6's `$DECISIONS` edit included. The marker is keyed to a fingerprint of
 the diff, so any edit after it invalidates it and the commit guard will fire
 again. That is correct behaviour, but confusing if you mark too early.
 
@@ -181,7 +195,7 @@ again. That is correct behaviour, but confusing if you mark too early.
 lanes reviewed
 ```
 
-If typecheck failed or lint left residual warnings, still mark it — those are
+If any gate failed or left residual warnings, still mark it — those are
 informational by design, and refusing to mark would make the guard fire for a
 reason the user already saw and accepted. Say clearly in the summary that you
 marked it despite open warnings.
@@ -220,6 +234,9 @@ Diff marked as reviewed — the commit guard will let this through until the tre
 changes again.
 ```
 
+One line per gate in `$GATES`, in order. The four above carry those fixed
+labels; any other key reports as `- <key>: clean | failed — <error>`.
+
 Prepend `⚠️ N item(s) were not auto-fixed — check before committing.` when
 anything is unresolved.
 
@@ -229,7 +246,7 @@ anything is unresolved.
 - **Never fix things the agents did not report.** Scope discipline is what makes
   the summary trustworthy.
 - **Only judgment calls reach the user.** Everything else is applied or skipped.
-- **Never write a `DECISIONS.md` entry the user did not approve**, and never
+- **Never write a `$DECISIONS` entry the user did not approve**, and never
   create the file if the repo does not already have one.
-- **`lanes reviewed` runs last**, after every edit including the `DECISIONS.md`
+- **`lanes reviewed` runs last**, after every edit including the `$DECISIONS`
   entry, or the marker is stale on arrival.

@@ -118,6 +118,20 @@
             "type": "string"
           },
           "description": "THE field that decides whether the reviewer is worth running. Judgment axes on top of architecture/duplication/documentation currency, which the reviewer already checks for free — leave this empty and you get a reviewer that finds only what your linter already found. Test for an axis: a linter could not check it; if a rule can be mechanised, put it in lint config instead, where it runs in milliseconds. How to find yours: read the last 10-20 real review comments your team left on PRs, discard everything about formatting/naming — what's left, the comments that needed someone who knows this product, is your list. Also check the project's own guides (a CLAUDE.md, an architecture doc, a decisions log) for rules already written down as load-bearing — often a better source than mining PR threads, since someone already did the curating. Write sharp axes in your team's own words, no target count — the quality bar sets the size of the list on its own: each vague or redundant one dilutes the ones that matter, so keep only what passes the linter test above, and add more later as real recurring defects surface, however many that turns out to be. Bad: 'Follow best practices', 'Code should be readable'. Good: 'Money paths: anything touching price, tax or discount must keep the calculation in one place and record the inputs it used. A second copy of the formula is a defect even when it agrees today.'"
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Ordered `commands` keys /gate runs in Phase 5, after the fixes are applied. Default [\"lintFix\", \"typecheck\", \"lint\", \"test\"]. A key with no command, or a null one, is skipped and reported as skipped. Those four carry fixed semantics: `lintFix` autofixes silently, and `typecheck`, `lint` and `test` report failures as warnings rather than blocking. Any other key runs as configured and its failure is reported the same way, so this is where the rest go — `build`, `e2e`, a coverage floor, a schema check. `build` is deliberately not in the default: it is free on some stacks and minutes on others, and only the project knows which. Weigh each addition against CI the same way — a gate that already runs there as a required check costs minutes on every commit to save minutes on every push, and one that needs Docker or rebuilds a local database is a poor fit for a per-commit gate."
+        },
+        "decisionsFile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Repo-relative path to the decisions log that /gate and /architect propose entries for, and that the reviewer checks the diff against. Default \"DECISIONS.md\" at the repo root; set it when yours lives elsewhere (\"docs/DECISIONS.md\"), or null to opt out. A path naming a file that is not on disk also counts as opting out — neither skill creates the log uninvited."
         }
       }
     },

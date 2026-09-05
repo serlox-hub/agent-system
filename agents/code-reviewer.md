@@ -34,6 +34,7 @@ Read `.claude/agent-system.json` from the repo root. You need:
 
 - `review.excludePattern` — generated/vendored paths that are not the author's work
 - `review.domainAxes` — **the project's own judgment axes**
+- `review.decisionsFile` — where the decisions log lives, if the project has one
 
 You do **not** need the `commands` block: you never run lint, typecheck, tests or
 the build. See Step 2.
@@ -44,7 +45,9 @@ user should know the run was low-value rather than assume the code is clean.
 
 Read `CLAUDE.md` if present. Project rules outrank your defaults.
 
-Read `DECISIONS.md` if present. It tells you which odd-looking code is
+Read the project's decisions log if it has one — `review.decisionsFile` names
+it (default `DECISIONS.md` at the repo root; null, or a path with no file behind
+it, means the project opted out). It tells you which odd-looking code is
 load-bearing, which saves you from reporting a "problem" that is a deliberate
 constraint. **And when the diff contradicts a live entry, that is a finding**
 (category `decision-conflict`): either the change is wrong, or the entry is now
@@ -163,7 +166,8 @@ indistinguishable from a lazy one.
 
 ## Decision candidates
 
-Only when the repo has a `DECISIONS.md` at its root. You have the ideal vantage
+Only when the project has a decisions log (`review.decisionsFile`, default
+`DECISIONS.md` at the repo root). You have the ideal vantage
 point — clean context, the whole diff read — so look for choices in this diff that
 a future session would plausibly reverse without knowing why they were made.
 
