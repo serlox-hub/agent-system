@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740" height="232" viewBox="0 0 740 232" role="img" aria-labelledby="dash-title dash-desc">
+  <title id="dash-title">lanes status, example output</title>
+  <desc id="dash-desc">Example lanes status for my-app with five lanes: lane 1 is waiting for you, lane 2 has a commit blocked that needs review, lane 3 is running the code-reviewer, lane 4 is ready to commit, and lane 5 is free and offline.</desc>
+  <style>
+    .bg{fill:#161D1A;stroke:#2A3430;stroke-width:1}
+    .sep{stroke:#2A3430;stroke-width:1}
+    text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;font-size:13px;fill:#D6DFDB}
+    .bar{font-size:12px;fill:#7B8984}
+    .proj{font-weight:700}
+    .dim{fill:#7B8984}
+    .ok{fill:#6CC383}
+    .warn{fill:#E3B24A}
+    .stop{fill:#EE7068}
+    .work{fill:#5CC0D6}
+    .l1{fill:#4FA3D1} .l2{fill:#64B36A} .l3{fill:#D1904F} .l4{fill:#B07BC9} .l5{fill:#D16B7C}
+  </style>
+  <rect class="bg" x="0.5" y="0.5" width="739" height="231" rx="8"/>
+  <text x="18" y="22" class="bar">~/my-app $ lanes status</text>
+  <text x="722" y="22" text-anchor="end" class="bar">example output</text>
+  <line class="sep" x1="1" y1="34" x2="739" y2="34"/>
+
+  <text x="18" y="60" class="proj">my-app</text>
+  <text x="18" y="82" class="dim">#</text>
+  <text x="40" y="82" class="dim">BRANCH</text>
+  <text x="330" y="82" class="dim">STATE</text>
+  <text x="528" y="82" class="dim">FOR</text>
+  <text x="584" y="82" class="dim">CTX</text>
+
+  <text x="18" y="104" class="l1">1</text>
+  <text x="40" y="104">[#412] feat/412-invoices (<tspan class="warn">~3</tspan> <tspan class="ok">+2</tspan>)</text>
+  <text x="330" y="104" class="warn">▲ waiting for you</text>
+  <text x="528" y="104" class="dim">4m12s</text>
+  <text x="584" y="104">312K·opus-5</text>
+  <text x="40" y="126" class="work">http://localhost:3001</text>
+
+  <text x="18" y="148" class="l2">2</text>
+  <text x="40" y="148">[#410] feat/410-bulk-edit (<tspan class="warn">~2</tspan> <tspan class="ok">+1</tspan>)</text>
+  <text x="330" y="148" class="stop">■ blocked, needs review</text>
+  <text x="528" y="148" class="dim">1m05s</text>
+  <text x="584" y="148">88K·sonnet-5</text>
+
+  <text x="18" y="170" class="l3">3</text>
+  <text x="40" y="170">[#405] feat/405-rate-limit (<tspan class="warn">~7</tspan>)</text>
+  <text x="330" y="170" class="ok">● code-reviewer running</text>
+  <text x="528" y="170" class="dim">30s</text>
+  <text x="584" y="170">540K·opus-5</text>
+
+  <text x="18" y="192" class="l4">4</text>
+  <text x="40" y="192">[#401] feat/401-audit-log (<tspan class="warn">~5</tspan> <tspan class="ok">+4</tspan>)</text>
+  <text x="330" y="192" class="ok">✓ ready to commit</text>
+  <text x="528" y="192" class="dim">2m40s</text>
+  <text x="584" y="192">205K·sonnet-5</text>
+
+  <text x="18" y="214" class="l5">5</text>
+  <text x="40" y="214">main (<tspan class="dim">free</tspan>)</text>
+  <text x="330" y="214" class="dim">○ offline</text>
+  <text x="528" y="214" class="dim">2d03h</text>
+  <text x="584" y="214" class="dim">—</text>
+</svg>

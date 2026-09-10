@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="990" height="274" viewBox="0 0 990 274" role="img" aria-labelledby="lanes-title lanes-desc">
+  <title id="lanes-title">Lanes over time</title>
+  <desc id="lanes-desc">Three long-lived lanes, each with its own port. Branches cycle through them: in lane 1, fix/398 is merged and the lane becomes free; in lane 2, feat/402 is merged and feat/410 takes its place; lane 3 starts free and then takes feat/405. Now, lane 1 is the only free lane, so /architect places the new task, feat/412-invoices, there.</desc>
+  <style>
+    .bg{fill:#F5F7F6}
+    .ln{fill:none;stroke:#131A17;stroke-width:1.25}
+    .ah{fill:#131A17}
+    .now{stroke:#4D5A54;stroke-width:1.25;stroke-dasharray:3 4}
+    .free{fill:none;stroke:#77837E;stroke-width:1.25;stroke-dasharray:4 3}
+    .s1{fill:#4FA3D1;fill-opacity:.18;stroke:#4FA3D1;stroke-width:1.5}
+    .s2{fill:#64B36A;fill-opacity:.18;stroke:#64B36A;stroke-width:1.5}
+    .s3{fill:#D1904F;fill-opacity:.18;stroke:#D1904F;stroke-width:1.5}
+    .k1{fill:#4FA3D1} .k2{fill:#64B36A} .k3{fill:#D1904F}
+    text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;fill:#131A17}
+    .lane{font-size:15px;font-weight:700}
+    .port,.tiny,.axis{fill:#4D5A54}
+    .port{font-size:12px}
+    .tiny{font-size:11px}
+    .axis{font-size:12px}
+    .free-t{fill:#77837E}
+    .lab{font-size:12px;font-weight:600}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#151B19}
+      .ln{stroke:#E2E9E6}
+      .ah{fill:#E2E9E6}
+      .now{stroke:#9DAAA4}
+      .free{stroke:#7A8781}
+      .s1,.s2,.s3{fill-opacity:.24}
+      text{fill:#E2E9E6}
+      .port,.tiny,.axis{fill:#9DAAA4}
+      .free-t{fill:#7A8781}
+    }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="ah" d="M0,1 L9,5 L0,9 z"/></marker>
+  </defs>
+  <rect class="bg" width="990" height="274" rx="8"/>
+  <g transform="translate(20,14)">
+    <text x="740" y="22" text-anchor="middle" class="lab">/architect · new task</text>
+    <line class="ln" x1="740" y1="28" x2="740" y2="69" marker-end="url(#ah)"/>
+
+    <rect class="k1" x="0" y="66" width="5" height="40"/>
+    <text x="16" y="84" class="lane">lane1</text>
+    <text x="16" y="101" class="port">:3001</text>
+    <rect class="s1" x="150" y="72" width="390" height="28" rx="4"/>
+    <text x="162" y="91">fix/398-login-redirect</text>
+    <text x="551" y="66" text-anchor="middle" class="tiny">merged</text>
+    <rect class="free" x="562" y="72" width="138" height="28" rx="4"/>
+    <text x="631" y="91" text-anchor="middle" class="free-t">free</text>
+    <rect class="s1" x="706" y="72" width="234" height="28" rx="4"/>
+    <text x="718" y="91">feat/412-invoices</text>
+
+    <rect class="k2" x="0" y="126" width="5" height="40"/>
+    <text x="16" y="144" class="lane">lane2</text>
+    <text x="16" y="161" class="port">:3002</text>
+    <rect class="s2" x="150" y="132" width="270" height="28" rx="4"/>
+    <text x="162" y="151">feat/402-export-csv</text>
+    <text x="431" y="126" text-anchor="middle" class="tiny">merged</text>
+    <rect class="s2" x="442" y="132" width="498" height="28" rx="4"/>
+    <text x="454" y="151">feat/410-bulk-edit</text>
+
+    <rect class="k3" x="0" y="186" width="5" height="40"/>
+    <text x="16" y="204" class="lane">lane3</text>
+    <text x="16" y="221" class="port">:3003</text>
+    <rect class="free" x="150" y="192" width="150" height="28" rx="4"/>
+    <text x="225" y="211" text-anchor="middle" class="free-t">free</text>
+    <rect class="s3" x="310" y="192" width="630" height="28" rx="4"/>
+    <text x="322" y="211">feat/405-rate-limit</text>
+
+    <line class="now" x1="703" y1="40" x2="703" y2="236"/>
+    <line class="ln" x1="150" y1="240" x2="938" y2="240" marker-end="url(#ah)"/>
+    <text x="703" y="256" text-anchor="middle" class="axis">now</text>
+    <text x="940" y="256" text-anchor="end" class="axis">time</text>
+  </g>
+</svg>

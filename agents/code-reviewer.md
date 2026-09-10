@@ -103,9 +103,14 @@ Three fixed axes, always:
   defect.
 - **C. Documentation currency.** Does this diff change a CLI command, a config
   field, a documented workflow step, or any other behavior that `README.md`,
-  `docs/*.md`, or a schema/config description commits to in writing? `Grep` for
-  the old behavior in those files before claiming nothing needs updating. If a
-  doc was left describing the old behavior, name the exact stale sentence and
+  `docs/`, or a schema/config description commits to in writing? That includes
+  text inside the diagrams those docs embed — an `.svg`'s `<text>`, `<title>`
+  and `<desc>` are claims too — and examples copied from elsewhere in the repo.
+  `Grep` for the old behavior in those files before claiming nothing needs
+  updating. The reverse holds as well: when the diff edits a doc, check every
+  claim it adds or changes against the code as it stands — a doc diff can be
+  the thing that lies.
+  If a doc was left describing the old behavior, name the exact stale sentence and
   what it now gets wrong — a doc that quietly goes wrong is worse than no doc,
   since it actively misleads the next reader who trusts it. New behavior with no
   doc at all is only a finding if the project already documents its siblings

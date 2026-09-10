@@ -17,6 +17,14 @@ reversed, never to make room.
 
 ---
 
+## D45 — The README carries the explainer (pitch, flow, costs), not a linked docs page
+`core` · 2026-09 · `README.md`
+What decides adoption is how each piece works and what it costs, so it lives in
+the README even at roughly twice its old length.
+Rejected: moving the explainer to a separate docs page linked from the README —
+the README still needs the pitch and the flow, so the page would repeat them,
+and what decides adoption would sit one click away from the people it is for.
+
 ## D44 — The decisions log's path is config, not a root-only convention
 `product` · 2026-09 · `agents/code-reviewer.md`, `skills/gate/SKILL.md`, `skills/architect/SKILL.md`, `config/agent-system.schema.json`
 Three places hardcoded `DECISIONS.md` at the repo root, so a consuming repo that
@@ -135,10 +143,10 @@ the verb removes that tension entirely.
 
 ## D27 — The exhaustive `lanes` command list lives in `docs/SETUP.md`, not `README.md`
 `core` · 2026-08 · `README.md`, `docs/SETUP.md`
-The README is the pitch, held near 100 lines, so a 19-command list would crowd
-out what actually decides whether someone adopts the tool. Keeping one
-canonical list means a new command can't be documented in one place and
-forgotten in the other.
+The README is the pitch — what the tool is for, how the flow works, what it
+costs — so the full command list would crowd out what actually decides whether
+someone adopts the tool. Keeping one canonical list means a new command can't
+be documented in one place and forgotten in the other.
 Rejected: listing every `lanes` command in the README too — it recreates two
 lists that drift, as this same diff's `agents/code-reviewer.md` fix showed:
 the pull toward re-syncing satellite files the moment the canonical location

@@ -11,9 +11,6 @@ The hook cannot talk to you directly, so it denies the call and hands the agent
 a reason; the agent then asks you whether to review first or commit anyway. If
 you choose to commit anyway it runs `lanes allow-commit` and retries.
 
-The review marker is a hash of the diff, so it cannot outlive the code it
-approved: edit one line after reviewing and the guard fires again.
-
 The block message always reports the diff's size, and escalates past
 `review.largeDiffThreshold` (default 400 changed lines) to suggest splitting
 the commit.
@@ -99,6 +96,11 @@ Stated plainly, because finding these yourself later is worse:
 - **The commit guard runs on every Bash call.** A few ms for the shell prescreen;
   the Node path (~50ms) only runs when the command mentions `commit`. The
   prescreen over-approximates on purpose — see `DECISIONS.md` D14.
+- **The guard only sees a `git commit` run directly.** It is a Claude Code hook
+  that parses the Bash command, not a git hook: a commit wrapped in
+  `bash -c '…'`, `sh -c` or a subshell is not recognised and goes through
+  unreviewed, with no `commit_*` event. `--no-verify` changes nothing either
+  way, since the hook never runs through git.
 - **The event log keeps one rotated generation** (2 MiB each). It is a dashboard
   feed, not an audit trail; if you want long-term history, ship the JSONL
   somewhere else.
@@ -115,6 +117,11 @@ Stated plainly, because finding these yourself later is worse:
   system there does not change existing behaviour on its own — you get the hooks
   and the dashboard, not the agents. Worth knowing before wondering why `/gate`
   behaves differently in one repo.
+- **A lane frees up only when its commits reach `origin/<base>`.** `isFree`
+  counts commits ahead and `lanes free` does not fetch, so a merged branch
+  frees its lane only after a fetch, and a squash- or rebase-merged one never
+  does: it stays `+N`, `/architect` skips it, and `lanes reset <n> --force`
+  reclaims it.
 
 ## Tests
 

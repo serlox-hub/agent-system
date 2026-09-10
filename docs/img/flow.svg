@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="990" height="212" viewBox="0 0 990 212" role="img" aria-labelledby="flow-title flow-desc">
+  <title id="flow-title">agent-system daily flow</title>
+  <desc id="flow-desc">Your request goes through /architect; you decide; you implement; you decide; /gate reviews, fixes, tests and marks the exact diff; you decide; git commit passes only if the diff is the one reviewed. If the diff changed after review, the commit is blocked and goes back to /gate.</desc>
+  <style>
+    .bg{fill:#F5F7F6}
+    .box{fill:#FFFFFF;stroke:#131A17;stroke-width:1.25}
+    .dash{fill:none;stroke:#77837E;stroke-width:1.25;stroke-dasharray:4 4}
+    .ln{fill:none;stroke:#131A17;stroke-width:1.25}
+    .ah{fill:#131A17}
+    .stop{fill:none;stroke:#B93E36;stroke-width:1.5;stroke-dasharray:5 4}
+    .ahs{fill:#B93E36}
+    .gate{fill:#B07A0C}
+    text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:13px;fill:#131A17}
+    .mono,.lab,.st{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+    .title{font-size:16px;font-weight:600}
+    .title.mono{font-size:15px}
+    .sub{fill:#4D5A54}
+    .lab{font-size:12px;fill:#4D5A54}
+    .gt{font-size:12.5px;font-weight:600}
+    .st{font-size:12px;font-weight:600;fill:#B93E36}
+    @media (prefers-color-scheme: dark){
+      .bg{fill:#151B19}
+      .box{fill:#1C2421;stroke:#E2E9E6}
+      .dash{stroke:#7A8781}
+      .ln{stroke:#E2E9E6}
+      .ah{fill:#E2E9E6}
+      .stop{stroke:#EC6E65}
+      .ahs{fill:#EC6E65}
+      .gate{fill:#E0AE45}
+      text{fill:#E2E9E6}
+      .sub,.lab{fill:#9DAAA4}
+      .st{fill:#EC6E65}
+    }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path class="ah" d="M0,1 L9,5 L0,9 z"/></marker>
+    <marker id="ahs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ahs" d="M0,1 L9,5 L0,9 z"/></marker>
+  </defs>
+  <rect class="bg" width="990" height="212" rx="8"/>
+  <g transform="translate(20,14)">
+    <rect class="dash" x="1" y="80" width="102" height="60" rx="4"/>
+    <text x="52" y="115" text-anchor="middle" class="title" style="font-size:14px">Your request</text>
+    <line class="ln" x1="104" y1="110" x2="148" y2="110" marker-end="url(#ah)"/>
+
+    <rect class="box" x="150" y="80" width="130" height="60" rx="4"/>
+    <text x="215" y="115" text-anchor="middle" class="title mono">/architect</text>
+    <text x="215" y="164" text-anchor="middle" class="sub">interrogates the request;</text>
+    <text x="215" y="181" text-anchor="middle" class="sub">a 2nd agent attacks the spec</text>
+
+    <line class="ln" x1="280" y1="110" x2="324" y2="110"/>
+    <polygon class="gate" points="335,99 346,110 335,121 324,110"/>
+    <line class="ln" x1="346" y1="110" x2="388" y2="110" marker-end="url(#ah)"/>
+    <text x="335" y="93" text-anchor="middle" class="lab">issue + branch</text>
+    <text x="335" y="141" text-anchor="middle" class="gt">you decide</text>
+
+    <rect class="box" x="390" y="80" width="130" height="60" rx="4"/>
+    <text x="455" y="115" text-anchor="middle" class="title">You implement</text>
+    <text x="455" y="164" text-anchor="middle" class="sub">you + the main session,</text>
+    <text x="455" y="181" text-anchor="middle" class="sub">in a free lane</text>
+
+    <line class="ln" x1="520" y1="110" x2="554" y2="110"/>
+    <polygon class="gate" points="565,99 576,110 565,121 554,110"/>
+    <line class="ln" x1="576" y1="110" x2="608" y2="110" marker-end="url(#ah)"/>
+    <text x="565" y="93" text-anchor="middle" class="lab">diff</text>
+    <text x="565" y="141" text-anchor="middle" class="gt">you decide</text>
+
+    <rect class="box" x="610" y="80" width="130" height="60" rx="4"/>
+    <text x="675" y="115" text-anchor="middle" class="title mono">/gate</text>
+    <text x="675" y="164" text-anchor="middle" class="sub">reviews, fixes, tests;</text>
+    <text x="675" y="181" text-anchor="middle" class="sub">marks the exact diff</text>
+
+    <line class="ln" x1="740" y1="110" x2="769" y2="110"/>
+    <polygon class="gate" points="780,99 791,110 780,121 769,110"/>
+    <line class="ln" x1="791" y1="110" x2="818" y2="110" marker-end="url(#ah)"/>
+    <text x="780" y="93" text-anchor="middle" class="lab">reviewed</text>
+    <text x="780" y="141" text-anchor="middle" class="gt">you decide</text>
+
+    <rect class="box" x="820" y="80" width="130" height="60" rx="4"/>
+    <text x="885" y="115" text-anchor="middle" class="title mono">git commit</text>
+    <text x="885" y="164" text-anchor="middle" class="sub">passes only if the diff</text>
+    <text x="885" y="181" text-anchor="middle" class="sub">is the one reviewed</text>
+
+    <path class="stop" d="M885,80 V42 H675 V78" marker-end="url(#ahs)"/>
+    <text x="780" y="32" text-anchor="middle" class="st">■ diff changed: blocked</text>
+  </g>
+</svg>
