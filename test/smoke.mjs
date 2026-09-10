@@ -52,7 +52,7 @@ const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed, li
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
 const { readLiveStatuses, SESSIONS_DIR } = await import(`${ROOT}/lib/live-status.mjs`);
-const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE } = await import(`${ROOT}/lib/colors.mjs`);
+const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE, COLORS_FILE } = await import(`${ROOT}/lib/colors.mjs`);
 const worktrees = await import(`${ROOT}/lib/worktrees.mjs`);
 const sv = await import(`${ROOT}/lib/services.mjs`);
 
@@ -3788,6 +3788,163 @@ test('a malicious waitingFor (control chars, an embedded ANSI escape, excessive 
   rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for tests below to trip over
 });
 
+// ── Golden frames (#19) ──────────────────────────────────────────────
+// Full-frame string equality, ANSI included, against frames captured from the
+// pre-#19 render() — the substring tests above cannot fail on a stray escape
+// code or a one-column shift, so these are the oracle for "byte-identical".
+// Every ambient input is pinned: now, TZ, the terminal width, the colours
+// file, the pidfile behind the running service, liveStatuses, ctxInfo and the
+// fold. Paths are literal and never touched on disk: declared lanes skip the
+// existsSync check, and the other two rows carry no path at all.
+// Through #19's phases these must pass unchanged — a failure here is a
+// regression in the refactor, never a reason to re-capture. A deliberate
+// visible change re-captures them in the same commit.
+const GOLDEN_NOW = Date.UTC(2026, 0, 2, 3, 4, 5);
+const goldenCfg = {
+  project: 'golden',
+  dev: { services: [
+    { name: 'web', command: 'true', portBase: 300, url: 'http://localhost:{port}' },
+    { name: 'api', command: 'true', portBase: 400 },
+  ] },
+};
+const goldenLaneInfo = [
+  {
+    lane: 1, name: 'lane1', path: '/golden/lane1', branch: 'feat/19-separate-lane-model',
+    isBase: false, holdsBaseBranch: false, dirty: true, dirtyCount: 2, ahead: 3, behind: 0, baseKnown: true,
+  },
+  {
+    lane: 2, name: 'lane2', path: '/golden/lane2', branch: 'main',
+    isBase: true, holdsBaseBranch: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  },
+];
+
+/** Fresh inputs on every call — `state` is folded in place, so no two tests may share one. */
+function goldenInputs() {
+  const T = GOLDEN_NOW;
+  const at = (ago, e, extra = {}) => ({ ts: T - ago, ev: e, project: 'golden', lane: 1, worktree: 'lane1', ...extra });
+  const state = applyEvents(createState(), [
+    at(3600e3, 'session_start', { session: 'sess-a', transcript: '/golden/a.jsonl', detail: 'startup' }),
+    at(600e3, 'agent_start', { session: 'sess-a', agent: 'code-reviewer', detail: 'Review uncommitted diff' }),
+    at(500e3, 'agent_end', { session: 'sess-a' }),
+    // Last write wins on the lane-level transcript, so the primary row's CTX
+    // only shows sess-a's own number if it resolves through sess-a (D38).
+    at(400e3, 'idle', { session: 'sess-b', transcript: '/golden/b.jsonl' }),
+    at(300e3, 'stage', { lane: 2, worktree: 'lane2', stage: 'implement', detail: '#7' }),
+    // Lane-less, and its worktree name equals its project: RECENT collapses `who` to `·`.
+    at(200e3, 'commit_blocked', { lane: null, worktree: 'golden' }),
+    { ts: T - 100e3, ev: 'agent_start', project: 'other', lane: 3, worktree: 'lane3', agent: 'test-writer', detail: 'Write tests' },
+  ]);
+  const liveStatuses = [
+    { cwd: '/golden/lane1', status: 'busy', waitingFor: null, statusUpdatedAt: T - 90e3, sessionId: 'sess-a', name: 'golden-1a', startedAt: T - 3600e3 },
+    {
+      cwd: '/golden/lane1/sub', status: 'waiting', waitingFor: `Approve ${'x'.repeat(240)}`,
+      statusUpdatedAt: T - 30e3, sessionId: 'sess-b', name: 'golden-1b', startedAt: T - 1800e3,
+    },
+    { cwd: '/elsewhere', status: 'idle', waitingFor: null, statusUpdatedAt: T, sessionId: 'sess-z', name: null, startedAt: T },
+  ];
+  const ctxInfo = new Map([
+    ['/golden/a.jsonl', { tokens: 143000, model: 'claude-opus-5' }],
+    ['/golden/b.jsonl', { tokens: 2500, model: 'claude-sonnet-5' }],
+  ]);
+  return { ctx: { project: 'golden', config: goldenCfg }, state, now: T, laneInfo: goldenLaneInfo, ctxInfo, liveStatuses };
+}
+
+/** Pins TZ, the colours file and a live pidfile for lane 1's `web` (bound to 3009, so `!`), then restores all of it. */
+function withGoldenAmbient(fn) {
+  const saved = {
+    tz: process.env.TZ,
+    columns: process.stdout.columns,
+    colors: existsSync(COLORS_FILE) ? readFileSync(COLORS_FILE, 'utf8') : null,
+  };
+  const { pidFile } = sv.resolveServices(goldenCfg, goldenLaneInfo[0])[0];
+  process.env.TZ = 'UTC';
+  mkdirSync(dirname(pidFile), { recursive: true });
+  writeFileSync(COLORS_FILE, '1=832561\n');
+  writeFileSync(pidFile, `${process.pid} 3009\n`);
+  try {
+    return fn();
+  } finally {
+    rmSync(pidFile, { force: true });
+    if (saved.colors === null) rmSync(COLORS_FILE, { force: true });
+    else writeFileSync(COLORS_FILE, saved.colors);
+    process.stdout.columns = saved.columns;
+    if (saved.tz === undefined) delete process.env.TZ;
+    else process.env.TZ = saved.tz;
+  }
+}
+
+const GOLDEN_FRAME_100 = [
+  '\x1b[1magent-system · golden\x1b[0m\x1b[2m                                                                       03:04:05\x1b[0m',
+  '',
+  '\x1b[1m#   BRANCH                               STATE                      FOR     CTX                     \x1b[0m',
+  '\x1b[2m────────────────────────────────────────────────────────────────────────────────────────────────────\x1b[0m',
+  '\x1b[2mgolden\x1b[0m',
+  '\x1b[38;2;131;37;97m1  \x1b[0m [#19] feat/19-separate-lane… (\x1b[33m~2\x1b[0m \x1b[32m+3\x1b[0m) \x1b[36m● working                 \x1b[0m \x1b[2m1m30s  \x1b[0m 143K·opus-5             \x1b[0m',
+  '\x1b[2m·  \x1b[0m \x1b[2mgolden-1b                           \x1b[0m \x1b[33m? waiting: Approve xxxxxx…\x1b[0m \x1b[33m30s    \x1b[0m 3K·sonnet-5             ',
+  '    \x1b[2mhttp://localhost:3001! (+1 more)\x1b[0m',
+  '',
+  '\x1b[38;2;100;179;106m2  \x1b[0m main (\x1b[2mfree\x1b[0m)                          \x1b[2m· no session seen         \x1b[0m \x1b[2m5m00s  \x1b[0m \x1b[2m—                       \x1b[0m',
+  '',
+  '·  \x1b[0m golden                               \x1b[31m■ blocked, needs review   \x1b[0m \x1b[2m3m20s  \x1b[0m \x1b[2m—                       \x1b[0m',
+  '',
+  '\x1b[2mother\x1b[0m',
+  '\x1b[38;2;209;144;79m3  \x1b[0m lane3                                \x1b[32m● test-writer running     \x1b[0m \x1b[2m1m40s  \x1b[0m —                       \x1b[0m',
+  '',
+  '\x1b[1mRECENT\x1b[0m',
+  '\x1b[2m03:02:25\x1b[0m  \x1b[2mother        \x1b[0m\x1b[38;2;209;144;79m3            \x1b[0m\x1b[32m● test-writer running           \x1b[0m\x1b[2mWrite tests\x1b[0m',
+  '\x1b[2m03:00:45\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[2m·            \x1b[0m\x1b[31m■ blocked, needs review         \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:59:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;100;179;106m2            \x1b[0m\x1b[36m◆ stage: implement              \x1b[0m\x1b[2m#7\x1b[0m',
+  '\x1b[2m02:57:25\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[33m▲ waiting for you               \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:55:45\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[36m● working                       \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:54:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[32m● code-reviewer running         \x1b[0m\x1b[2mReview uncommitted diff\x1b[0m',
+  '\x1b[2m02:04:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[2m○ session open                  \x1b[0m\x1b[2mstartup\x1b[0m',
+].join('\n');
+
+const GOLDEN_FRAME_84 = [
+  '\x1b[1magent-system · golden\x1b[0m\x1b[2m                                                       03:04:05\x1b[0m',
+  '',
+  '\x1b[1m#   BRANCH                                        STATE                      FOR    \x1b[0m',
+  '\x1b[2m────────────────────────────────────────────────────────────────────────────────────\x1b[0m',
+  '\x1b[2mgolden\x1b[0m',
+  '\x1b[38;2;131;37;97m1  \x1b[0m [#19] feat/19-separate-lane-model (\x1b[33m~2\x1b[0m \x1b[32m+3\x1b[0m)     \x1b[36m● working                 \x1b[0m \x1b[2m1m30s  \x1b[0m',
+  '\x1b[2m·  \x1b[0m \x1b[2mgolden-1b                                    \x1b[0m \x1b[33m? waiting: Approve xxxxxx…\x1b[0m \x1b[33m30s    \x1b[0m',
+  '    \x1b[2mhttp://localhost:3001! (+1 more)\x1b[0m',
+  '',
+  '\x1b[38;2;100;179;106m2  \x1b[0m main (\x1b[2mfree\x1b[0m)                                   \x1b[2m· no session seen         \x1b[0m \x1b[2m5m00s  \x1b[0m',
+  '',
+  '·  \x1b[0m golden                                        \x1b[31m■ blocked, needs review   \x1b[0m \x1b[2m3m20s  \x1b[0m',
+  '',
+  '\x1b[2mother\x1b[0m',
+  '\x1b[38;2;209;144;79m3  \x1b[0m lane3                                         \x1b[32m● test-writer running     \x1b[0m \x1b[2m1m40s  \x1b[0m',
+  '',
+  '\x1b[1mRECENT\x1b[0m',
+  '\x1b[2m03:02:25\x1b[0m  \x1b[2mother        \x1b[0m\x1b[38;2;209;144;79m3            \x1b[0m\x1b[32m● test-writer running           \x1b[0m\x1b[2mWrite tests\x1b[0m',
+  '\x1b[2m03:00:45\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[2m·            \x1b[0m\x1b[31m■ blocked, needs review         \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:59:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;100;179;106m2            \x1b[0m\x1b[36m◆ stage: implement              \x1b[0m\x1b[2m#7\x1b[0m',
+  '\x1b[2m02:57:25\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[33m▲ waiting for you               \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:55:45\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[36m● working                       \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:54:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[32m● code-reviewer running         \x1b[0m\x1b[2mReview uncommitted diff\x1b[0m',
+  '\x1b[2m02:04:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[2m○ session open                  \x1b[0m\x1b[2mstartup\x1b[0m',
+].join('\n');
+
+test('golden frame at 100 columns: the whole frame, ANSI included, equals the committed capture', () => {
+  withGoldenAmbient(() => {
+    process.stdout.columns = 100;
+    const { ctx, state, now, laneInfo, ctxInfo, liveStatuses } = goldenInputs();
+    const frame = render(ctx, state, now, laneInfo, ctxInfo, liveStatuses);
+    assert.equal(frame, GOLDEN_FRAME_100);
+  });
+});
+
+test('golden frame at 84 columns: CTX dropped, BRANCH widened — the whole frame still equals the committed capture', () => {
+  withGoldenAmbient(() => {
+    process.stdout.columns = 84;
+    const { ctx, state, now, laneInfo, ctxInfo, liveStatuses } = goldenInputs();
+    const frame = render(ctx, state, now, laneInfo, ctxInfo, liveStatuses);
+    assert.equal(frame, GOLDEN_FRAME_84);
+  });
+});
+
 test('liveTransitionNotifications stays silent on first observation, but still records the baseline', () => {
   const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
   const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a' }];
@@ -3815,6 +3972,15 @@ test('liveTransitionNotifications reports the waitingFor detail for a transition
   assert.equal(out[0].body, 'Needs your input: input needed');
 });
 
+test('liveTransitionNotifications bounds a long waitingFor to WAITING_FOR_MAX (200) in the notification body — the one place the bound is visible', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  const prev = new Map([['demo#lane1#sess-a', 'busy']]);
+  const waitingFor = `Approve ${'x'.repeat(240)}`;
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'waiting', waitingFor, statusUpdatedAt: 1, sessionId: 'sess-a' }];
+  const out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set());
+  assert.equal(out[0].body, `Needs your input: ${waitingFor.slice(0, 199)}…`, 'cut at 199 chars plus the ellipsis, never sent whole to osascript');
+});
+
 test('liveTransitionNotifications is deduped against a session already notified this tick via a raw event', () => {
   const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
   const prev = new Map([['demo#lane1#sess-a', 'busy']]);
@@ -3822,6 +3988,17 @@ test('liveTransitionNotifications is deduped against a session already notified 
   const out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set(['demo#lane1#sess-a']));
   assert.deepEqual(out, [], 'a Stop event already notified this session this tick, so the live transition must not double-fire');
   assert.equal(prev.get('demo#lane1#sess-a'), 'idle', 'the baseline must still update even though the notification itself was suppressed');
+});
+
+test('liveTransitionNotifications never notifies for a live status that only resolves via Object.prototype (__proto__, constructor, toString), and never throws on one', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  for (const status of ['__proto__', 'constructor', 'toString']) {
+    const prev = new Map([['demo#lane1#sess-a', 'busy']]);
+    const liveStatuses = [{ cwd: '/p/lane1', status, waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a' }];
+    let out;
+    assert.doesNotThrow(() => { out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set()); }, `${status} must not throw and drop the whole frame`);
+    assert.deepEqual(out, [], `${status} is not a notifying state — resolving it off the prototype chain sends "[object Object]"`);
+  }
 });
 
 test('liveTransitionNotifications drops its tracked baseline once the row becomes protected, or its live match disappears', () => {

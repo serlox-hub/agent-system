@@ -156,7 +156,13 @@ function stateOf(ev) {
   return Object.hasOwn(STATES, ev) ? STATES[ev] : { icon: '·', color: C.dim, label: () => ev };
 }
 
-/** Events worth a desktop notification when they arrive live. */
+/**
+ * Events worth a desktop notification when they arrive live. Looked up with
+ * `Object.hasOwn`, never a bare `NOTIFY[ev]?.()`, for the reason `stateOf`
+ * gives: `__proto__` resolves to a non-callable and throws, and inherited
+ * methods such as `constructor` and `toString` are callable and return a
+ * truthy value that is sent as a notification reading `[object Object]`.
+ */
 const NOTIFY = {
   idle: () => 'Waiting for you',
   waiting: (e) => (e.waitingFor ? `Needs your input: ${sanitize(e.waitingFor)}` : 'Needs your input'),
@@ -637,7 +643,7 @@ export function liveTransitionNotifications(rows, liveStatuses, sessionHistory, 
       const changed = seenBefore && prevLiveEv.get(key) !== live.status;
       prevLiveEv.set(key, live.status);
       if (changed && !notifiedKeys.has(key)) {
-        const body = NOTIFY[live.status]?.({ ...r, waitingFor: live.waitingFor });
+        const body = Object.hasOwn(NOTIFY, live.status) ? NOTIFY[live.status]({ ...r, waitingFor: live.waitingFor }) : null;
         if (body) {
           const title = isPrimary ? notifyTitle(r) : `${notifyTitle(r)} · ${live.name || live.sessionId}`;
           out.push({ title, body });
@@ -948,7 +954,7 @@ export async function watchStatus() {
       // dedupes against the live-session check below for the common case.
       const notifiedKeys = new Set();
       for (const e of fresh) {
-        const body = NOTIFY[e.ev]?.(e);
+        const body = Object.hasOwn(NOTIFY, e.ev) ? NOTIFY[e.ev](e) : null;
         if (body) {
           notify(notifyTitle(e), body);
           notifiedKeys.add(`${e.project || '?'}#${e.worktree ?? '?'}#${e.session ?? 'primary'}`);
