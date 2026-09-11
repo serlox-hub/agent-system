@@ -48,7 +48,8 @@ const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYP
   `${ROOT}/lib/marks.mjs`
 );
 const { EventTail, createState, applyEvents, pruneSessionHistory } = await import(`${ROOT}/lib/event-fold.mjs`);
-const { render, buildSnapshot, renderSnapshot, createLaneSource, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications } = await import(
+const { buildSnapshot, createLaneSource, notifyTitle, liveTransitionNotifications } = await import(`${ROOT}/lib/lane-model.mjs`);
+const { render, renderSnapshot, fmtTokens, fmtElapsed } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
@@ -1333,10 +1334,10 @@ test('a project with no dev.services declared resolves to none', () => {
   assert.deepEqual(sv.resolveServices(wtCfg, worktrees.enumerateLanes(wtCfg)[0]), []);
 });
 
-// boundPort is a pure helper the dashboard's serviceCell (ui/dashboard.mjs)
+// boundPort is a pure helper the snapshot's serviceFor (lib/lane-model.mjs)
 // consumes, so its own branches — not running, running-and-matching,
 // running-and-diverged, and a pidfile that never recorded a port — get direct
-// coverage here rather than only indirectly through the renderer.
+// coverage here rather than only through a snapshot over real pidfiles (D24).
 test('boundPort: stopped or running-with-a-matching-port returns the fresh port with no ! marker', () => {
   const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, lane2 — web.port is '3002'
   const [web] = sv.resolveServices(svcCfg, lane);
@@ -1501,9 +1502,9 @@ test('dashboard: first declared service running with no url template shows local
 });
 
 test('dashboard: the second declared service running (not the first) is still detected and shown, with the count of the rest', () => {
-  // Regression: serviceLine now scans every declared service for one that is
+  // Regression: serviceFor now scans every declared service for one that is
   // running, rather than checking only svcs[0] — see the comment above it in
-  // ui/dashboard.mjs. Before that fix, this exact scenario (web declared but
+  // lib/lane-model.mjs. Before that fix, this exact scenario (web declared but
   // never started, api started) rendered no line at all.
   const lane = worktrees.enumerateLanes(svcCfg)[2]; // lane3, untouched by any earlier service test
   const [, api] = sv.resolveServices(svcCfg, lane);
@@ -3790,7 +3791,7 @@ test('render falls back to the folded state exactly when liveStatuses has no mat
   assert.ok(frame.includes('waiting for you'), 'idle must render normally with an empty liveStatuses array — no crash, no change');
 });
 
-// `sanitize()` in ui/dashboard.mjs only bounds length now — stripping
+// `sanitize()` in lib/lane-model.mjs only bounds length now — stripping
 // control/ANSI bytes moved to readLiveStatuses() itself (see the
 // readLiveStatuses tests above), so the only realistic way a hostile
 // waitingFor reaches render() is through that same boundary. Fabricating an
