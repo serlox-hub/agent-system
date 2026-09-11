@@ -62,7 +62,7 @@ A state like `reviewed`/`commit_*` is a fact about the shared git tree, so a row
 Rejected: always showing every extra row unconditionally — the more literal reading of issue #14's own title, discussed directly with the user. Rejected because it would lose real protection exactly when session B itself (not A) is the one blocked by a commit.
 
 ## D39 — Lane-lifecycle events never overwrite a session's own `ev`, but must still overwrite their own lane's
-`core` · 2026-08 · `ui/dashboard.mjs:applyEvents` · #14
+`core` · 2026-08 · `lib/event-fold.mjs:applyEvents` · #14
 A `lane_created`/`removed`/`reset` event names a specific worktree — it says nothing about the session that triggered it, which may be working in a completely unrelated lane. The per-lane fold is already scoped to that lane by construction (its own key); the per-session fold is not, so it needs its own explicit exclusion.
 Rejected: applying the same exclusion to both folds for symmetry — looks cleaner, but breaks `lane_reset`/`lane_created`, where the row taking on that `ev` is literally the effect those two events exist to produce (this was actually introduced and caught mid-implementation of this same phase).
 
@@ -117,7 +117,7 @@ precise but makes the join depend on an event of the right type having been
 logged first.
 
 ## D30 — `applyEvents`'s folded `stage` field stays, though nothing renders it
-`core` · 2026-08 · `ui/dashboard.mjs:applyEvents` · #9
+`core` · 2026-08 · `lib/event-fold.mjs:applyEvents` · #9
 Dropping the STAGE column (#9) was a display decision; the field is the load-bearing half of the guard stopping a stage event from overwriting `ev`/`since`, and has its own test coverage.
 Rejected: deleting it as dead state — it looks unread, but removing it risks taking the stage-is-not-a-liveness-signal guard down with it.
 
@@ -255,7 +255,7 @@ killing the wrapper shell leaves the real dev server orphaned, and the failure i
 silent until you find the port still bound.
 
 ## D18 — State keyed to a worktree is keyed by name; reuse is closed by explicit lifecycle handling, not by the key
-`core` · 2026-08 · `lib/services.mjs:resolveServices`, `ui/dashboard.mjs:applyEvents`, `lib/worktrees.mjs:removeWorktree`
+`core` · 2026-08 · `lib/services.mjs:resolveServices`, `lib/event-fold.mjs:applyEvents`, `lib/worktrees.mjs:removeWorktree`
 Keyed by name because `lane` is `null` for any worktree outside `worktreesDir`
 — keying by lane number there is not an option at all. Under D26's `lane<N>`
 naming, name and lane number are the same value, so the key alone no longer

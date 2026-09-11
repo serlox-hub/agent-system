@@ -47,7 +47,8 @@ const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } 
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYPASS_MARK } = await import(
   `${ROOT}/lib/marks.mjs`
 );
-const { createState, applyEvents, render, buildSnapshot, renderSnapshot, createLaneSource, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications, pruneSessionHistory } = await import(
+const { EventTail, createState, applyEvents, pruneSessionHistory } = await import(`${ROOT}/lib/event-fold.mjs`);
+const { render, buildSnapshot, renderSnapshot, createLaneSource, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
@@ -575,6 +576,24 @@ test('emit() treats an event with an explicit session: undefined as owning the k
 });
 
 // ── Dashboard state ─────────────────────────────────────────────────
+
+// EventTail wasn't exported before #19 phase 3 moved it to lib/event-fold.mjs,
+// so it was only ever exercised indirectly through createLaneSource. Log
+// rotation and short reads (readSync returning fewer bytes than stat saw) are
+// known-broken and deferred to a follow-up issue — not covered here. This
+// covers a plain missing file and a malformed complete line, both independent
+// of that offset logic.
+test('EventTail.read() returns nothing for a file that does not exist yet, and skips a malformed line without throwing', () => {
+  const tailFile = join(TMP, 'event-tail-test.jsonl');
+  const tail = new EventTail(tailFile);
+  assert.deepEqual(tail.read(), [], 'no file yet — nothing to read, not a throw');
+
+  writeFileSync(tailFile, '{"ts":1,"ev":"idle"}\nnot json at all\n\n{"ts":2,"ev":"busy"}\n');
+  let events;
+  assert.doesNotThrow(() => { events = tail.read(); });
+  assert.deepEqual(events, [{ ts: 1, ev: 'idle' }, { ts: 2, ev: 'busy' }], 'the malformed and blank lines are skipped, the two valid ones are not');
+});
+
 const ev = (ts, e, extra = {}) => ({ ts, ev: e, project: 'demo', lane: 1, worktree: 'lane1', ...extra });
 
 // WORKTREE is no longer its own column (the lane redesign dropped it), so a
