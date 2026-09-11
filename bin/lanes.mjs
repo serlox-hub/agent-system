@@ -148,7 +148,7 @@ function detectCommands(root) {
 
 switch (cmd) {
   case 'status': {
-    const { printStatus, watchStatus } = await import(join(ROOT, 'ui', 'dashboard.mjs'));
+    const { printStatus, watchStatus } = await import(join(ROOT, 'ui', 'status.mjs'));
     if (rest.includes('--once')) printStatus();
     else await watchStatus();
     break;

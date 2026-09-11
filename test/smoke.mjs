@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,12 +47,15 @@ const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } 
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYPASS_MARK } = await import(
   `${ROOT}/lib/marks.mjs`
 );
-const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications, pruneSessionHistory } = await import(
+const { EventTail, createState, applyEvents, pruneSessionHistory } = await import(`${ROOT}/lib/event-fold.mjs`);
+const { buildSnapshot, createLaneSource, notifyTitle, liveTransitionNotifications } = await import(`${ROOT}/lib/lane-model.mjs`);
+const { render } = await import(`${ROOT}/ui/status.mjs`);
+const { renderSnapshot, fmtTokens, fmtElapsed } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
 const { readLiveStatuses, SESSIONS_DIR } = await import(`${ROOT}/lib/live-status.mjs`);
-const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE } = await import(`${ROOT}/lib/colors.mjs`);
+const { readColors, setColor, laneHexFor, DEFAULT_PALETTE, COLORS_FILE } = await import(`${ROOT}/lib/colors.mjs`);
 const worktrees = await import(`${ROOT}/lib/worktrees.mjs`);
 const sv = await import(`${ROOT}/lib/services.mjs`);
 
@@ -575,6 +578,24 @@ test('emit() treats an event with an explicit session: undefined as owning the k
 });
 
 // ── Dashboard state ─────────────────────────────────────────────────
+
+// EventTail wasn't exported before #19 phase 3 moved it to lib/event-fold.mjs,
+// so it was only ever exercised indirectly through createLaneSource. Log
+// rotation and short reads (readSync returning fewer bytes than stat saw) are
+// known-broken and deferred to a follow-up issue — not covered here. This
+// covers a plain missing file and a malformed complete line, both independent
+// of that offset logic.
+test('EventTail.read() returns nothing for a file that does not exist yet, and skips a malformed line without throwing', () => {
+  const tailFile = join(TMP, 'event-tail-test.jsonl');
+  const tail = new EventTail(tailFile);
+  assert.deepEqual(tail.read(), [], 'no file yet — nothing to read, not a throw');
+
+  writeFileSync(tailFile, '{"ts":1,"ev":"idle"}\nnot json at all\n\n{"ts":2,"ev":"busy"}\n');
+  let events;
+  assert.doesNotThrow(() => { events = tail.read(); });
+  assert.deepEqual(events, [{ ts: 1, ev: 'idle' }, { ts: 2, ev: 'busy' }], 'the malformed and blank lines are skipped, the two valid ones are not');
+});
+
 const ev = (ts, e, extra = {}) => ({ ts, ev: e, project: 'demo', lane: 1, worktree: 'lane1', ...extra });
 
 // WORKTREE is no longer its own column (the lane redesign dropped it), so a
@@ -1314,10 +1335,10 @@ test('a project with no dev.services declared resolves to none', () => {
   assert.deepEqual(sv.resolveServices(wtCfg, worktrees.enumerateLanes(wtCfg)[0]), []);
 });
 
-// boundPort is a pure helper the dashboard's serviceCell (ui/dashboard.mjs)
+// boundPort is a pure helper the snapshot's serviceFor (lib/lane-model.mjs)
 // consumes, so its own branches — not running, running-and-matching,
 // running-and-diverged, and a pidfile that never recorded a port — get direct
-// coverage here rather than only indirectly through the renderer.
+// coverage here rather than only through a snapshot over real pidfiles (D24).
 test('boundPort: stopped or running-with-a-matching-port returns the fresh port with no ! marker', () => {
   const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane 2, lane2 — web.port is '3002'
   const [web] = sv.resolveServices(svcCfg, lane);
@@ -1482,9 +1503,9 @@ test('dashboard: first declared service running with no url template shows local
 });
 
 test('dashboard: the second declared service running (not the first) is still detected and shown, with the count of the rest', () => {
-  // Regression: serviceLine now scans every declared service for one that is
+  // Regression: serviceFor now scans every declared service for one that is
   // running, rather than checking only svcs[0] — see the comment above it in
-  // ui/dashboard.mjs. Before that fix, this exact scenario (web declared but
+  // lib/lane-model.mjs. Before that fix, this exact scenario (web declared but
   // never started, api started) rendered no line at all.
   const lane = worktrees.enumerateLanes(svcCfg)[2]; // lane3, untouched by any earlier service test
   const [, api] = sv.resolveServices(svcCfg, lane);
@@ -1501,6 +1522,35 @@ test('dashboard: the second declared service running (not the first) is still de
   } finally {
     sv.stop(api);
   }
+});
+
+test('buildSnapshot: the service field is a plain shape — { url, port: string, moved: boolean, others } — not the "!"/"" marker or a bare string serviceText renders it into (#19)', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane2, lane 2
+  const [web] = sv.resolveServices(svcCfg, lane);
+  const started = sv.start(web);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const ctx = { ...resolveContext(lane2), config: svcCfg };
+    const snapshot = buildSnapshot(ctx, createState(), { laneInfo: [lane] });
+    const row = snapshot.groups[0].lanes[0];
+    assert.deepEqual(row.service, { url: 'http://localhost:3002', port: '3002', moved: false, others: 1 });
+    assert.equal(typeof row.service.port, 'string', 'the bound port stays a string, never coerced to a number');
+    assert.equal(typeof row.service.moved, 'boolean', 'moved is a real boolean now, not boundPort\'s own "!"/"" marker string');
+  } finally {
+    sv.stop(web);
+  }
+});
+
+test('buildSnapshot still self-heals a stale pidfile — the side effect moved into the model with serviceFor, it was not dropped (#19)', () => {
+  const lane = { lane: 1, name: 'lane1', path: '/stale-pid/lane1', branch: 'main', isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true };
+  const cfg = { project: 'stale-pid', dev: { services: [{ name: 'web', command: 'true', portBase: 300 }] } };
+  const { pidFile } = sv.resolveServices(cfg, lane)[0];
+  const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+  mkdirSync(dirname(pidFile), { recursive: true });
+  writeFileSync(pidFile, `${dead.pid} 3001\n`);
+  const snapshot = buildSnapshot({ project: 'stale-pid', config: cfg }, createState(), { now: 1, laneInfo: [lane], ctxInfo: new Map(), liveStatuses: [] });
+  assert.equal(snapshot.groups[0].lanes[0].service, null, 'a dead pid is not a running service');
+  assert.equal(existsSync(pidFile), false, 'one snapshot deletes the confirmed-dead pidfile, as one render() did before #19');
 });
 
 test('dashboard: a row with no .name (foreign project or vanished lane) is never passed into resolveServices', () => {
@@ -1848,16 +1898,17 @@ test('RECENT project tag truncates a project name longer than its 12-column widt
 
 // ── Lane colours ────────────────────────────────────────────────────
 test('lane colours fall back to the built-in palette and cycle past its end', () => {
-  const colorFor = laneColorFor({});
-  assert.equal(colorFor(1), ansi(DEFAULT_PALETTE[0]));
-  assert.equal(colorFor(DEFAULT_PALETTE.length + 1), ansi(DEFAULT_PALETTE[0]), 'cycles');
-  assert.equal(colorFor(null), '', 'a lane-less row gets no colour');
+  const hexFor = laneHexFor({});
+  assert.equal(hexFor(1), DEFAULT_PALETTE[0]);
+  assert.equal(hexFor(DEFAULT_PALETTE.length + 1), DEFAULT_PALETTE[0], 'cycles');
+  assert.equal(hexFor(null), null, 'a lane-less row gets no colour');
+  assert.equal(hexFor(-1), null, 'a lane that indexes outside the palette gets no colour, never undefined');
 });
 
 test('lanes color persists per machine and overrides the default', () => {
   setColor(2, '832561');
   assert.equal(readColors()[2], '832561');
-  assert.equal(laneColorFor()(2), ansi('832561'));
+  assert.equal(laneHexFor()(2), '#832561');
   setColor(1, '#42b883');
   assert.equal(readColors()[1], '42b883', 'a leading # is accepted and stripped');
   assert.equal(readColors()[2], '832561', 'setting one lane does not drop the others');
@@ -3753,7 +3804,7 @@ test('render falls back to the folded state exactly when liveStatuses has no mat
   assert.ok(frame.includes('waiting for you'), 'idle must render normally with an empty liveStatuses array — no crash, no change');
 });
 
-// `sanitize()` in ui/dashboard.mjs only bounds length now — stripping
+// `sanitize()` in lib/lane-model.mjs only bounds length now — stripping
 // control/ANSI bytes moved to readLiveStatuses() itself (see the
 // readLiveStatuses tests above), so the only realistic way a hostile
 // waitingFor reaches render() is through that same boundary. Fabricating an
@@ -3788,6 +3839,435 @@ test('a malicious waitingFor (control chars, an embedded ANSI escape, excessive 
   rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for tests below to trip over
 });
 
+// ── Golden frames (#19) ──────────────────────────────────────────────
+// Full-frame string equality, ANSI included, against frames captured from the
+// pre-#19 render() — the substring tests above cannot fail on a stray escape
+// code or a one-column shift, so these are the oracle for "byte-identical".
+// Every ambient input is pinned: now, TZ, the terminal width, the colours
+// file, the pidfile behind the running service, liveStatuses, ctxInfo and the
+// fold. Paths are literal and never touched on disk: declared lanes skip the
+// existsSync check, and the other two rows carry no path at all.
+// Through #19's phases these must pass unchanged — a failure here is a
+// regression in the refactor, never a reason to re-capture. A deliberate
+// visible change re-captures them in the same commit.
+const GOLDEN_NOW = Date.UTC(2026, 0, 2, 3, 4, 5);
+const goldenCfg = {
+  project: 'golden',
+  dev: { services: [
+    { name: 'web', command: 'true', portBase: 300, url: 'http://localhost:{port}' },
+    { name: 'api', command: 'true', portBase: 400 },
+  ] },
+};
+const goldenLaneInfo = [
+  {
+    lane: 1, name: 'lane1', path: '/golden/lane1', branch: 'feat/19-separate-lane-model',
+    isBase: false, holdsBaseBranch: false, dirty: true, dirtyCount: 2, ahead: 3, behind: 0, baseKnown: true,
+  },
+  {
+    lane: 2, name: 'lane2', path: '/golden/lane2', branch: 'main',
+    isBase: true, holdsBaseBranch: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+  },
+];
+
+/** Fresh inputs on every call — `state` is folded in place, so no two tests may share one. */
+function goldenInputs() {
+  const T = GOLDEN_NOW;
+  const at = (ago, e, extra = {}) => ({ ts: T - ago, ev: e, project: 'golden', lane: 1, worktree: 'lane1', ...extra });
+  const state = applyEvents(createState(), [
+    at(3600e3, 'session_start', { session: 'sess-a', transcript: '/golden/a.jsonl', detail: 'startup' }),
+    at(600e3, 'agent_start', { session: 'sess-a', agent: 'code-reviewer', detail: 'Review uncommitted diff' }),
+    at(500e3, 'agent_end', { session: 'sess-a' }),
+    // Last write wins on the lane-level transcript, so the primary row's CTX
+    // only shows sess-a's own number if it resolves through sess-a (D38).
+    at(400e3, 'idle', { session: 'sess-b', transcript: '/golden/b.jsonl' }),
+    at(300e3, 'stage', { lane: 2, worktree: 'lane2', stage: 'implement', detail: '#7' }),
+    // Lane-less, and its worktree name equals its project: RECENT collapses `who` to `·`.
+    at(200e3, 'commit_blocked', { lane: null, worktree: 'golden' }),
+    { ts: T - 100e3, ev: 'agent_start', project: 'other', lane: 3, worktree: 'lane3', agent: 'test-writer', detail: 'Write tests' },
+  ]);
+  const liveStatuses = [
+    { cwd: '/golden/lane1', status: 'busy', waitingFor: null, statusUpdatedAt: T - 90e3, sessionId: 'sess-a', name: 'golden-1a', startedAt: T - 3600e3 },
+    {
+      cwd: '/golden/lane1/sub', status: 'waiting', waitingFor: `Approve ${'x'.repeat(240)}`,
+      statusUpdatedAt: T - 30e3, sessionId: 'sess-b', name: 'golden-1b', startedAt: T - 1800e3,
+    },
+    { cwd: '/elsewhere', status: 'idle', waitingFor: null, statusUpdatedAt: T, sessionId: 'sess-z', name: null, startedAt: T },
+  ];
+  const ctxInfo = new Map([
+    ['/golden/a.jsonl', { tokens: 143000, model: 'claude-opus-5' }],
+    ['/golden/b.jsonl', { tokens: 2500, model: 'claude-sonnet-5' }],
+  ]);
+  return { ctx: { project: 'golden', config: goldenCfg }, state, now: T, laneInfo: goldenLaneInfo, ctxInfo, liveStatuses };
+}
+
+/** Pins TZ, the colours file and a live pidfile for lane 1's `web` (bound to 3009, so `!`), then restores all of it. */
+function withGoldenAmbient(fn) {
+  const saved = {
+    tz: process.env.TZ,
+    columns: process.stdout.columns,
+    colors: existsSync(COLORS_FILE) ? readFileSync(COLORS_FILE, 'utf8') : null,
+  };
+  const { pidFile } = sv.resolveServices(goldenCfg, goldenLaneInfo[0])[0];
+  process.env.TZ = 'UTC';
+  mkdirSync(dirname(pidFile), { recursive: true });
+  writeFileSync(COLORS_FILE, '1=832561\n');
+  writeFileSync(pidFile, `${process.pid} 3009\n`);
+  try {
+    return fn();
+  } finally {
+    rmSync(pidFile, { force: true });
+    if (saved.colors === null) rmSync(COLORS_FILE, { force: true });
+    else writeFileSync(COLORS_FILE, saved.colors);
+    process.stdout.columns = saved.columns;
+    if (saved.tz === undefined) delete process.env.TZ;
+    else process.env.TZ = saved.tz;
+  }
+}
+
+const GOLDEN_FRAME_100 = [
+  '\x1b[1magent-system · golden\x1b[0m\x1b[2m                                                                       03:04:05\x1b[0m',
+  '',
+  '\x1b[1m#   BRANCH                               STATE                      FOR     CTX                     \x1b[0m',
+  '\x1b[2m────────────────────────────────────────────────────────────────────────────────────────────────────\x1b[0m',
+  '\x1b[2mgolden\x1b[0m',
+  '\x1b[38;2;131;37;97m1  \x1b[0m [#19] feat/19-separate-lane… (\x1b[33m~2\x1b[0m \x1b[32m+3\x1b[0m) \x1b[36m● working                 \x1b[0m \x1b[2m1m30s  \x1b[0m 143K·opus-5             \x1b[0m',
+  '\x1b[2m·  \x1b[0m \x1b[2mgolden-1b                           \x1b[0m \x1b[33m? waiting: Approve xxxxxx…\x1b[0m \x1b[33m30s    \x1b[0m 3K·sonnet-5             ',
+  '    \x1b[2mhttp://localhost:3001! (+1 more)\x1b[0m',
+  '',
+  '\x1b[38;2;100;179;106m2  \x1b[0m main (\x1b[2mfree\x1b[0m)                          \x1b[2m· no session seen         \x1b[0m \x1b[2m5m00s  \x1b[0m \x1b[2m—                       \x1b[0m',
+  '',
+  '·  \x1b[0m golden                               \x1b[31m■ blocked, needs review   \x1b[0m \x1b[2m3m20s  \x1b[0m \x1b[2m—                       \x1b[0m',
+  '',
+  '\x1b[2mother\x1b[0m',
+  '\x1b[38;2;209;144;79m3  \x1b[0m lane3                                \x1b[32m● test-writer running     \x1b[0m \x1b[2m1m40s  \x1b[0m —                       \x1b[0m',
+  '',
+  '\x1b[1mRECENT\x1b[0m',
+  '\x1b[2m03:02:25\x1b[0m  \x1b[2mother        \x1b[0m\x1b[38;2;209;144;79m3            \x1b[0m\x1b[32m● test-writer running           \x1b[0m\x1b[2mWrite tests\x1b[0m',
+  '\x1b[2m03:00:45\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[2m·            \x1b[0m\x1b[31m■ blocked, needs review         \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:59:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;100;179;106m2            \x1b[0m\x1b[36m◆ stage: implement              \x1b[0m\x1b[2m#7\x1b[0m',
+  '\x1b[2m02:57:25\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[33m▲ waiting for you               \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:55:45\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[36m● working                       \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:54:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[32m● code-reviewer running         \x1b[0m\x1b[2mReview uncommitted diff\x1b[0m',
+  '\x1b[2m02:04:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[2m○ session open                  \x1b[0m\x1b[2mstartup\x1b[0m',
+].join('\n');
+
+const GOLDEN_FRAME_84 = [
+  '\x1b[1magent-system · golden\x1b[0m\x1b[2m                                                       03:04:05\x1b[0m',
+  '',
+  '\x1b[1m#   BRANCH                                        STATE                      FOR    \x1b[0m',
+  '\x1b[2m────────────────────────────────────────────────────────────────────────────────────\x1b[0m',
+  '\x1b[2mgolden\x1b[0m',
+  '\x1b[38;2;131;37;97m1  \x1b[0m [#19] feat/19-separate-lane-model (\x1b[33m~2\x1b[0m \x1b[32m+3\x1b[0m)     \x1b[36m● working                 \x1b[0m \x1b[2m1m30s  \x1b[0m',
+  '\x1b[2m·  \x1b[0m \x1b[2mgolden-1b                                    \x1b[0m \x1b[33m? waiting: Approve xxxxxx…\x1b[0m \x1b[33m30s    \x1b[0m',
+  '    \x1b[2mhttp://localhost:3001! (+1 more)\x1b[0m',
+  '',
+  '\x1b[38;2;100;179;106m2  \x1b[0m main (\x1b[2mfree\x1b[0m)                                   \x1b[2m· no session seen         \x1b[0m \x1b[2m5m00s  \x1b[0m',
+  '',
+  '·  \x1b[0m golden                                        \x1b[31m■ blocked, needs review   \x1b[0m \x1b[2m3m20s  \x1b[0m',
+  '',
+  '\x1b[2mother\x1b[0m',
+  '\x1b[38;2;209;144;79m3  \x1b[0m lane3                                         \x1b[32m● test-writer running     \x1b[0m \x1b[2m1m40s  \x1b[0m',
+  '',
+  '\x1b[1mRECENT\x1b[0m',
+  '\x1b[2m03:02:25\x1b[0m  \x1b[2mother        \x1b[0m\x1b[38;2;209;144;79m3            \x1b[0m\x1b[32m● test-writer running           \x1b[0m\x1b[2mWrite tests\x1b[0m',
+  '\x1b[2m03:00:45\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[2m·            \x1b[0m\x1b[31m■ blocked, needs review         \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:59:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;100;179;106m2            \x1b[0m\x1b[36m◆ stage: implement              \x1b[0m\x1b[2m#7\x1b[0m',
+  '\x1b[2m02:57:25\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[33m▲ waiting for you               \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:55:45\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[36m● working                       \x1b[0m\x1b[2m\x1b[0m',
+  '\x1b[2m02:54:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[32m● code-reviewer running         \x1b[0m\x1b[2mReview uncommitted diff\x1b[0m',
+  '\x1b[2m02:04:05\x1b[0m  \x1b[2mgolden       \x1b[0m\x1b[38;2;131;37;97m1            \x1b[0m\x1b[2m○ session open                  \x1b[0m\x1b[2mstartup\x1b[0m',
+].join('\n');
+
+test('golden frame at 100 columns: the whole frame, ANSI included, equals the committed capture', () => {
+  withGoldenAmbient(() => {
+    process.stdout.columns = 100;
+    const { ctx, state, now, laneInfo, ctxInfo, liveStatuses } = goldenInputs();
+    const frame = render(ctx, state, now, laneInfo, ctxInfo, liveStatuses);
+    assert.equal(frame, GOLDEN_FRAME_100);
+  });
+});
+
+test('golden frame at 84 columns: CTX dropped, BRANCH widened — the whole frame still equals the committed capture', () => {
+  withGoldenAmbient(() => {
+    process.stdout.columns = 84;
+    const { ctx, state, now, laneInfo, ctxInfo, liveStatuses } = goldenInputs();
+    const frame = render(ctx, state, now, laneInfo, ctxInfo, liveStatuses);
+    assert.equal(frame, GOLDEN_FRAME_84);
+  });
+});
+
+test('the golden snapshot is plain JSON: a JSON round trip deep-equals it, and the copy renders both golden frames', () => {
+  withGoldenAmbient(() => {
+    const { ctx, state, now, laneInfo, ctxInfo, liveStatuses } = goldenInputs();
+    const snapshot = buildSnapshot(ctx, state, { now, laneInfo, ctxInfo, liveStatuses });
+    const copy = JSON.parse(JSON.stringify(snapshot));
+    assert.deepEqual(copy, snapshot, 'no Map, no undefined, no class instance — nothing JSON would drop or flatten');
+    assert.equal(renderSnapshot(copy, { width: 100 }), GOLDEN_FRAME_100);
+    assert.equal(renderSnapshot(copy, { width: 84 }), GOLDEN_FRAME_84);
+  });
+});
+
+test('renderSnapshot takes its width from the caller only, never process.stdout.columns, and clamps it per D29', () => {
+  withGoldenAmbient(() => {
+    process.stdout.columns = 60;
+    const { ctx, state, now, laneInfo, ctxInfo, liveStatuses } = goldenInputs();
+    const snapshot = buildSnapshot(ctx, state, { now, laneInfo, ctxInfo, liveStatuses });
+    assert.equal(renderSnapshot(snapshot, { width: 100 }), GOLDEN_FRAME_100, 'a 60-column terminal must not leak into a 100-column render');
+    assert.equal(renderSnapshot(snapshot, { width: 200 }), GOLDEN_FRAME_100, 'capped at 100 however wide');
+    assert.equal(renderSnapshot(snapshot, {}), GOLDEN_FRAME_100, 'an unknown width renders at 100');
+  });
+});
+
+test('import boundary: ui/dashboard.mjs imports only ansi from lib/colors.mjs, and no lib/ module imports from ui/ (#19)', () => {
+  const importsOf = (file) => {
+    const src = readFileSync(join(ROOT, file), 'utf8');
+    assert.ok(!/\bimport\(/.test(src), `${file} has a dynamic import, which this check cannot see through`);
+    return [...src.matchAll(/^import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"]/gm)].map(([, names, from]) => ({ names: names.replace(/\s+/g, ' '), from }));
+  };
+  assert.deepEqual(importsOf('ui/dashboard.mjs'), [{ names: '{ ansi }', from: '../lib/colors.mjs' }], 'the renderer stays pure: no I/O module, no model');
+  // `process` is a global — no import to catch — so the renderer's other half of pure is checked on its source.
+  assert.ok(!/\bprocess\s*[.[]/.test(readFileSync(join(ROOT, 'ui', 'dashboard.mjs'), 'utf8')), 'the renderer reads no process state: its caller passes the width in');
+  for (const file of readdirSync(join(ROOT, 'lib')).filter((f) => f.endsWith('.mjs'))) {
+    const src = readFileSync(join(ROOT, 'lib', file), 'utf8');
+    assert.ok(!/\bimport\(/.test(src), `lib/${file} has a dynamic import, which this check cannot see through`);
+    // Every static specifier: `import … from`, `export … from` and a bare `import '…'`.
+    for (const m of src.matchAll(/\bfrom\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]/gm)) {
+      const spec = m[1] ?? m[2];
+      assert.ok(!/(^|\/)ui\//.test(spec), `lib/${file} imports ${spec} — the dependency runs ui/ → lib/, never back`);
+    }
+  }
+});
+
+// ── Snapshot model (#19) ─────────────────────────────────────────────
+// buildSnapshot asserted as data — no frame, no string matching. The
+// render()-based tests above stay as the end-to-end coverage of the same rules.
+const modelLaneInfo = [{
+  lane: 1, name: 'lane1', path: '/m/lane1', branch: 'feat/1-x',
+  isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+}];
+const modelLane = (state, liveStatuses, ctxInfo = new Map()) =>
+  buildSnapshot({ project: 'demo', config: {} }, state, { now: 10_000, laneInfo: modelLaneInfo, ctxInfo, liveStatuses }).groups[0].lanes[0];
+const liveAt = (sessionId, cwd, startedAt, status = 'idle') => ({ cwd, status, waitingFor: null, statusUpdatedAt: 5000, sessionId, name: null, startedAt });
+
+test('buildSnapshot: extraSessions follow D37 — exact cwd first, then ascending startedAt, then sessionId — whatever order liveStatuses arrives in', () => {
+  const live = [
+    liveAt('sess-late', '/m/lane1/sub', 300),
+    liveAt('sess-tie-b', '/m/lane1/sub', 200),
+    liveAt('sess-exact', '/m/lane1', 999, 'busy'),
+    liveAt('sess-tie-a', '/m/lane1/sub', 200),
+  ];
+  for (const order of [live, [...live].reverse()]) {
+    const lane = modelLane(createState(), order);
+    assert.equal(lane.ev, 'busy', 'the exact-cwd session is primary although it started last');
+    assert.deepEqual(lane.extraSessions.map((s) => s.sessionId), ['sess-tie-a', 'sess-tie-b', 'sess-late']);
+  }
+});
+
+test('buildSnapshot: with two sessions in one lane, context comes from the primary session\'s own transcript, not the lane-level last write (D38)', () => {
+  const state = applyEvents(createState(), [
+    ev(1, 'session_start', { session: 'sess-a', transcript: '/m/a.jsonl' }),
+    ev(2, 'idle', { session: 'sess-b', transcript: '/m/b.jsonl' }),
+  ]);
+  const ctxInfo = new Map([
+    ['/m/a.jsonl', { tokens: 40000, model: 'claude-sonnet-5' }],
+    ['/m/b.jsonl', { tokens: 310000, model: 'claude-sonnet-5' }],
+  ]);
+  const lane = modelLane(state, [liveAt('sess-a', '/m/lane1', 1, 'busy'), liveAt('sess-b', '/m/lane1/sub', 2)], ctxInfo);
+  assert.deepEqual(lane.context, { tokens: 40000, model: 'claude-sonnet-5' }, 'sess-a\'s own count, though the lane-level fold holds sess-b\'s transcript');
+  assert.deepEqual(lane.extraSessions.map((s) => [s.sessionId, s.context]), [['sess-b', { tokens: 310000, model: 'claude-sonnet-5' }]]);
+});
+
+test('buildSnapshot: a session\'s own lane-wide-protected state removes only its own extraSessions entry (D40)', () => {
+  const state = applyEvents(createState(), [ev(1, 'commit_blocked', { session: 'sess-b' })]);
+  const lane = modelLane(state, [liveAt('sess-a', '/m/lane1', 1, 'busy'), liveAt('sess-b', '/m/lane1/b', 2), liveAt('sess-c', '/m/lane1/c', 3)]);
+  assert.equal(lane.ev, 'commit_blocked', 'the lane itself still reflects the shared tree\'s state');
+  assert.deepEqual(lane.extraSessions.map((s) => s.sessionId), ['sess-c'], 'sess-b\'s own commit_blocked hides sess-b; sess-c has no protected history and stays');
+});
+
+test('buildSnapshot: the live override leaves commit_blocked untouched and replaces agent_end — ev, since and waitingFor alike', () => {
+  const blocked = modelLane(applyEvents(createState(), [ev(7, 'commit_blocked')]), [liveAt('sess-a', '/m/lane1', 1, 'busy')]);
+  assert.deepEqual([blocked.ev, blocked.since, blocked.live], ['commit_blocked', 7, false]);
+
+  const waiting = { ...liveAt('sess-a', '/m/lane1', 1, 'waiting'), waitingFor: 'input needed', statusUpdatedAt: 9000 };
+  const ended = modelLane(applyEvents(createState(), [ev(7, 'agent_start', { agent: 'test-writer' }), ev(8, 'agent_end')]), [waiting]);
+  assert.deepEqual([ended.ev, ended.since, ended.waitingFor, ended.live], ['waiting', 9000, 'input needed', true]);
+});
+
+test('buildSnapshot bounds a long waitingFor to WAITING_FOR_MAX (200) exactly once — the lane\'s own row, an extra session, and RECENT history all get it from here, not by re-bounding it themselves', () => {
+  const long = 'x'.repeat(240);
+  const bounded = `${long.slice(0, 199)}…`;
+  const live = [
+    { ...liveAt('sess-a', '/m/lane1', 1, 'waiting'), waitingFor: long },
+    { ...liveAt('sess-b', '/m/lane1/sub', 2, 'waiting'), waitingFor: long },
+  ];
+  const lane = modelLane(createState(), live);
+  assert.equal(lane.waitingFor, bounded, 'the primary row\'s own waitingFor is bounded too, not only an extra session\'s');
+  assert.equal(lane.extraSessions[0].waitingFor, bounded, 'an extra session\'s waitingFor is bounded the same way');
+
+  const state = applyEvents(createState(), [ev(1, 'waiting', { waitingFor: long })]);
+  const snapshot = buildSnapshot({ project: 'demo', config: {} }, state, { now: 10_000, laneInfo: modelLaneInfo, liveStatuses: [] });
+  assert.equal(snapshot.history[0].waitingFor, bounded, 'RECENT history carries the same bound, applied once on the model side');
+});
+
+test('buildSnapshot: history entries normalize a raw event into the snapshot shape — missing optional fields become null, not undefined, and colour follows the event\'s own lane, null when it has none', () => {
+  const state = applyEvents(createState(), [
+    ev(1, 'stage', { stage: 'implement', agent: 'test-writer', detail: 'doing the thing' }),
+    { ts: 2, ev: 'lane_created', project: 'demo', worktree: 'ghost' }, // no lane at all — a foreign/vanished entry
+  ]);
+  const snapshot = buildSnapshot({ project: 'demo', config: {} }, state, { now: 10_000, laneInfo: modelLaneInfo, liveStatuses: [] });
+  const [staged, ghost] = snapshot.history;
+
+  const { color: stagedColor, ...stagedRest } = staged;
+  assert.deepEqual(stagedRest, {
+    ts: 1, project: 'demo', lane: 1, worktree: 'lane1', ev: 'stage',
+    detail: 'doing the thing', agent: 'test-writer', stage: 'implement', waitingFor: null,
+  });
+  assert.equal(typeof stagedColor, 'string', 'a laned entry carries a real colour string');
+
+  const { color: ghostColor, ...ghostRest } = ghost;
+  assert.deepEqual(ghostRest, {
+    ts: 2, project: 'demo', lane: null, worktree: 'ghost', ev: 'lane_created',
+    detail: null, agent: null, stage: null, waitingFor: null,
+  });
+  assert.equal(ghostColor, null, 'no lane means no colour to key off of — null, not undefined or an empty string');
+});
+
+// ── Lane source (#19) ────────────────────────────────────────────────
+// createLaneSource is watchStatus's refresh cycle without the TTY, so its
+// notification path is testable at last. Real (sandboxed) events log and
+// sessions dir; events are appended directly rather than through emit(), so
+// no ambient session id or log rotation can leak into what a test asserts.
+const appendEvent = (e) => appendFileSync(join(LANES_DIR, 'events.jsonl'), `${JSON.stringify(e)}\n`);
+const recordingSource = () => {
+  const notified = [];
+  const source = createLaneSource(resolveContext(lane2), { onNotify: (n) => notified.push(n) });
+  return { source, notified };
+};
+
+test('createLaneSource: replayed history hands nothing to onNotify, and an appended idle is handed over exactly once, with today\'s title and body', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  appendEvent({ ts: 1, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1' }); // already history once the source is built
+  const { source, notified } = recordingSource();
+  source.advance();
+  assert.deepEqual(notified, [], 'the existing log is replayed into state, never notified');
+
+  appendEvent({ ts: 2, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1', issue: '401' });
+  source.advance();
+  assert.deepEqual(notified, [{ title: 'demo · lane 1 · #401', body: 'Waiting for you' }]);
+  source.advance();
+  assert.equal(notified.length, 1, 'an event is news once — the next tick reads nothing new');
+});
+
+test('createLaneSource: a raw idle and a live busy→idle transition for the same session in one tick notify once, not twice', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const writeLive = (status) => writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: join(wtDir, 'lane1'), status, sessionId: 'sess-src', statusUpdatedAt: 1 }),
+  );
+  try {
+    // An unprotected lane state first: under a protected one (the suite's
+    // own commit_blocked, say) no baseline is recorded, no transition can
+    // fire, and the dedup below would pass without being exercised.
+    appendEvent({ ts: 1, ev: 'busy', project: 'demo', lane: 1, worktree: 'lane1', session: 'sess-src' });
+    writeLive('busy');
+    const { source, notified } = recordingSource();
+    source.advance();
+    assert.deepEqual(notified, [], 'first observation only records the baseline');
+
+    writeLive('idle');
+    appendEvent({ ts: 2, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1', session: 'sess-src' });
+    source.advance();
+    assert.deepEqual(notified, [{ title: 'demo · lane 1', body: 'Waiting for you' }], 'the raw event notifies; the same session\'s live transition is deduped against it');
+
+    writeLive('waiting');
+    source.advance();
+    assert.equal(notified.length, 2, 'control: a live transition with no raw event in its tick does notify');
+  } finally {
+    rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  }
+});
+
+test('createLaneSource: a raw event whose ev only resolves via Object.prototype notifies nothing and never throws', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  const { source, notified } = recordingSource();
+  for (const e of ['__proto__', 'constructor', 'toString']) appendEvent({ ts: 3, ev: e, project: 'demo', lane: 1, worktree: 'lane1' });
+  assert.doesNotThrow(() => source.advance());
+  assert.deepEqual(notified, [], 'none of these is a notifying event — resolving one off the prototype chain sends "[object Object]"');
+});
+
+test('createLaneSource: snapshot() before any advance() throws, rather than quietly reading git for its lanes', () => {
+  const { source } = recordingSource();
+  assert.throws(() => source.snapshot(), /before the first advance/);
+  source.advance();
+  assert.doesNotThrow(() => source.snapshot());
+});
+
+test('createLaneSource: a raw-event notification is handed over before anything later in the tick can throw — why advance() does not return them', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  const notified = [];
+  // `config` is first read by the 20-tick refresh, after the fold — a late throw.
+  const source = createLaneSource({ project: 'demo', get config() { throw new Error('late failure'); } }, { onNotify: (n) => notified.push(n) });
+  appendEvent({ ts: 4, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1' });
+  assert.throws(() => source.advance(), /late failure/);
+  assert.deepEqual(notified, [{ title: 'demo · lane 1', body: 'Waiting for you' }], 'the event was consumed from the log, so its notification must already be out');
+});
+
+test('createLaneSource: an onNotify that throws costs neither the fold of events already read nor the rest of the tick\'s notifications', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  let calls = 0;
+  const source = createLaneSource(resolveContext(lane2), { onNotify: () => { calls += 1; throw new Error('notifier down'); } });
+  appendEvent({ ts: 5, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1', detail: 'throwing-notifier-a' });
+  appendEvent({ ts: 6, ev: 'idle', project: 'demo', lane: 2, worktree: 'lane2', detail: 'throwing-notifier-b' });
+  assert.doesNotThrow(() => source.advance());
+  assert.equal(calls, 2, 'the second notification is still handed over after the first one threw');
+  const details = source.snapshot().history.map((e) => e.detail);
+  assert.ok(details.includes('throwing-notifier-a') && details.includes('throwing-notifier-b'), 'both events were folded although their notifier threw');
+});
+
+test('createLaneSource: snapshot() reuses the last advance()\'s reads, live statuses refresh on every advance(), git and transcripts only on every 20th', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const lane3Path = join(wtDir, 'lane3');
+  const probe = join(lane3Path, 'throttle-probe.txt');
+  const usage = (tokens) => [assistantLine('claude-sonnet-5', { input_tokens: tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 })];
+  // Outside the worktree, so rewriting it never shows up in `marks`.
+  const transcript = writeTranscript('throttle-ctx.jsonl', usage(1000));
+  const writeLive = (status) => writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: lane3Path, status, sessionId: 'sess-cost', statusUpdatedAt: 1 }),
+  );
+  try {
+    appendEvent({ ts: 1, ev: 'busy', project: 'demo', lane: 3, worktree: 'lane3', session: 'sess-cost', transcript });
+    writeLive('busy');
+    const { source } = recordingSource();
+    const lane3 = () => source.snapshot().groups[0].lanes.find((l) => l.lane === 3);
+    source.advance(); // tick 0: the first refresh
+    const marksBefore = lane3().marks;
+    assert.equal(lane3().ev, 'busy');
+    assert.equal(lane3().context.tokens, 1000);
+
+    writeLive('idle');
+    writeFileSync(probe, 'x'); // one more untracked file: marks change once git is re-read
+    writeTranscript('throttle-ctx.jsonl', usage(2000));
+    assert.equal(lane3().ev, 'busy', 'snapshot() alone re-reads nothing, not even the cheap live statuses');
+    assert.equal(lane3().context.tokens, 1000, 'nor a transcript');
+
+    for (let tick = 1; tick < 20; tick++) source.advance();
+    assert.equal(lane3().ev, 'idle', 'live statuses are re-read on every advance()');
+    assert.deepEqual(lane3().marks, marksBefore, 'git is not re-read before the 20th advance()');
+    assert.equal(lane3().context.tokens, 1000, 'nor transcripts');
+
+    source.advance(); // tick 20
+    assert.notDeepEqual(lane3().marks, marksBefore, 'the 20th advance() refreshes git, and the new file shows up');
+    assert.equal(lane3().context.tokens, 2000, 'and re-reads the transcripts on screen');
+  } finally {
+    rmSync(probe, { force: true });
+    rmSync(transcript, { force: true });
+    rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  }
+});
+
 test('liveTransitionNotifications stays silent on first observation, but still records the baseline', () => {
   const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
   const liveStatuses = [{ cwd: '/p/lane1', status: 'idle', waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a' }];
@@ -3815,6 +4295,15 @@ test('liveTransitionNotifications reports the waitingFor detail for a transition
   assert.equal(out[0].body, 'Needs your input: input needed');
 });
 
+test('liveTransitionNotifications bounds a long waitingFor to WAITING_FOR_MAX (200) in the notification body — the one place the bound is visible', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  const prev = new Map([['demo#lane1#sess-a', 'busy']]);
+  const waitingFor = `Approve ${'x'.repeat(240)}`;
+  const liveStatuses = [{ cwd: '/p/lane1', status: 'waiting', waitingFor, statusUpdatedAt: 1, sessionId: 'sess-a' }];
+  const out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set());
+  assert.equal(out[0].body, `Needs your input: ${waitingFor.slice(0, 199)}…`, 'cut at 199 chars plus the ellipsis, never sent whole to osascript');
+});
+
 test('liveTransitionNotifications is deduped against a session already notified this tick via a raw event', () => {
   const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
   const prev = new Map([['demo#lane1#sess-a', 'busy']]);
@@ -3822,6 +4311,17 @@ test('liveTransitionNotifications is deduped against a session already notified 
   const out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set(['demo#lane1#sess-a']));
   assert.deepEqual(out, [], 'a Stop event already notified this session this tick, so the live transition must not double-fire');
   assert.equal(prev.get('demo#lane1#sess-a'), 'idle', 'the baseline must still update even though the notification itself was suppressed');
+});
+
+test('liveTransitionNotifications never notifies for a live status that only resolves via Object.prototype (__proto__, constructor, toString), and never throws on one', () => {
+  const rows = [{ project: 'demo', worktree: 'lane1', path: '/p/lane1', ev: 'busy' }];
+  for (const status of ['__proto__', 'constructor', 'toString']) {
+    const prev = new Map([['demo#lane1#sess-a', 'busy']]);
+    const liveStatuses = [{ cwd: '/p/lane1', status, waitingFor: null, statusUpdatedAt: 1, sessionId: 'sess-a' }];
+    let out;
+    assert.doesNotThrow(() => { out = liveTransitionNotifications(rows, liveStatuses, new Map(), prev, new Set()); }, `${status} must not throw and drop the whole frame`);
+    assert.deepEqual(out, [], `${status} is not a notifying state — resolving it off the prototype chain sends "[object Object]"`);
+  }
 });
 
 test('liveTransitionNotifications drops its tracked baseline once the row becomes protected, or its live match disappears', () => {

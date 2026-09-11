@@ -52,27 +52,27 @@ The only `$schema` value that resolves from an arbitrary repo is an absolute pat
 Rejected: a raw.githubusercontent.com URL derived from the repo's own remote — investigated across several rounds of adversarial review (issue #18, closed): 404s on a private fork, needs a network call inside `adopt`, and host/branch derivation proved unreliable to get right. Also rejected: restoring the field-doc prose `0127570` removed from `docs/SETUP.md` — reintroduces the two-lists-that-drift problem D27 warns about.
 
 ## D41 — The primary session's notifications stay gated by the lane's own `ev`, not that session's own history
-`core` · 2026-08 · `ui/dashboard.mjs:liveTransitionNotifications` · #14
+`core` · 2026-08 · `lib/lane-model.mjs:liveTransitionNotifications` · #14
 The lane's own row displays lane-scoped state (`commit_blocked`, `lane_reset`), so its notifications must agree with what the row shows. `PROTECTED_LIVE_OVERRIDE` also deliberately covers states (`agent_start`, the lane-lifecycle set) that `LANE_WIDE_PROTECTED` does not.
 Rejected: unifying both gates on the session's own history now that `sessionHistory` exists, for symmetry with the extra-row gate. Loses twice: D39 excludes lane-lifecycle events from the session fold entirely, so the primary would lose that protection right after a `lane_reset`; and `agent_start` would stop protecting the primary row.
 
 ## D40 — An extra session row is hidden based on that session's own folded state, not the primary row's
-`core` · 2026-08 · `ui/dashboard.mjs` · #14
+`core` · 2026-08 · `lib/lane-model.mjs` · #14
 A state like `reviewed`/`commit_*` is a fact about the shared git tree, so a row asserting a different liveness state right next to it would contradict its own lane's row. Gating on the session's OWN history keeps that protection without hiding a genuinely independent session.
 Rejected: always showing every extra row unconditionally — the more literal reading of issue #14's own title, discussed directly with the user. Rejected because it would lose real protection exactly when session B itself (not A) is the one blocked by a commit.
 
 ## D39 — Lane-lifecycle events never overwrite a session's own `ev`, but must still overwrite their own lane's
-`core` · 2026-08 · `ui/dashboard.mjs:applyEvents` · #14
+`core` · 2026-08 · `lib/event-fold.mjs:applyEvents` · #14
 A `lane_created`/`removed`/`reset` event names a specific worktree — it says nothing about the session that triggered it, which may be working in a completely unrelated lane. The per-lane fold is already scoped to that lane by construction (its own key); the per-session fold is not, so it needs its own explicit exclusion.
 Rejected: applying the same exclusion to both folds for symmetry — looks cleaner, but breaks `lane_reset`/`lane_created`, where the row taking on that `ev` is literally the effect those two events exist to produce (this was actually introduced and caught mid-implementation of this same phase).
 
 ## D38 — The primary row's CTX resolves through its own live session when known, not only the lane-level transcript
-`core` · 2026-08 · `ui/dashboard.mjs:render` · #14
+`core` · 2026-08 · `lib/lane-model.mjs:snapshotLane` · #14
 `state.lanes`'s `transcript` field is last-write-wins across every session sharing a worktree, not scoped per session — with two sessions in one lane it could silently show the wrong session's token count. Invisible until Phase 3 gave each session its own row to compare against.
 Rejected: leaving it "unchanged," as the Phase 4 spec text literally said — that would have preserved a bug this same phase makes visible for the first time (the same number shown twice, one of them mislabeled).
 
 ## D37 — Among a lane's live sessions, the oldest is primary: exact-cwd match first, then ascending `startedAt`, then `sessionId`
-`core` · 2026-08 · `ui/dashboard.mjs:findLiveStatuses` · #14
+`core` · 2026-08 · `lib/lane-model.mjs:findLiveStatuses` · #14
 Under D20 a lane is one long-lived branch, so its longest-running session is the one the lane's row represents; a session launched from the lane root outranks one launched from a subdirectory because it is the lane's own session rather than an incidental one; `sessionId` is the last resort D36 guarantees is always present.
 Rejected: descending `startedAt` (newest wins) or most-recent `statusUpdatedAt` — both make the row's identity jump every time a second session is opened in the lane or changes state, reintroducing the per-tick instability this phase set out to remove.
 
@@ -88,7 +88,7 @@ Rejected: `event.session ?? process.env.CLAUDE_CODE_SESSION_ID ?? null` — cann
 Rejected: threading the env fallback through each of the five `bin/lanes.mjs` call sites individually — a call site added later would silently emit unattributed, with no test to catch it.
 
 ## D33 — `agent_end` is excluded from `PROTECTED_LIVE_OVERRIDE`, but `agent_start` stays protected
-`core` · 2026-08 · `ui/dashboard.mjs:PROTECTED_LIVE_OVERRIDE` · #12
+`core` · 2026-08 · `lib/lane-model.mjs:PROTECTED_LIVE_OVERRIDE` · #12
 `STATES.agent_end` renders byte-identical to `busy`, so overriding it with a
 live status loses no information, and protecting it left the
 interrupted-mid-subagent case stuck exactly like the bug #12 exists to fix.
@@ -107,7 +107,7 @@ tempting since the field is right there, but reintroduces the per-tick
 subprocess spawn the 20-tick throttle on `laneInfo`/`ctxInfo` exists to avoid.
 
 ## D31 — The live-status join key is the lane's filesystem path (prefix match), not the session id
-`core` · 2026-08 · `ui/dashboard.mjs:findLiveStatuses` · #12
+`core` · 2026-08 · `lib/lane-model.mjs:findLiveStatuses` · #12
 Every lane already has a `path` with no dependency on any event ever being
 logged, so the join works for a freshly created lane and survives log
 rotation; `session` is missing from `lane_reset`/`commit_*`/`reviewed` events
@@ -117,12 +117,12 @@ precise but makes the join depend on an event of the right type having been
 logged first.
 
 ## D30 — `applyEvents`'s folded `stage` field stays, though nothing renders it
-`core` · 2026-08 · `ui/dashboard.mjs:applyEvents` · #9
+`core` · 2026-08 · `lib/event-fold.mjs:applyEvents` · #9
 Dropping the STAGE column (#9) was a display decision; the field is the load-bearing half of the guard stopping a stage event from overwriting `ev`/`since`, and has its own test coverage.
 Rejected: deleting it as dead state — it looks unread, but removing it risks taking the stage-is-not-a-liveness-signal guard down with it.
 
 ## D29 — `lanes status`'s frame caps at 100 columns even on a wider terminal
-`core` · 2026-08 · `ui/dashboard.mjs:render` · #9
+`core` · 2026-08 · `ui/dashboard.mjs:renderSnapshot` · #9
 Keeps one consistent, compact shape at the user's real pane size instead of reflowing on every resize; still adapts down below 100, and drops CTX below 85 rather than starve BRANCH.
 Rejected: letting BRANCH absorb the extra room on a wide terminal — recreates the pre-#9 behaviour where the same lane renders a different shape in every pane.
 
@@ -169,16 +169,16 @@ Rejected: a fixed-denominator percentage — an earlier draft used 200K and real
 sonnet-5 sessions hit 165% of it, a confident-looking number that is wrong on
 exactly the sessions this feature exists to warn about.
 
-## D24 — `boundPort` stays in `lib/services.mjs`, not inlined into `serviceCell`
+## D24 — `boundPort` stays in `lib/services.mjs`, not inlined into `serviceFor`
 `core` · 2026-08 · `lib/services.mjs:boundPort`
-Has exactly one caller now (`ui/dashboard.mjs`'s `serviceCell`, `lanes status`'s
-only renderer since `lanes list` was retired), but its own branches — stopped,
-running-and-matching, running-and-diverged, and a pidfile that never recorded a
-port — get direct test coverage this way instead of only exercising it
-indirectly through the renderer.
-Rejected: inlining it into `serviceCell` now that only one caller is left — the
-obvious cleanup, but it drops those branches back into a renderer, untestable
-except through the full `render()` output.
+Has exactly one caller (`serviceFor`, the snapshot's running-service
+resolution), but its own branches — stopped, running-and-matching,
+running-and-diverged, and a pidfile that never recorded a port — get direct
+test coverage this way, with no pidfile or live process to fake per branch.
+Rejected: inlining it into `serviceFor` now that only one caller is left — the
+obvious cleanup; the result would still be reachable as data through
+`buildSnapshot`'s `service` field, but every branch would then need a real
+pidfile and a live pid to exercise.
 
 ## D23 — agent-system never installs a `statusLine` hook, only merges into `hooks`
 `product` · 2026-08 · `install.mjs`, `hooks/emit.mjs`, `lib/transcript.mjs` · #4
@@ -255,7 +255,7 @@ killing the wrapper shell leaves the real dev server orphaned, and the failure i
 silent until you find the port still bound.
 
 ## D18 — State keyed to a worktree is keyed by name; reuse is closed by explicit lifecycle handling, not by the key
-`core` · 2026-08 · `lib/services.mjs:resolveServices`, `ui/dashboard.mjs:applyEvents`, `lib/worktrees.mjs:removeWorktree`
+`core` · 2026-08 · `lib/services.mjs:resolveServices`, `lib/event-fold.mjs:applyEvents`, `lib/worktrees.mjs:removeWorktree`
 Keyed by name because `lane` is `null` for any worktree outside `worktreesDir`
 — keying by lane number there is not an option at all. Under D26's `lane<N>`
 naming, name and lane number are the same value, so the key alone no longer

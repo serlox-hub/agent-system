@@ -192,8 +192,9 @@ docs/img/          the diagrams in this README
 agents/            spec-challenger, code-reviewer, test-writer  → ~/.claude/agents/
 skills/            architect, gate                              → ~/.claude/skills/
 hooks/             emit.mjs, commit-guard.{sh,mjs}              → wired in settings.json
-lib/               context.mjs (project/lane/event), marks.mjs (review markers)
-ui/                dashboard.mjs (the lane dashboard)
+lib/               context.mjs (project/lane/event), marks.mjs (review markers),
+                   lane-model.mjs (what lanes status shows, as plain JSON)
+ui/                status.mjs (lanes status), dashboard.mjs (its terminal renderer)
 bin/               lanes (sh wrapper) + lanes.mjs — put this dir on your PATH
 config/            schema + annotated example
 test/              smoke.mjs — npm test
