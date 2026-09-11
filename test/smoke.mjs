@@ -596,6 +596,23 @@ test('EventTail.read() returns nothing for a file that does not exist yet, and s
   assert.deepEqual(events, [{ ts: 1, ev: 'idle' }, { ts: 2, ev: 'busy' }], 'the malformed and blank lines are skipped, the two valid ones are not');
 });
 
+test('EventTail.read() strips control bytes from every event string except path and transcript (#20)', () => {
+  const tailFile = join(TMP, 'event-tail-strip-test.jsonl');
+  const raw = {
+    ts: 1, ev: 'agent_start', session: `s1${ESC}`, agent: `rev${ESC}[31m`, stage: 'plan\x07\u009b',
+    detail: `desc${ESC}[2J\x00`, waitingFor: `w${ESC}[1m`, path: `/p/lane1${ESC}`, transcript: `/t${ESC}.jsonl`,
+  };
+  writeFileSync(tailFile, `${JSON.stringify(raw)}\n`);
+  const [e] = new EventTail(tailFile).read();
+  assert.equal(e.agent, 'rev[31m', 'ESC is stripped; the printable remnant stays, same as readLiveStatuses');
+  assert.equal(e.stage, 'plan', 'BEL and the 8-bit CSI (U+009B, a C1 control) are both stripped');
+  assert.equal(e.detail, 'desc[2J');
+  assert.equal(e.waitingFor, 'w[1m');
+  assert.equal(e.session, 's1', 'stripped like readLiveStatuses\' sessionId, so the two still join');
+  assert.equal(e.path, raw.path, 'paths are matched against the filesystem, never printed — kept byte for byte');
+  assert.equal(e.transcript, raw.transcript);
+});
+
 const ev = (ts, e, extra = {}) => ({ ts, ev: e, project: 'demo', lane: 1, worktree: 'lane1', ...extra });
 
 // WORKTREE is no longer its own column (the lane redesign dropped it), so a
@@ -799,6 +816,50 @@ test('RECENT rows fall back to worktree too — a lane-less event must still say
     applyEvents(createState(), [ev(1, 'idle', { lane: null, worktree: 'lane7' })]),
   );
   assert.ok(frame.includes('lane7'), 'the worktree name must appear somewhere, not just a bare "·"');
+});
+
+// End-to-end, unlike the tests above (which feed applyEvents plain objects,
+// bypassing the read-side strip on purpose): a real file, read through the
+// real EventTail, so the fix actually under test — stripEventStrings in
+// lib/event-fold.mjs — is the thing running, not a stand-in for it. Covers
+// the three label paths the control-byte fold-through review flagged: an
+// agent_start/stage STATES label (agent/stage), RECENT's raw detail field,
+// and the unknown-ev fallback label (stateOf's `label: () => ev`) — plus the
+// table's own STATE cell, to prove none of it survives past render() either.
+test('a hostile log event, read through the real EventTail and folded, never reaches render\'s frame unstripped (#20)', () => {
+  const tailFile = join(TMP, 'event-tail-render-e2e.jsonl');
+  const raw = [
+    ev(1, 'agent_start', { session: 's-e2e', agent: `rev${ESC}[31m`, detail: `notes${ESC}[2J\x07` }),
+    ev(2, 'stage', { session: 's-e2e', stage: `plan${ESC}[36m\x00` }),
+    ev(3, `weird${ESC}[35m\u009b`, { session: 's-e2e' }),
+    ev(4, 'waiting', { session: 's-e2e', waitingFor: `need${ESC}[1m input\x07` }),
+  ];
+  writeFileSync(tailFile, `${raw.map((l) => JSON.stringify(l)).join('\n')}\n`);
+
+  const events = new EventTail(tailFile).read();
+  const frame = render(resolveContext(lane2), applyEvents(createState(), events));
+
+  assert.ok(!frame.includes('\x07'), 'BEL from any field must never reach the frame');
+  assert.ok(!frame.includes('\x00'), 'NUL from any field must never reach the frame');
+  assert.ok(!frame.includes('\u009b'), 'the 8-bit CSI (C1) from the unknown ev must never reach the frame');
+  assert.ok(!frame.includes(`rev${ESC}[31m`), 'the agent_start label\'s hostile ESC sequence must not reach the frame literally');
+  assert.ok(!frame.includes(`notes${ESC}[2J`), 'the detail field\'s hostile ESC sequence must not reach the frame literally');
+  assert.ok(!frame.includes(`plan${ESC}[36m`), 'the stage label\'s hostile ESC sequence must not reach the frame literally');
+  assert.ok(!frame.includes(`weird${ESC}[35m`), 'the unknown ev\'s hostile ESC sequence must not reach the frame literally');
+  assert.ok(!frame.includes(`need${ESC}[1m`), 'the waiting label\'s hostile ESC sequence must not reach the frame literally');
+
+  const table = frame.slice(0, frame.indexOf('RECENT'));
+  assert.ok(
+    table.includes('waiting for you'),
+    'the table STATE cell falls back cleanly to "waiting for you" — the per-lane fold never carries waitingFor into the row itself, only RECENT and notifications read it off the raw event',
+  );
+
+  const recent = frame.slice(frame.indexOf('RECENT'));
+  assert.ok(recent.includes('rev[31m running'), 'RECENT still shows the agent_start label, its printable remnant intact');
+  assert.ok(recent.includes('notes[2J'), 'RECENT still shows the raw detail field, its printable remnant intact');
+  assert.ok(recent.includes('stage: plan[36m'), 'RECENT still shows the stage label, its printable remnant intact');
+  assert.ok(recent.includes('· weird[35m'), 'RECENT falls back to the unknown-ev label — the icon/label stateOf uses for an ev it does not recognise — with its printable remnant intact, not a crash off Object.prototype');
+  assert.ok(recent.includes('waiting: need[1m input'), 'RECENT still shows the waiting label sourced from the raw event, its printable remnant intact');
 });
 
 test('a lane whose worktree was removed outside the dashboard is dropped, not stuck forever', () => {
@@ -3241,7 +3302,7 @@ test('readLiveStatuses normalizes a name that strips down to the empty string to
   writeFileSync(
     join(SESSIONS_DIR, `${process.pid}.json`),
     // Only control bytes, no printable characters at all — stripControlBytes
-    // removes exactly \x00-\x1f and \x7f, so anything printable (including a
+    // removes exactly \x00-\x1f and \x7f-\x9f, so anything printable (including a
     // literal "[31m") would survive and this fixture would not prove the
     // empty-string case at all.
     JSON.stringify({ pid: process.pid, cwd: '/some/lane/path', status: 'busy', name: `${ESC}\x07\x00` }),
@@ -3338,6 +3399,22 @@ test('readLiveStatuses strips control/ANSI bytes from status too, not just waiti
     'idle[31m',
     'ESC (0x1b) and BEL (0x07) must be stripped from status at the source, same as waitingFor already was',
   );
+  rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for the render()-level tests below to trip over
+});
+
+test('readLiveStatuses strips C1 control bytes too, not just C0/DEL (#20)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    // U+009B is the 8-bit CSI — a C1 control character reachable as a single
+    // UTF-8-decoded JSON string character, not just as the two-byte ESC-[
+    // sequence the other tests here already cover.
+    JSON.stringify({ pid: process.pid, cwd: '/some/lane/path', status: `idle\u009b[31m`, waitingFor: `w\u009b`, statusUpdatedAt: 1 }),
+  );
+  const [entry] = readLiveStatuses();
+  assert.equal(entry.status, 'idle[31m', 'the C1 byte must be stripped from status, same as the C0/DEL range already was');
+  assert.equal(entry.waitingFor, 'w', 'the C1 byte must be stripped from waitingFor too');
   rmSync(SESSIONS_DIR, { recursive: true, force: true }); // leave nothing for the render()-level tests below to trip over
 });
 
