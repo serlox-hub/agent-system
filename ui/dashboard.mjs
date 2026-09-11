@@ -17,7 +17,7 @@
 import { existsSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { EVENTS_FILE, resolveContext, issueFromBranch } from '../lib/context.mjs';
-import { laneColorFor } from '../lib/colors.mjs';
+import { ansi, laneHexFor } from '../lib/colors.mjs';
 import { enumerateLanes, laneMarks } from '../lib/worktrees.mjs';
 import { resolveServices, status as serviceStatus, boundPort } from '../lib/services.mjs';
 import { readContext } from '../lib/transcript.mjs';
@@ -60,10 +60,13 @@ function pad(s, w) {
   return str.length > w ? `${str.slice(0, w - 1)}…` : str.padEnd(w);
 }
 
-// `waitingFor` comes straight from an undocumented external file
-// (lib/live-status.mjs), which already strips control/ANSI bytes at the trust
-// boundary — this only bounds the length, so `pad()` never has to truncate a
-// pathological value on every render tick.
+// `waitingFor` reaches the model from two places: live-status files
+// (lib/live-status.mjs strips control/ANSI bytes at that trust boundary) and
+// raw log events, for RECENT and raw-event notifications (not stripped — same
+// as `detail`/`agent`/`stage`; no emitter in this repo writes one). This only
+// bounds the length. Applied once, on the model side, to
+// every `waitingFor` a snapshot carries and to every notification body; no
+// view re-bounds it.
 const WAITING_FOR_MAX = 200;
 
 function sanitize(s) {
@@ -128,7 +131,7 @@ const STATES = {
   busy: { icon: '●', color: C.cyan, label: () => 'working' },
   stage: { icon: '◆', color: C.cyan, label: (e) => `stage: ${e.stage}` },
   idle: { icon: '▲', color: C.yellow, label: () => 'waiting for you' },
-  waiting: { icon: '?', color: C.yellow, label: (e) => (e.waitingFor ? `waiting: ${sanitize(e.waitingFor)}` : 'waiting for you') },
+  waiting: { icon: '?', color: C.yellow, label: (e) => (e.waitingFor ? `waiting: ${e.waitingFor}` : 'waiting for you') },
   reviewed: { icon: '✓', color: C.green, label: () => 'ready to commit' },
   commit_reviewed: { icon: '✓', color: C.green, label: () => 'committing' },
   commit_bypass: { icon: '✓', color: C.dim, label: () => 'committing (unreviewed)' },
@@ -151,7 +154,7 @@ function stateOf(ev) {
   // untrusted live-status file (lib/live-status.mjs) once withLiveOverride
   // assigns it, and a value like `constructor` resolves on the plain object
   // literal via the prototype chain, returning a function where a state
-  // descriptor was expected and throwing inside render() the moment
+  // descriptor was expected and throwing inside renderSnapshot() the moment
   // `s.label(r)` is called.
   return Object.hasOwn(STATES, ev) ? STATES[ev] : { icon: '·', color: C.dim, label: () => ev };
 }
@@ -392,12 +395,12 @@ const MARKS_TONE = { danger: `${C.bold}${C.red}`, dirty: C.yellow, ahead: C.gree
  *
  * Carries no project identity of its own — a row from another project (D8:
  * the events log and live-status dir are both machine-global, so `rowsFor`
- * can surface one) is disambiguated by `render()`'s project grouping instead,
+ * can surface one) is disambiguated by the snapshot's project groups instead,
  * a header line rather than eating into this cell's already-tight width.
  */
 function branchCell(r, width) {
   const issuePrefix = r.issue ? `[#${r.issue}] ` : '';
-  const tokens = laneMarks(r);
+  const tokens = r.marks;
   const marksPlain = tokens.map((t) => t.text).join(' ');
   const marksSuffix = marksPlain ? ` (${marksPlain})` : '';
   const name = r.branch || r.worktree || '—';
@@ -413,26 +416,31 @@ function branchCell(r, width) {
 }
 
 /**
- * The service line beneath a lane's row, or `null` when nothing is running —
- * the line itself is conditional (unlike the old fixed second line), so
- * "should it show" and "what does it say" are one decision, not two: an
- * earlier version split them into `serviceCell`/`serviceRunning`, each
- * re-deriving `resolveServices`/`serviceStatus` independently, which read the
- * same pidfile twice per lane per paint and checked only `svcs[0]` for both —
- * a lane whose *second* declared service was the one running showed nothing
- * at all. This checks every declared service and shows whichever one is
- * actually up, still with a trailing count of the rest — there is no room for
- * a full list once the row is this narrow. A row with no `.name` is a
- * foreign project's or a vanished lane's (see rowsFor): it never carries the
- * live `.path`/`.lane` resolveServices needs, and `.name` never resolves
- * against any config but the current project's, so it is never passed in at
- * all.
+ * A lane's first running declared service, or `null` when nothing is running
+ * — the service line beneath the row is conditional, so "should it show" and
+ * "what does it say" are one decision, not two: an earlier version split them
+ * into `serviceCell`/`serviceRunning`, each re-deriving
+ * `resolveServices`/`serviceStatus` independently, which read the same
+ * pidfile twice per lane per paint and checked only `svcs[0]` for both — a
+ * lane whose *second* declared service was the one running showed nothing at
+ * all. This checks every declared service and returns whichever one is
+ * actually up, with a count of the rest (`others`) — there is no room for a
+ * full list once the row is this narrow. A row with no `.name` is a foreign
+ * project's or a vanished lane's (see rowsFor): it never carries the live
+ * `.path`/`.lane` resolveServices needs, and `.name` never resolves against
+ * any config but the current project's, so it is never passed in at all.
+ *
+ * `port` is the bound port, not the freshly computed one — `portBase` can be
+ * edited while the service stays up — and `moved` flags the two disagreeing.
+ * It applies to `url` too: a url template is filled with the freshly computed
+ * port, which can just as easily be stale.
  *
  * `serviceStatus` (`lib/services.mjs`'s `status`) deletes the pidfile of a
- * confirmed-dead process, so calling this — and therefore `render()` — is not
- * side-effect-free: every `lanes status` frame self-heals a stale pidfile.
+ * confirmed-dead process, so calling this — and therefore `buildSnapshot()` —
+ * is not side-effect-free: every `lanes status` frame self-heals a stale
+ * pidfile.
  */
-function serviceLine(ctx, r) {
+function serviceFor(ctx, r) {
   if (!r.name) return null;
   const svcs = resolveServices(ctx?.config, r);
   if (!svcs.length) return null;
@@ -447,13 +455,15 @@ function serviceLine(ctx, r) {
     }
   }
   if (!running) return null;
-  // The bound port, not the freshly computed one — `portBase` can be edited
-  // while the service stays up. The `!` marker applies to the URL too: a url
-  // template is filled with the freshly computed port, which can just as
-  // easily be stale.
   const { port, moved } = boundPort(running, st);
-  const text = running.url ? `${running.url}${moved}` : `localhost:${port}${moved}`;
-  return svcs.length > 1 ? `${text} (+${svcs.length - 1} more)` : text;
+  return { url: running.url, port, moved: Boolean(moved), others: svcs.length - 1 };
+}
+
+/** The service line's text: the URL (or `localhost:<port>`), `!` when the port moved, then the count of the rest. */
+function serviceText({ url, port, moved, others }) {
+  const mark = moved ? '!' : '';
+  const text = url ? `${url}${mark}` : `localhost:${port}${mark}`;
+  return others > 0 ? `${text} (+${others} more)` : text;
 }
 
 export function fmtTokens(n) {
@@ -469,6 +479,14 @@ export function fmtTokens(n) {
  * percentage — no fixed denominator is right for every model). No literal
  * "ctx" in the text: the CTX column header already says so, same as STAGE/
  * STATE cells never repeated their own column name.
+ */
+function ctxCell(context) {
+  if (!context) return '—';
+  return `${fmtTokens(context.tokens)}·${context.model.replace(/^claude-/, '')}`;
+}
+
+/**
+ * `{ tokens, model }` for a transcript, or `null`.
  *
  * `ctxInfo`, when supplied, is a `Map<transcriptPath, {tokens,model}|null>`
  * refreshed on the same ~20-tick cadence as `laneInfo` (see `watchStatus`) rather
@@ -477,12 +495,16 @@ export function fmtTokens(n) {
  * measures 7-12ms on real multi-MB files, not the sub-millisecond figure a
  * per-row-per-tick read assumed. `printStatus` has no tick loop to throttle
  * against, so it omits `ctxInfo` and reads fresh — a one-shot snapshot.
+ *
+ * Resolved whatever the view's width: `buildSnapshot` cannot know it, so
+ * `lanes status --once` below 85 columns reads transcripts for a CTX column it
+ * then drops — accepted in #19, one-shot only, since the watch loop always
+ * supplies `ctxInfo`.
  */
-function ctxCell(r, ctxInfo) {
-  if (!r.transcript) return '—';
-  const info = ctxInfo ? ctxInfo.get(r.transcript) ?? null : readContext(r.transcript);
-  if (!info) return '—';
-  return `${fmtTokens(info.tokens)}·${info.model.replace(/^claude-/, '')}`;
+function contextFor(transcript, ctxInfo) {
+  if (!transcript) return null;
+  const info = ctxInfo ? ctxInfo.get(transcript) ?? null : readContext(transcript);
+  return info ? { tokens: info.tokens, model: info.model } : null;
 }
 
 /**
@@ -540,7 +562,7 @@ const LANE_WIDE_PROTECTED = new Set([
 /**
  * Whether a specific session's own folded history (`state.sessionHistory`,
  * #14 Phase 4) says it's currently in a lane-wide-fact state. Shared by
- * `render()`'s extra rows and `liveTransitionNotifications`' per-session
+ * `snapshotLane`'s `extraSessions` filter and `liveTransitionNotifications`' per-session
  * gating (#14 Phase 5) — both need the exact same rule, and a second inline
  * copy is what lets the two drift the next time a state is added to
  * `LANE_WIDE_PROTECTED`.
@@ -613,7 +635,7 @@ function withLiveOverride(rows, liveStatuses) {
  * Gating: the primary session uses the same `r.ev`/`PROTECTED_LIVE_OVERRIDE`
  * rule as before #14 (row `[0]`'s protection is unchanged, per Phase 4); an
  * extra session uses its own history via `isSessionProtected`, same as
- * `render()`'s rows. A protected or no-longer-live session's baseline is
+ * `snapshotLane`'s `extraSessions`. A protected or no-longer-live session's baseline is
  * dropped rather than kept stale, in one pass at the end (comparing every
  * tracked key against the ones just proven valid this tick) — so a later
  * reattachment, or the protection lifting, starts clean instead of firing a
@@ -664,7 +686,7 @@ const LANE_WIDTH = 3;
 // than widening it — see their wording above.
 const STATE_WIDTH = 26;
 // Hours-only overflowed this at 1000h (~42 days idle — ordinary under D20); d/h
-// holds the same 7 chars out to "999d23h". 7 is load-bearing: render()'s
+// holds the same 7 chars out to "999d23h". 7 is load-bearing: renderSnapshot()'s
 // reserved budget (below) is solved against the 100-col cap (D29).
 const FOR_WIDTH = 7;
 const CTX_WIDTH = 24; // fits the worst realistic model id after stripping "claude-" (~19 chars) + tokens
@@ -679,14 +701,14 @@ const BRANCH_FLOOR = 20;
  * extra row's never does) that STATE/FOR are the only two cells genuinely the
  * same rule either way. Extracted so a status added to `STATES` only needs
  * its colour/label rule written once, instead of drifting between two
- * copies — the same failure mode `serviceLine`'s own docstring above
+ * copies — the same failure mode `serviceFor`'s own docstring
  * documents having already been paid for once, when its two halves were
  * independently re-derived and disagreed.
  *
- * `labelInput` is whatever `STATES[ev].label` expects: the whole row `r` for
- * the primary row (`agent_start`'s `e.agent`, `stage`'s `e.stage`, …), or
- * just `{ waitingFor }` for an extra row, which only ever carries a live
- * busy/idle/waiting status and has no `agent`/`stage` of its own.
+ * `labelInput` is whatever `STATES[ev].label` expects: the snapshot lane for
+ * the primary row (`agent_start`'s `e.agent`, `stage`'s `e.stage`, …), or the
+ * extra session itself, which only ever carries a live busy/idle/waiting
+ * status and has no `agent`/`stage` of its own.
  */
 function stateAndForCells(ev, labelInput, since, now) {
   const s = stateOf(ev);
@@ -696,45 +718,27 @@ function stateAndForCells(ev, labelInput, since, now) {
   ];
 }
 
-/** Build the frame as a string. Callers decide whether to clear the screen. */
-export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config), ctxInfo = null, liveStatuses = readLiveStatuses()) {
+/**
+ * Everything `lanes status` shows, decided as data: one plain-JSON object
+ * carrying every rule about *what* is true — the live override, D37's session
+ * order, D38's CTX source, D40's extra-row gating, own-project-first grouping,
+ * the running service — and nothing about how it looks. `renderSnapshot` is
+ * the terminal's view of it; another view reads the same object instead of
+ * re-deriving these rules, which is how two copies of them would drift.
+ *
+ * Not side-effect-free: reads git (the default `laneInfo`), the live-status
+ * files (the default `liveStatuses`), each on-screen transcript when `ctxInfo`
+ * is null (see `contextFor`), the colours file, and every declared service's
+ * pidfile — deleting a confirmed-dead one (see `serviceFor`).
+ */
+export function buildSnapshot(ctx, state, {
+  now = Date.now(),
+  laneInfo = enumerateLanes(ctx?.config),
+  ctxInfo = null,
+  liveStatuses = readLiveStatuses(),
+} = {}) {
   const rows = withLiveOverride(rowsFor(ctx, state.lanes, laneInfo), liveStatuses);
-  const colorFor = laneColorFor();
-  const width = Math.max(60, process.stdout.columns || 100);
-  const out = [];
-
-  // Capped at 100 even on a wider terminal, deliberately — the frame stays a
-  // consistent, compact shape rather than stretching back out to show more of
-  // the branch name the way it used to. Still adaptive downward: on anything
-  // narrower it shrinks with `width`, same as before.
-  const termWidth = Math.min(width, 100);
-  const showCtx = termWidth >= CTX_MIN_TERM_WIDTH;
-  // 4 single-space gaps between 5 cells (LANE BRANCH STATE FOR CTX), or 3
-  // between 4 when CTX is dropped — BRANCH is the only cell excluded, since
-  // it is the free variable the rest of this reservation solves for.
-  const reserved = LANE_WIDTH + STATE_WIDTH + FOR_WIDTH + (showCtx ? CTX_WIDTH + 4 : 3);
-  const branchWidth = Math.max(BRANCH_FLOOR, termWidth - reserved);
-
-  const title = `agent-system${ctx?.project ? ` · ${ctx.project}` : ''}`;
-  const clock = fmtClock(now);
-  const headerCells = [pad('#', LANE_WIDTH), pad('BRANCH', branchWidth), pad('STATE', STATE_WIDTH), pad('FOR', FOR_WIDTH)];
-  if (showCtx) headerCells.push(pad('CTX', CTX_WIDTH));
-  const headerRow = headerCells.join(' ');
-  const titleWidth = termWidth;
-  // The rule under the header must never render narrower than the header
-  // itself, or its tail (STATE, FOR) hangs past the rule with nothing
-  // underlining it. Measured from the real string rather than a hand-kept
-  // constant, so widening a column can never silently reopen that gap.
-  const barWidth = Math.max(headerRow.length, titleWidth);
-  const gap = Math.max(1, titleWidth - title.length - clock.length);
-  out.push(`${C.bold}${title}${C.reset}${C.dim}${' '.repeat(gap)}${clock}${C.reset}`);
-  out.push('');
-  out.push(`${C.bold}${headerRow}${C.reset}`);
-  out.push(`${C.dim}${'─'.repeat(barWidth)}${C.reset}`);
-
-  if (rows.length === 0) {
-    out.push(`${C.dim}  No lanes yet. Start a Claude Code session in a configured worktree.${C.reset}`);
-  }
+  const hexFor = laneHexFor();
 
   // Grouped by project: `rows` can mix in lanes from other projects (D8 —
   // the events log and live-status dir are both machine-global), and rather
@@ -763,6 +767,130 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
     ? new Map([[ownKey, rawGroups.get(ownKey)], ...[...rawGroups].filter(([k]) => k !== ownKey)])
     : rawGroups;
 
+  const shared = { ctx, state, hexFor, ctxInfo, liveStatuses };
+  return {
+    now,
+    project: ctx?.project ?? null,
+    groups: [...groups].map(([project, groupRows]) => ({
+      project,
+      lanes: groupRows.map((r) => snapshotLane(r, shared)),
+    })),
+    history: state.history.map((e) => ({
+      ts: e.ts,
+      project: e.project ?? null,
+      lane: e.lane ?? null,
+      worktree: e.worktree ?? null,
+      ev: e.ev,
+      detail: e.detail ?? null,
+      agent: e.agent ?? null,
+      stage: e.stage ?? null,
+      waitingFor: sanitize(e.waitingFor) || null,
+      color: hexFor(e.lane),
+    })),
+  };
+}
+
+/** One `rowsFor` row, after the live override, as a snapshot lane — see `buildSnapshot`. */
+function snapshotLane(r, { ctx, state, hexFor, ctxInfo, liveStatuses }) {
+  // Every live session under this lane's path, computed once and reused
+  // below for both the primary row's CTX (`[0]`) and the extra sessions
+  // (`.slice(1)`), rather than calling `findLiveStatuses` twice per lane.
+  const laneLive = findLiveStatuses(liveStatuses, r.path);
+  const primaryHist = laneLive[0] && state.sessionHistory.get(laneLive[0].sessionId);
+  // Resolve CTX through the primary session's own history when known
+  // (#14 Phase 4), not `r.transcript` alone: `state.lanes`' transcript
+  // is last-write-wins across EVERY session in the worktree, not scoped
+  // by session, so with two live sessions sharing a lane it can silently
+  // hold the wrong one's transcript — invisible before extra rows
+  // existed to show the correct value right underneath it. Falls back to
+  // `r.transcript` when the primary session has no history of its own
+  // (no live match, or one that hasn't emitted a transcript-bearing
+  // event yet), so a single-session lane renders byte-identical to
+  // before this phase.
+  const ctxSource = primaryHist?.transcript ? primaryHist : r;
+  return {
+    lane: r.lane ?? null,
+    worktree: r.worktree ?? null,
+    branch: r.branch ?? null,
+    issue: r.issue ?? null,
+    color: hexFor(r.lane),
+    marks: laneMarks(r),
+    ev: r.ev ?? null,
+    since: r.since ?? null,
+    agent: r.agent ?? null,
+    stage: r.stage ?? null,
+    waitingFor: sanitize(r.waitingFor) || null,
+    live: LIVE_EVENTS.has(r.ev),
+    context: contextFor(ctxSource.transcript, ctxInfo),
+    // One per additional live session sharing this lane's path, beyond the
+    // primary `[0]` match `withLiveOverride` already folded into `r` (#14).
+    //
+    // Gating is per-session (#14 Phase 4), not per row `[0]` like Phase 3's
+    // placeholder was: a session's own history — not the primary session's —
+    // decides whether ITS row is a lane-wide fact in disguise. A commit
+    // blocked by session A tags that event with A's own session id (#13), so
+    // it never touches B's fold here and B's row stays visible; if B itself
+    // is mid-commit-block, B's own history says so and B's row is the one
+    // that hides. Falls open (shows the row) when this session has no
+    // history yet — absence of evidence is not evidence of a lane-wide state.
+    extraSessions: laneLive.slice(1)
+      .filter((s) => !isSessionProtected(state.sessionHistory, s.sessionId))
+      .map((s) => ({
+        sessionId: s.sessionId,
+        name: s.name ?? null,
+        status: s.status,
+        waitingFor: sanitize(s.waitingFor) || null,
+        since: s.statusUpdatedAt ?? null,
+        context: contextFor(state.sessionHistory.get(s.sessionId)?.transcript, ctxInfo),
+      })),
+    service: serviceFor(ctx, r),
+  };
+}
+
+/**
+ * The terminal's view of a `buildSnapshot` result: every ANSI code, column
+ * width and line of the frame, none of the rules deciding what it says. Pure
+ * — no I/O and no `process` reads — so the caller passes the raw terminal
+ * width.
+ */
+export function renderSnapshot(snapshot, { width } = {}) {
+  const { now } = snapshot;
+  const out = [];
+
+  // D29: capped at 100 even on a wider terminal, deliberately — the frame
+  // stays a consistent, compact shape rather than stretching back out to show
+  // more of the branch name the way it used to. Still adaptive downward: on
+  // anything narrower it shrinks with `width`, floored at 60; an unknown
+  // width (`undefined`/0, e.g. not a TTY) renders at 100.
+  const termWidth = Math.min(Math.max(60, width || 100), 100);
+  const showCtx = termWidth >= CTX_MIN_TERM_WIDTH;
+  // 4 single-space gaps between 5 cells (LANE BRANCH STATE FOR CTX), or 3
+  // between 4 when CTX is dropped — BRANCH is the only cell excluded, since
+  // it is the free variable the rest of this reservation solves for.
+  const reserved = LANE_WIDTH + STATE_WIDTH + FOR_WIDTH + (showCtx ? CTX_WIDTH + 4 : 3);
+  const branchWidth = Math.max(BRANCH_FLOOR, termWidth - reserved);
+
+  const title = `agent-system${snapshot.project ? ` · ${snapshot.project}` : ''}`;
+  const clock = fmtClock(now);
+  const headerCells = [pad('#', LANE_WIDTH), pad('BRANCH', branchWidth), pad('STATE', STATE_WIDTH), pad('FOR', FOR_WIDTH)];
+  if (showCtx) headerCells.push(pad('CTX', CTX_WIDTH));
+  const headerRow = headerCells.join(' ');
+  const titleWidth = termWidth;
+  // The rule under the header must never render narrower than the header
+  // itself, or its tail (STATE, FOR) hangs past the rule with nothing
+  // underlining it. Measured from the real string rather than a hand-kept
+  // constant, so widening a column can never silently reopen that gap.
+  const barWidth = Math.max(headerRow.length, titleWidth);
+  const gap = Math.max(1, titleWidth - title.length - clock.length);
+  out.push(`${C.bold}${title}${C.reset}${C.dim}${' '.repeat(gap)}${clock}${C.reset}`);
+  out.push('');
+  out.push(`${C.bold}${headerRow}${C.reset}`);
+  out.push(`${C.dim}${'─'.repeat(barWidth)}${C.reset}`);
+
+  if (snapshot.groups.length === 0) {
+    out.push(`${C.dim}  No lanes yet. Start a Claude Code session in a configured worktree.${C.reset}`);
+  }
+
   // Blank between lanes, not after every one: keeps the visual grouping this
   // loop exists for, and is what binds an optional service line to the row
   // above it now that most lanes are back down to a single row. Leaves the
@@ -771,88 +899,52 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
   // project group gets the same blank-line separator before it, with its
   // header line taking the place of the group's first row for that purpose.
   let firstBlock = true;
-  for (const [project, groupRows] of groups) {
+  for (const { project, lanes } of snapshot.groups) {
     if (!firstBlock) out.push('');
     out.push(`${C.dim}${project}${C.reset}`);
     firstBlock = false;
 
-    groupRows.forEach((r, i) => {
+    lanes.forEach((r, i) => {
       if (i > 0) out.push('');
-      const live = LIVE_EVENTS.has(r.ev);
-      const laneColor = colorFor(r.lane);
       const [stateCell, forCell] = stateAndForCells(r.ev, r, r.since, now);
-      // Every live session under this lane's path, computed once and reused
-      // below for both the primary row's CTX (`[0]`) and the extra rows
-      // (`.slice(1)`), rather than calling `findLiveStatuses` twice per lane.
-      const laneLive = findLiveStatuses(liveStatuses, r.path);
-      const primaryHist = laneLive[0] && state.sessionHistory.get(laneLive[0].sessionId);
       const cells = [
-        laneColor + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
+        ansi(r.color) + pad(r.lane ?? '·', LANE_WIDTH) + C.reset,
         branchCell(r, branchWidth),
         stateCell,
         forCell,
       ];
-      if (showCtx) {
-        // Resolve CTX through the primary session's own history when known
-        // (#14 Phase 4), not `r.transcript` alone: `state.lanes`' transcript
-        // is last-write-wins across EVERY session in the worktree, not scoped
-        // by session, so with two live sessions sharing a lane it can silently
-        // hold the wrong one's transcript — invisible before extra rows
-        // existed to show the correct value right underneath it. Falls back to
-        // `r.transcript` when the primary session has no history of its own
-        // (no live match, or one that hasn't emitted a transcript-bearing
-        // event yet), so a single-session lane renders byte-identical to
-        // before this phase.
-        const ctxSource = primaryHist?.transcript ? primaryHist : r;
-        cells.push((live ? '' : C.dim) + pad(ctxCell(ctxSource, ctxInfo), CTX_WIDTH) + C.reset);
-      }
+      if (showCtx) cells.push((r.live ? '' : C.dim) + pad(ctxCell(r.context), CTX_WIDTH) + C.reset);
       out.push(cells.join(' '));
 
-      // Extra rows: one per additional live session sharing this lane's path,
-      // beyond the primary `[0]` match `withLiveOverride` already folded into
-      // `r` above (#14). Directly beneath — no blank line, and before the
+      // Extra session rows directly beneath — no blank line, and before the
       // service line below, so a lane's session rows stay adjacent to its own
       // row; the service line (one dev-server URL per lane, not per session)
       // reads as the whole block's footer instead of splitting two session
       // rows apart. The blank line pushed at the top of this callback still
       // only separates one lane's whole block from the next.
-      //
-      // Gating is per-session (#14 Phase 4), not per row `[0]` like Phase 3's
-      // placeholder was: a session's own history — not the primary session's —
-      // decides whether ITS row is a lane-wide fact in disguise. A commit
-      // blocked by session A tags that event with A's own session id (#13), so
-      // it never touches B's fold here and B's row stays visible; if B itself
-      // is mid-commit-block, B's own history says so and B's row is the one
-      // that hides. Falls open (shows the row) when this session has no
-      // history yet — absence of evidence is not evidence of a lane-wide state.
-      for (const extraLive of laneLive.slice(1)) {
-        if (isSessionProtected(state.sessionHistory, extraLive.sessionId)) continue;
-        const sessionHist = state.sessionHistory.get(extraLive.sessionId);
-        const [extraStateCell, extraForCell] = stateAndForCells(
-          extraLive.status, { waitingFor: extraLive.waitingFor }, extraLive.statusUpdatedAt, now,
-        );
+      for (const s of r.extraSessions) {
+        const [extraStateCell, extraForCell] = stateAndForCells(s.status, s, s.since, now);
         const extraCells = [
           C.dim + pad('·', LANE_WIDTH) + C.reset,
-          C.dim + pad(extraLive.name || extraLive.sessionId, branchWidth) + C.reset,
+          C.dim + pad(s.name || s.sessionId, branchWidth) + C.reset,
           extraStateCell,
           extraForCell,
         ];
         // Always live-toned, never dimmed: unlike row `[0]`, an extra row only
         // ever exists for a session `readLiveStatuses()` just confirmed is live.
-        if (showCtx) extraCells.push(pad(ctxCell({ transcript: sessionHist?.transcript }, ctxInfo), CTX_WIDTH));
+        if (showCtx) extraCells.push(pad(ctxCell(s.context), CTX_WIDTH));
         out.push(extraCells.join(' '));
       }
 
-      const svcLine = serviceLine(ctx, r);
-      if (svcLine) {
-        out.push(`${' '.repeat(LANE_WIDTH + 1)}${C.dim}${svcLine}${C.reset}`);
+      if (r.service) {
+        out.push(`${' '.repeat(LANE_WIDTH + 1)}${C.dim}${serviceText(r.service)}${C.reset}`);
       }
     });
   }
 
   out.push('');
   out.push(`${C.bold}RECENT${C.reset}`);
-  if (state.history.length === 0) out.push(`${C.dim}  (nothing yet)${C.reset}`);
+  if (snapshot.history.length === 0) out.push(`${C.dim}  (nothing yet)${C.reset}`);
   // Unlike the lane table above, RECENT is one chronological log — grouping
   // by project would break the ordering that makes it useful, so every entry
   // (D8: the events log is machine-global, so this can mix in another
@@ -868,7 +960,7 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
   // against elsewhere in this file. RECENT lines carry no fixed-width cap
   // (`detail` alone runs to 300 chars), so the always-on column costs
   // nothing the frame was protecting.
-  for (const e of state.history.slice().reverse()) {
+  for (const e of snapshot.history.slice().reverse()) {
     const s = stateOf(e.ev);
     // Fall back to worktree name when there is no lane number — same fallback
     // as `branchCell`'s ghost-row case and `notifyTitle`, so a row is never
@@ -883,13 +975,18 @@ export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(c
     // number never collides).
     const projectText = e.project || '';
     const who = projectText && projectText === rawWho ? '·' : rawWho;
-    const whoColor = e.lane != null ? colorFor(e.lane) : C.dim;
+    const whoColor = e.lane != null ? ansi(e.color) : C.dim;
     const projectTag = `${C.dim}${pad(projectText, 12)} ${C.reset}`;
     out.push(
       `${C.dim}${fmtClock(e.ts)}${C.reset}  ${projectTag}${whoColor}${pad(who, 13)}${C.reset}${s.color}${s.icon} ${pad(s.label(e), 30)}${C.reset}${C.dim}${e.detail || ''}${C.reset}`,
     );
   }
   return out.join('\n');
+}
+
+/** Build the frame as a string. Callers decide whether to clear the screen. */
+export function render(ctx, state, now = Date.now(), laneInfo = enumerateLanes(ctx?.config), ctxInfo = null, liveStatuses = readLiveStatuses()) {
+  return renderSnapshot(buildSnapshot(ctx, state, { now, laneInfo, ctxInfo, liveStatuses }), { width: process.stdout.columns });
 }
 
 /** `lanes status --once`. Must not clear the terminal — it is a print, not a live view. */
@@ -981,7 +1078,7 @@ export async function watchStatus() {
         // "On screen" here means every live session matching ANY lane's
         // path, primary (`[0]`) included, not just #14's extra rows: the
         // primary row's own CTX can also resolve through a session's history
-        // now (see render()'s `primaryHist`). Scoped this way rather than to
+        // now (see `snapshotLane`'s `primaryHist`). Scoped this way rather than to
         // every live session `readLiveStatuses()` returns, which is global —
         // see `pruneSessionHistory`'s own docstring for why.
         const onScreenSessionIds = new Set(

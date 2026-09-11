@@ -47,12 +47,12 @@ const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } 
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYPASS_MARK } = await import(
   `${ROOT}/lib/marks.mjs`
 );
-const { createState, applyEvents, render, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications, pruneSessionHistory } = await import(
+const { createState, applyEvents, render, buildSnapshot, renderSnapshot, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications, pruneSessionHistory } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
 const { readLiveStatuses, SESSIONS_DIR } = await import(`${ROOT}/lib/live-status.mjs`);
-const { readColors, setColor, laneColorFor, ansi, DEFAULT_PALETTE, COLORS_FILE } = await import(`${ROOT}/lib/colors.mjs`);
+const { readColors, setColor, laneHexFor, DEFAULT_PALETTE, COLORS_FILE } = await import(`${ROOT}/lib/colors.mjs`);
 const worktrees = await import(`${ROOT}/lib/worktrees.mjs`);
 const sv = await import(`${ROOT}/lib/services.mjs`);
 
@@ -1503,6 +1503,23 @@ test('dashboard: the second declared service running (not the first) is still de
   }
 });
 
+test('buildSnapshot: the service field is a plain shape — { url, port: string, moved: boolean, others } — not the "!"/"" marker or a bare string serviceText renders it into (#19)', () => {
+  const lane = worktrees.enumerateLanes(svcCfg)[1]; // lane2, lane 2
+  const [web] = sv.resolveServices(svcCfg, lane);
+  const started = sv.start(web);
+  assert.ok(started.pid, `start failed: ${started.error ?? ''}`);
+  try {
+    const ctx = { ...resolveContext(lane2), config: svcCfg };
+    const snapshot = buildSnapshot(ctx, createState(), { laneInfo: [lane] });
+    const row = snapshot.groups[0].lanes[0];
+    assert.deepEqual(row.service, { url: 'http://localhost:3002', port: '3002', moved: false, others: 1 });
+    assert.equal(typeof row.service.port, 'string', 'the bound port stays a string, never coerced to a number');
+    assert.equal(typeof row.service.moved, 'boolean', 'moved is a real boolean now, not boundPort\'s own "!"/"" marker string');
+  } finally {
+    sv.stop(web);
+  }
+});
+
 test('dashboard: a row with no .name (foreign project or vanished lane) is never passed into resolveServices', () => {
   const state = createState();
   state.lanes.set('demo#demo-ghost-2', { project: 'demo', worktree: 'demo-ghost-2', ev: 'idle', since: 1 });
@@ -1848,16 +1865,17 @@ test('RECENT project tag truncates a project name longer than its 12-column widt
 
 // ── Lane colours ────────────────────────────────────────────────────
 test('lane colours fall back to the built-in palette and cycle past its end', () => {
-  const colorFor = laneColorFor({});
-  assert.equal(colorFor(1), ansi(DEFAULT_PALETTE[0]));
-  assert.equal(colorFor(DEFAULT_PALETTE.length + 1), ansi(DEFAULT_PALETTE[0]), 'cycles');
-  assert.equal(colorFor(null), '', 'a lane-less row gets no colour');
+  const hexFor = laneHexFor({});
+  assert.equal(hexFor(1), DEFAULT_PALETTE[0]);
+  assert.equal(hexFor(DEFAULT_PALETTE.length + 1), DEFAULT_PALETTE[0], 'cycles');
+  assert.equal(hexFor(null), null, 'a lane-less row gets no colour');
+  assert.equal(hexFor(-1), null, 'a lane that indexes outside the palette gets no colour, never undefined');
 });
 
 test('lanes color persists per machine and overrides the default', () => {
   setColor(2, '832561');
   assert.equal(readColors()[2], '832561');
-  assert.equal(laneColorFor()(2), ansi('832561'));
+  assert.equal(laneHexFor()(2), '#832561');
   setColor(1, '#42b883');
   assert.equal(readColors()[1], '42b883', 'a leading # is accepted and stripped');
   assert.equal(readColors()[2], '832561', 'setting one lane does not drop the others');
@@ -3943,6 +3961,122 @@ test('golden frame at 84 columns: CTX dropped, BRANCH widened — the whole fram
     const frame = render(ctx, state, now, laneInfo, ctxInfo, liveStatuses);
     assert.equal(frame, GOLDEN_FRAME_84);
   });
+});
+
+test('the golden snapshot is plain JSON: a JSON round trip deep-equals it, and the copy renders both golden frames', () => {
+  withGoldenAmbient(() => {
+    const { ctx, state, now, laneInfo, ctxInfo, liveStatuses } = goldenInputs();
+    const snapshot = buildSnapshot(ctx, state, { now, laneInfo, ctxInfo, liveStatuses });
+    const copy = JSON.parse(JSON.stringify(snapshot));
+    assert.deepEqual(copy, snapshot, 'no Map, no undefined, no class instance — nothing JSON would drop or flatten');
+    assert.equal(renderSnapshot(copy, { width: 100 }), GOLDEN_FRAME_100);
+    assert.equal(renderSnapshot(copy, { width: 84 }), GOLDEN_FRAME_84);
+  });
+});
+
+test('renderSnapshot takes its width from the caller only, never process.stdout.columns, and clamps it per D29', () => {
+  withGoldenAmbient(() => {
+    process.stdout.columns = 60;
+    const { ctx, state, now, laneInfo, ctxInfo, liveStatuses } = goldenInputs();
+    const snapshot = buildSnapshot(ctx, state, { now, laneInfo, ctxInfo, liveStatuses });
+    assert.equal(renderSnapshot(snapshot, { width: 100 }), GOLDEN_FRAME_100, 'a 60-column terminal must not leak into a 100-column render');
+    assert.equal(renderSnapshot(snapshot, { width: 200 }), GOLDEN_FRAME_100, 'capped at 100 however wide');
+    assert.equal(renderSnapshot(snapshot, {}), GOLDEN_FRAME_100, 'an unknown width renders at 100');
+  });
+});
+
+// ── Snapshot model (#19) ─────────────────────────────────────────────
+// buildSnapshot asserted as data — no frame, no string matching. The
+// render()-based tests above stay as the end-to-end coverage of the same rules.
+const modelLaneInfo = [{
+  lane: 1, name: 'lane1', path: '/m/lane1', branch: 'feat/1-x',
+  isBase: false, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true,
+}];
+const modelLane = (state, liveStatuses, ctxInfo = new Map()) =>
+  buildSnapshot({ project: 'demo', config: {} }, state, { now: 10_000, laneInfo: modelLaneInfo, ctxInfo, liveStatuses }).groups[0].lanes[0];
+const liveAt = (sessionId, cwd, startedAt, status = 'idle') => ({ cwd, status, waitingFor: null, statusUpdatedAt: 5000, sessionId, name: null, startedAt });
+
+test('buildSnapshot: extraSessions follow D37 — exact cwd first, then ascending startedAt, then sessionId — whatever order liveStatuses arrives in', () => {
+  const live = [
+    liveAt('sess-late', '/m/lane1/sub', 300),
+    liveAt('sess-tie-b', '/m/lane1/sub', 200),
+    liveAt('sess-exact', '/m/lane1', 999, 'busy'),
+    liveAt('sess-tie-a', '/m/lane1/sub', 200),
+  ];
+  for (const order of [live, [...live].reverse()]) {
+    const lane = modelLane(createState(), order);
+    assert.equal(lane.ev, 'busy', 'the exact-cwd session is primary although it started last');
+    assert.deepEqual(lane.extraSessions.map((s) => s.sessionId), ['sess-tie-a', 'sess-tie-b', 'sess-late']);
+  }
+});
+
+test('buildSnapshot: with two sessions in one lane, context comes from the primary session\'s own transcript, not the lane-level last write (D38)', () => {
+  const state = applyEvents(createState(), [
+    ev(1, 'session_start', { session: 'sess-a', transcript: '/m/a.jsonl' }),
+    ev(2, 'idle', { session: 'sess-b', transcript: '/m/b.jsonl' }),
+  ]);
+  const ctxInfo = new Map([
+    ['/m/a.jsonl', { tokens: 40000, model: 'claude-sonnet-5' }],
+    ['/m/b.jsonl', { tokens: 310000, model: 'claude-sonnet-5' }],
+  ]);
+  const lane = modelLane(state, [liveAt('sess-a', '/m/lane1', 1, 'busy'), liveAt('sess-b', '/m/lane1/sub', 2)], ctxInfo);
+  assert.deepEqual(lane.context, { tokens: 40000, model: 'claude-sonnet-5' }, 'sess-a\'s own count, though the lane-level fold holds sess-b\'s transcript');
+  assert.deepEqual(lane.extraSessions.map((s) => [s.sessionId, s.context]), [['sess-b', { tokens: 310000, model: 'claude-sonnet-5' }]]);
+});
+
+test('buildSnapshot: a session\'s own lane-wide-protected state removes only its own extraSessions entry (D40)', () => {
+  const state = applyEvents(createState(), [ev(1, 'commit_blocked', { session: 'sess-b' })]);
+  const lane = modelLane(state, [liveAt('sess-a', '/m/lane1', 1, 'busy'), liveAt('sess-b', '/m/lane1/b', 2), liveAt('sess-c', '/m/lane1/c', 3)]);
+  assert.equal(lane.ev, 'commit_blocked', 'the lane itself still reflects the shared tree\'s state');
+  assert.deepEqual(lane.extraSessions.map((s) => s.sessionId), ['sess-c'], 'sess-b\'s own commit_blocked hides sess-b; sess-c has no protected history and stays');
+});
+
+test('buildSnapshot: the live override leaves commit_blocked untouched and replaces agent_end — ev, since and waitingFor alike', () => {
+  const blocked = modelLane(applyEvents(createState(), [ev(7, 'commit_blocked')]), [liveAt('sess-a', '/m/lane1', 1, 'busy')]);
+  assert.deepEqual([blocked.ev, blocked.since, blocked.live], ['commit_blocked', 7, false]);
+
+  const waiting = { ...liveAt('sess-a', '/m/lane1', 1, 'waiting'), waitingFor: 'input needed', statusUpdatedAt: 9000 };
+  const ended = modelLane(applyEvents(createState(), [ev(7, 'agent_start', { agent: 'test-writer' }), ev(8, 'agent_end')]), [waiting]);
+  assert.deepEqual([ended.ev, ended.since, ended.waitingFor, ended.live], ['waiting', 9000, 'input needed', true]);
+});
+
+test('buildSnapshot bounds a long waitingFor to WAITING_FOR_MAX (200) exactly once — the lane\'s own row, an extra session, and RECENT history all get it from here, not by re-bounding it themselves', () => {
+  const long = 'x'.repeat(240);
+  const bounded = `${long.slice(0, 199)}…`;
+  const live = [
+    { ...liveAt('sess-a', '/m/lane1', 1, 'waiting'), waitingFor: long },
+    { ...liveAt('sess-b', '/m/lane1/sub', 2, 'waiting'), waitingFor: long },
+  ];
+  const lane = modelLane(createState(), live);
+  assert.equal(lane.waitingFor, bounded, 'the primary row\'s own waitingFor is bounded too, not only an extra session\'s');
+  assert.equal(lane.extraSessions[0].waitingFor, bounded, 'an extra session\'s waitingFor is bounded the same way');
+
+  const state = applyEvents(createState(), [ev(1, 'waiting', { waitingFor: long })]);
+  const snapshot = buildSnapshot({ project: 'demo', config: {} }, state, { now: 10_000, laneInfo: modelLaneInfo, liveStatuses: [] });
+  assert.equal(snapshot.history[0].waitingFor, bounded, 'RECENT history carries the same bound, applied once on the model side');
+});
+
+test('buildSnapshot: history entries normalize a raw event into the snapshot shape — missing optional fields become null, not undefined, and colour follows the event\'s own lane, null when it has none', () => {
+  const state = applyEvents(createState(), [
+    ev(1, 'stage', { stage: 'implement', agent: 'test-writer', detail: 'doing the thing' }),
+    { ts: 2, ev: 'lane_created', project: 'demo', worktree: 'ghost' }, // no lane at all — a foreign/vanished entry
+  ]);
+  const snapshot = buildSnapshot({ project: 'demo', config: {} }, state, { now: 10_000, laneInfo: modelLaneInfo, liveStatuses: [] });
+  const [staged, ghost] = snapshot.history;
+
+  const { color: stagedColor, ...stagedRest } = staged;
+  assert.deepEqual(stagedRest, {
+    ts: 1, project: 'demo', lane: 1, worktree: 'lane1', ev: 'stage',
+    detail: 'doing the thing', agent: 'test-writer', stage: 'implement', waitingFor: null,
+  });
+  assert.equal(typeof stagedColor, 'string', 'a laned entry carries a real colour string');
+
+  const { color: ghostColor, ...ghostRest } = ghost;
+  assert.deepEqual(ghostRest, {
+    ts: 2, project: 'demo', lane: null, worktree: 'ghost', ev: 'lane_created',
+    detail: null, agent: null, stage: null, waitingFor: null,
+  });
+  assert.equal(ghostColor, null, 'no lane means no colour to key off of — null, not undefined or an empty string');
 });
 
 test('liveTransitionNotifications stays silent on first observation, but still records the baseline', () => {

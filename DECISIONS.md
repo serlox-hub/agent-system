@@ -67,7 +67,7 @@ A `lane_created`/`removed`/`reset` event names a specific worktree — it says n
 Rejected: applying the same exclusion to both folds for symmetry — looks cleaner, but breaks `lane_reset`/`lane_created`, where the row taking on that `ev` is literally the effect those two events exist to produce (this was actually introduced and caught mid-implementation of this same phase).
 
 ## D38 — The primary row's CTX resolves through its own live session when known, not only the lane-level transcript
-`core` · 2026-08 · `ui/dashboard.mjs:render` · #14
+`core` · 2026-08 · `ui/dashboard.mjs:snapshotLane` · #14
 `state.lanes`'s `transcript` field is last-write-wins across every session sharing a worktree, not scoped per session — with two sessions in one lane it could silently show the wrong session's token count. Invisible until Phase 3 gave each session its own row to compare against.
 Rejected: leaving it "unchanged," as the Phase 4 spec text literally said — that would have preserved a bug this same phase makes visible for the first time (the same number shown twice, one of them mislabeled).
 
@@ -122,7 +122,7 @@ Dropping the STAGE column (#9) was a display decision; the field is the load-bea
 Rejected: deleting it as dead state — it looks unread, but removing it risks taking the stage-is-not-a-liveness-signal guard down with it.
 
 ## D29 — `lanes status`'s frame caps at 100 columns even on a wider terminal
-`core` · 2026-08 · `ui/dashboard.mjs:render` · #9
+`core` · 2026-08 · `ui/dashboard.mjs:renderSnapshot` · #9
 Keeps one consistent, compact shape at the user's real pane size instead of reflowing on every resize; still adapts down below 100, and drops CTX below 85 rather than starve BRANCH.
 Rejected: letting BRANCH absorb the extra room on a wide terminal — recreates the pre-#9 behaviour where the same lane renders a different shape in every pane.
 
@@ -169,16 +169,16 @@ Rejected: a fixed-denominator percentage — an earlier draft used 200K and real
 sonnet-5 sessions hit 165% of it, a confident-looking number that is wrong on
 exactly the sessions this feature exists to warn about.
 
-## D24 — `boundPort` stays in `lib/services.mjs`, not inlined into `serviceCell`
+## D24 — `boundPort` stays in `lib/services.mjs`, not inlined into `serviceFor`
 `core` · 2026-08 · `lib/services.mjs:boundPort`
-Has exactly one caller now (`ui/dashboard.mjs`'s `serviceCell`, `lanes status`'s
-only renderer since `lanes list` was retired), but its own branches — stopped,
-running-and-matching, running-and-diverged, and a pidfile that never recorded a
-port — get direct test coverage this way instead of only exercising it
-indirectly through the renderer.
-Rejected: inlining it into `serviceCell` now that only one caller is left — the
-obvious cleanup, but it drops those branches back into a renderer, untestable
-except through the full `render()` output.
+Has exactly one caller (`serviceFor`, the snapshot's running-service
+resolution), but its own branches — stopped, running-and-matching,
+running-and-diverged, and a pidfile that never recorded a port — get direct
+test coverage this way, with no pidfile or live process to fake per branch.
+Rejected: inlining it into `serviceFor` now that only one caller is left — the
+obvious cleanup; the result would still be reachable as data through
+`buildSnapshot`'s `service` field, but every branch would then need a real
+pidfile and a live pid to exercise.
 
 ## D23 — agent-system never installs a `statusLine` hook, only merges into `hooks`
 `product` · 2026-08 · `install.mjs`, `hooks/emit.mjs`, `lib/transcript.mjs` · #4
