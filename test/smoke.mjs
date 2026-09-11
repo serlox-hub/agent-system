@@ -47,7 +47,7 @@ const { mainWorktreeRoot, readLocalOverride, writeLocalOverride, isGitignored } 
 const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYPASS_MARK } = await import(
   `${ROOT}/lib/marks.mjs`
 );
-const { createState, applyEvents, render, buildSnapshot, renderSnapshot, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications, pruneSessionHistory } = await import(
+const { createState, applyEvents, render, buildSnapshot, renderSnapshot, createLaneSource, notifyTitle, fmtTokens, fmtElapsed, liveTransitionNotifications, pruneSessionHistory } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
@@ -4077,6 +4077,133 @@ test('buildSnapshot: history entries normalize a raw event into the snapshot sha
     detail: null, agent: null, stage: null, waitingFor: null,
   });
   assert.equal(ghostColor, null, 'no lane means no colour to key off of — null, not undefined or an empty string');
+});
+
+// ── Lane source (#19) ────────────────────────────────────────────────
+// createLaneSource is watchStatus's refresh cycle without the TTY, so its
+// notification path is testable at last. Real (sandboxed) events log and
+// sessions dir; events are appended directly rather than through emit(), so
+// no ambient session id or log rotation can leak into what a test asserts.
+const appendEvent = (e) => appendFileSync(join(LANES_DIR, 'events.jsonl'), `${JSON.stringify(e)}\n`);
+const recordingSource = () => {
+  const notified = [];
+  const source = createLaneSource(resolveContext(lane2), { onNotify: (n) => notified.push(n) });
+  return { source, notified };
+};
+
+test('createLaneSource: replayed history hands nothing to onNotify, and an appended idle is handed over exactly once, with today\'s title and body', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  appendEvent({ ts: 1, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1' }); // already history once the source is built
+  const { source, notified } = recordingSource();
+  source.advance();
+  assert.deepEqual(notified, [], 'the existing log is replayed into state, never notified');
+
+  appendEvent({ ts: 2, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1', issue: '401' });
+  source.advance();
+  assert.deepEqual(notified, [{ title: 'demo · lane 1 · #401', body: 'Waiting for you' }]);
+  source.advance();
+  assert.equal(notified.length, 1, 'an event is news once — the next tick reads nothing new');
+});
+
+test('createLaneSource: a raw idle and a live busy→idle transition for the same session in one tick notify once, not twice', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const writeLive = (status) => writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: join(wtDir, 'lane1'), status, sessionId: 'sess-src', statusUpdatedAt: 1 }),
+  );
+  try {
+    // An unprotected lane state first: under a protected one (the suite's
+    // own commit_blocked, say) no baseline is recorded, no transition can
+    // fire, and the dedup below would pass without being exercised.
+    appendEvent({ ts: 1, ev: 'busy', project: 'demo', lane: 1, worktree: 'lane1', session: 'sess-src' });
+    writeLive('busy');
+    const { source, notified } = recordingSource();
+    source.advance();
+    assert.deepEqual(notified, [], 'first observation only records the baseline');
+
+    writeLive('idle');
+    appendEvent({ ts: 2, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1', session: 'sess-src' });
+    source.advance();
+    assert.deepEqual(notified, [{ title: 'demo · lane 1', body: 'Waiting for you' }], 'the raw event notifies; the same session\'s live transition is deduped against it');
+
+    writeLive('waiting');
+    source.advance();
+    assert.equal(notified.length, 2, 'control: a live transition with no raw event in its tick does notify');
+  } finally {
+    rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  }
+});
+
+test('createLaneSource: a raw event whose ev only resolves via Object.prototype notifies nothing and never throws', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  const { source, notified } = recordingSource();
+  for (const e of ['__proto__', 'constructor', 'toString']) appendEvent({ ts: 3, ev: e, project: 'demo', lane: 1, worktree: 'lane1' });
+  assert.doesNotThrow(() => source.advance());
+  assert.deepEqual(notified, [], 'none of these is a notifying event — resolving one off the prototype chain sends "[object Object]"');
+});
+
+test('createLaneSource: snapshot() before any advance() throws, rather than quietly reading git for its lanes', () => {
+  const { source } = recordingSource();
+  assert.throws(() => source.snapshot(), /before the first advance/);
+  source.advance();
+  assert.doesNotThrow(() => source.snapshot());
+});
+
+test('createLaneSource: a raw-event notification is handed over before anything later in the tick can throw — why advance() does not return them', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  const notified = [];
+  // `config` is first read by the 20-tick refresh, after the fold — a late throw.
+  const source = createLaneSource({ project: 'demo', get config() { throw new Error('late failure'); } }, { onNotify: (n) => notified.push(n) });
+  appendEvent({ ts: 4, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1' });
+  assert.throws(() => source.advance(), /late failure/);
+  assert.deepEqual(notified, [{ title: 'demo · lane 1', body: 'Waiting for you' }], 'the event was consumed from the log, so its notification must already be out');
+});
+
+test('createLaneSource: an onNotify that throws costs neither the fold of events already read nor the rest of the tick\'s notifications', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  let calls = 0;
+  const source = createLaneSource(resolveContext(lane2), { onNotify: () => { calls += 1; throw new Error('notifier down'); } });
+  appendEvent({ ts: 5, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1', detail: 'throwing-notifier-a' });
+  appendEvent({ ts: 6, ev: 'idle', project: 'demo', lane: 2, worktree: 'lane2', detail: 'throwing-notifier-b' });
+  assert.doesNotThrow(() => source.advance());
+  assert.equal(calls, 2, 'the second notification is still handed over after the first one threw');
+  const details = source.snapshot().history.map((e) => e.detail);
+  assert.ok(details.includes('throwing-notifier-a') && details.includes('throwing-notifier-b'), 'both events were folded although their notifier threw');
+});
+
+test('createLaneSource: snapshot() reuses the last advance()\'s reads, live statuses refresh on every advance(), git only on every 20th', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  mkdirSync(SESSIONS_DIR, { recursive: true });
+  const lane3Path = join(wtDir, 'lane3');
+  const probe = join(lane3Path, 'throttle-probe.txt');
+  const writeLive = (status) => writeFileSync(
+    join(SESSIONS_DIR, `${process.pid}.json`),
+    JSON.stringify({ pid: process.pid, cwd: lane3Path, status, sessionId: 'sess-cost', statusUpdatedAt: 1 }),
+  );
+  try {
+    appendEvent({ ts: 1, ev: 'busy', project: 'demo', lane: 3, worktree: 'lane3', session: 'sess-cost' });
+    writeLive('busy');
+    const { source } = recordingSource();
+    const lane3 = () => source.snapshot().groups[0].lanes.find((l) => l.lane === 3);
+    source.advance(); // tick 0: the first refresh
+    const marksBefore = lane3().marks;
+    assert.equal(lane3().ev, 'busy');
+
+    writeLive('idle');
+    writeFileSync(probe, 'x'); // one more untracked file: marks change once git is re-read
+    assert.equal(lane3().ev, 'busy', 'snapshot() alone re-reads nothing, not even the cheap live statuses');
+
+    for (let tick = 1; tick < 20; tick++) source.advance();
+    assert.equal(lane3().ev, 'idle', 'live statuses are re-read on every advance()');
+    assert.deepEqual(lane3().marks, marksBefore, 'git is not re-read before the 20th advance()');
+
+    source.advance(); // tick 20
+    assert.notDeepEqual(lane3().marks, marksBefore, 'the 20th advance() refreshes git, and the new file shows up');
+  } finally {
+    rmSync(probe, { force: true });
+    rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  }
 });
 
 test('liveTransitionNotifications stays silent on first observation, but still records the baseline', () => {

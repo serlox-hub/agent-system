@@ -187,10 +187,12 @@ export function notifyTitle(e) {
 function notify(title, body) {
   try {
     const esc = (s) => String(s).replace(/["\\]/g, '\\$&');
+    // A missing `osascript` (anything but macOS) fails asynchronously, as an
+    // 'error' event the catch below never sees — unheard, it kills the process.
     spawn('osascript', ['-e', `display notification "${esc(body)}" with title "${esc(title)}"`], {
       stdio: 'ignore',
       detached: true,
-    }).unref();
+    }).on('error', () => { /* notifications are optional */ }).unref();
   } catch { /* notifications are optional */ }
 }
 
@@ -313,7 +315,7 @@ export function applyEvents(state, events) {
  * in place. `readLiveStatuses()` is global — every Claude Code session on
  * the machine, any project, any window — so retaining every live session's
  * history would keep `ctxInfo`'s throttled `readContext()` walk (see
- * `watchStatus`) doing real per-tick work for sessions `render()` never
+ * `createLaneSource`) doing real per-tick work for sessions `render()` never
  * looks at. `session_end` is not reliably observed (#12's own
  * investigation), so this is the only eviction path `sessionHistory` has.
  */
@@ -489,7 +491,7 @@ function ctxCell(context) {
  * `{ tokens, model }` for a transcript, or `null`.
  *
  * `ctxInfo`, when supplied, is a `Map<transcriptPath, {tokens,model}|null>`
- * refreshed on the same ~20-tick cadence as `laneInfo` (see `watchStatus`) rather
+ * refreshed on the same ~20-tick cadence as `laneInfo` (see `createLaneSource`) rather
  * than read fresh every second — a real transcript's trailing line can run
  * past the 256KB fast-path window, and the full-file fallback that follows
  * measures 7-12ms on real multi-MB files, not the sub-millisecond figure a
@@ -628,7 +630,7 @@ function withLiveOverride(rows, liveStatuses) {
  * not just `laneKey`, so two sessions in one lane track independent
  * baselines and a transition on one is never compared against the other's
  * last value. Skips a session already covered by a raw-event notification
- * this tick (`notifiedKeys`, keyed to match by `watchStatus`) so a normal
+ * this tick (`notifiedKeys`, keyed to match by `createLaneSource`'s `advance()`) so a normal
  * `Stop` — which already notifies off the raw event — never double-fires
  * just because the live file updated in the same tick.
  *
@@ -643,8 +645,8 @@ function withLiveOverride(rows, liveStatuses) {
  *
  * Callers must pass the COMPLETE row set: the final pass treats any tracked
  * key not re-validated this call as gone, so a filtered `rows` would
- * silently drop the omitted lanes' baselines. The one caller (`watchStatus`)
- * always passes `rowsFor(...)` whole.
+ * silently drop the omitted lanes' baselines. The one caller
+ * (`createLaneSource`'s `advance()`) always passes `rowsFor(...)` whole.
  */
 export function liveTransitionNotifications(rows, liveStatuses, sessionHistory, prevLiveEv, notifiedKeys) {
   const out = [];
@@ -997,31 +999,30 @@ export function printStatus() {
   process.stdout.write(`${render(ctx, state)}\n`);
 }
 
-/** `lanes status`: the same frame as `printStatus`, redrawn in place once a second. */
-export async function watchStatus() {
-  // A redraw loop into a pipe or a file is an unbounded ANSI dump nobody
-  // reads — piping `lanes status` (a script, or an agent's own Bash call)
-  // means a one-shot snapshot was wanted, so give it one instead of hanging.
-  if (!process.stdout.isTTY) return printStatus();
-
-  const ctx = resolveContext(process.cwd());
+/**
+ * The watch loop's refresh cycle with no terminal in it. `advance()` is one
+ * tick, in the order that matters: tail the log, hand each new event's
+ * notification to `onNotify` *before* the fold — so a throw anywhere later
+ * in the tick never loses a notification whose event was already consumed —
+ * fold, read live statuses, run the 20-tick refresh, then hand over the live
+ * transitions. One owner calls `advance()` at its cadence (the throttle
+ * counts calls, not seconds); any number of consumers call `snapshot()`,
+ * which reuses the last `advance()`'s reads — a second view in the same
+ * process costs no git, no transcript read and no duplicate notification.
+ *
+ * Construction replays the existing log into state without notifying: only
+ * events that arrive after it are news.
+ */
+export function createLaneSource(ctx, { onNotify = () => {} } = {}) {
   const tail = new EventTail(EVENTS_FILE);
   const state = createState();
 
   // Replay history for state, but never notify for it — only live events.
   applyEvents(state, tail.read());
 
-  process.stdout.write('\x1b[?25l'); // hide cursor
-  const restore = () => {
-    process.stdout.write('\x1b[?25h\x1b[2J\x1b[H');
-    process.exit(0);
-  };
-  process.on('SIGINT', restore);
-  process.on('SIGTERM', restore);
-
   // Git-derived per-lane data costs a subprocess set per lane, so it is
-  // refreshed only every 20 ticks (~20s at the 1Hz redraw below) rather than
-  // on every paint — including which worktrees exist, so a lane created or
+  // refreshed only every 20 `advance()` calls (~20s at `watchStatus`'s 1 Hz
+  // cadence) rather than on every one — including which worktrees exist, so a lane created or
   // removed elsewhere can take up to ~20s to appear/disappear here. Setup-time
   // action, not a per-task one, so that lag is accepted rather than paid for
   // on every tick.
@@ -1031,7 +1032,7 @@ export async function watchStatus() {
   // back to a full-file read+parse — measured at 7-12ms on real multi-MB
   // files, not the sub-millisecond cost a per-row-per-second read assumed.
   // Throttled on the same 20-tick cadence as laneInfo rather than read fresh
-  // every paint; only the transcript paths currently on screen are read.
+  // every `advance()`; only the transcript paths currently on screen are read.
   let ctxInfo = new Map();
   // Per-session live status from the previous tick, keyed
   // `${project}#${worktree}#${sessionId}` (#14 Phase 5), so a transition
@@ -1039,9 +1040,16 @@ export async function watchStatus() {
   // transient watch-loop state, never folded into `state` itself. See
   // liveTransitionNotifications.
   const prevLiveEv = new Map();
+  let liveStatuses;
+  // `notify()` swallows its own failures; every onNotify gets the same
+  // contract here, so a failing notifier costs neither the fold of events
+  // already read nor the rest of the tick's notifications.
+  const hand = (notification) => {
+    try { onNotify(notification); } catch { /* notifications are optional */ }
+  };
 
-  const paint = () => {
-    try {
+  return {
+    advance() {
       const fresh = tail.read();
       // Keyed per session (#14 Phase 5), matching liveTransitionNotifications'
       // own `${laneKey}#${sessionId}` baseline key — `session ?? 'primary'`
@@ -1053,22 +1061,22 @@ export async function watchStatus() {
       for (const e of fresh) {
         const body = Object.hasOwn(NOTIFY, e.ev) ? NOTIFY[e.ev](e) : null;
         if (body) {
-          notify(notifyTitle(e), body);
+          hand({ title: notifyTitle(e), body });
           notifiedKeys.add(`${e.project || '?'}#${e.worktree ?? '?'}#${e.session ?? 'primary'}`);
         }
       }
       applyEvents(state, fresh);
       tick += 1;
-      // Read here, ABOVE the throttle block below, not after it as before
-      // #14 Phase 4 — the sessionHistory prune inside that block now needs
-      // it. Moving this back down under the block is a TDZ `ReferenceError`
-      // that `paint()`'s own `catch {}` swallows silently, freezing the
-      // dashboard on its last frame with no error printed anywhere.
-      // Otherwise unchanged: read once per tick, unthrottled (unlike
-      // laneInfo/ctxInfo below) — a handful of small local JSON files, cheap
-      // even every second — shared between the notification check, render(),
-      // and the throttled block, so everything agrees on one snapshot.
-      const liveStatuses = readLiveStatuses();
+      // Read here, ABOVE the throttle block below — the sessionHistory prune
+      // inside it needs this tick's statuses. Read below it instead, tick 0
+      // prunes against `undefined` and throws (dropping that frame and leaving
+      // CTX empty until tick 20), and every later prune runs a tick stale —
+      // dropping the history, and CTX, of a session that just attached. Read once per tick, unthrottled
+      // (unlike laneInfo/ctxInfo below) — a handful of small local JSON
+      // files, cheap even every second — and shared between the notification
+      // check, the throttled block and `snapshot()`, so everything agrees on
+      // one read.
+      liveStatuses = readLiveStatuses();
       if (tick % 20 === 0) {
         laneInfo = enumerateLanes(ctx.config);
         const next = new Map();
@@ -1090,13 +1098,44 @@ export async function watchStatus() {
         }
         ctxInfo = next;
       }
-      for (const { title, body } of liveTransitionNotifications(rowsFor(ctx, state.lanes, laneInfo), liveStatuses, state.sessionHistory, prevLiveEv, notifiedKeys)) {
-        notify(title, body);
+      for (const notification of liveTransitionNotifications(rowsFor(ctx, state.lanes, laneInfo), liveStatuses, state.sessionHistory, prevLiveEv, notifiedKeys)) {
+        hand(notification);
       }
+    },
+
+    snapshot(now = Date.now()) {
+      // `laneInfo` is only ever set by `advance()`: without this guard,
+      // buildSnapshot's default would quietly read git on a consumer's call.
+      if (laneInfo === undefined) throw new Error('snapshot() called before the first advance()');
+      return buildSnapshot(ctx, state, { now, laneInfo, ctxInfo, liveStatuses });
+    },
+  };
+}
+
+/** `lanes status`: the same frame as `printStatus`, redrawn in place once a second. */
+export async function watchStatus() {
+  // A redraw loop into a pipe or a file is an unbounded ANSI dump nobody
+  // reads — piping `lanes status` (a script, or an agent's own Bash call)
+  // means a one-shot snapshot was wanted, so give it one instead of hanging.
+  if (!process.stdout.isTTY) return printStatus();
+
+  const source = createLaneSource(resolveContext(process.cwd()), { onNotify: ({ title, body }) => notify(title, body) });
+
+  process.stdout.write('\x1b[?25l'); // hide cursor
+  const restore = () => {
+    process.stdout.write('\x1b[?25h\x1b[2J\x1b[H');
+    process.exit(0);
+  };
+  process.on('SIGINT', restore);
+  process.on('SIGTERM', restore);
+
+  const paint = () => {
+    try {
+      source.advance();
       // Full redraw: cheap at this size, and it avoids every partial-update
       // artefact that incremental cursor movement would introduce.
       process.stdout.write(
-        `\x1b[2J\x1b[H${render(ctx, state, Date.now(), laneInfo, ctxInfo, liveStatuses)}\n${C.dim}ctrl-c to quit${C.reset}\n`,
+        `\x1b[2J\x1b[H${renderSnapshot(source.snapshot(), { width: process.stdout.columns })}\n${C.dim}ctrl-c to quit${C.reset}\n`,
       );
     } catch {
       /* never let a render bug kill the dashboard */
