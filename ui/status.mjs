@@ -7,7 +7,8 @@
  *   - Lane numbers are stable: baked into the `lane<N>` directory name at
  *     creation time (D26), never recomputed from position. `lanes rm` frees a
  *     number back up for reuse by the next `lanes new`, so it can still repeat
- *     across two different worktrees over time — see applyEvents in lib/event-fold.mjs.
+ *     across two different worktrees over time — see applyEvents in
+ *     lib/event-fold.mjs.
  *   - Bounded memory. It is meant to sit in a terminal for weeks, so state is
  *     folded incrementally and history is capped — nothing accumulates.
  *   - Never crash. A malformed line, a vanished directory or a resize must

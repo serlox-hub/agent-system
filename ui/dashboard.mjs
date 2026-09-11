@@ -284,9 +284,9 @@ export function renderSnapshot(snapshot, { width } = {}) {
   // HISTORY_LIMIT-capped window rolls, reflowing all 12 lines by a column
   // width on every tick a foreign event enters or leaves it — visible jitter
   // with no state change the user caused, exactly what D29 (above) and D37
-  // (lib/lane-model.mjs) already rule against. RECENT lines carry no fixed-width cap
-  // (`detail` alone runs to 300 chars), so the always-on column costs
-  // nothing the frame was protecting.
+  // (lib/lane-model.mjs) already rule against. RECENT lines carry no
+  // fixed-width cap (`detail` alone runs to 300 chars), so the always-on
+  // column costs nothing the frame was protecting.
   for (const e of snapshot.history.slice().reverse()) {
     const s = stateOf(e.ev);
     // Fall back to worktree name when there is no lane number — same fallback

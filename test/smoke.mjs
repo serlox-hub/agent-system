@@ -1541,6 +1541,18 @@ test('buildSnapshot: the service field is a plain shape — { url, port: string,
   }
 });
 
+test('buildSnapshot still self-heals a stale pidfile — the side effect moved into the model with serviceFor, it was not dropped (#19)', () => {
+  const lane = { lane: 1, name: 'lane1', path: '/stale-pid/lane1', branch: 'main', isBase: true, dirty: false, dirtyCount: 0, ahead: 0, behind: 0, baseKnown: true };
+  const cfg = { project: 'stale-pid', dev: { services: [{ name: 'web', command: 'true', portBase: 300 }] } };
+  const { pidFile } = sv.resolveServices(cfg, lane)[0];
+  const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+  mkdirSync(dirname(pidFile), { recursive: true });
+  writeFileSync(pidFile, `${dead.pid} 3001\n`);
+  const snapshot = buildSnapshot({ project: 'stale-pid', config: cfg }, createState(), { now: 1, laneInfo: [lane], ctxInfo: new Map(), liveStatuses: [] });
+  assert.equal(snapshot.groups[0].lanes[0].service, null, 'a dead pid is not a running service');
+  assert.equal(existsSync(pidFile), false, 'one snapshot deletes the confirmed-dead pidfile, as one render() did before #19');
+});
+
 test('dashboard: a row with no .name (foreign project or vanished lane) is never passed into resolveServices', () => {
   const state = createState();
   state.lanes.set('demo#demo-ghost-2', { project: 'demo', worktree: 'demo-ghost-2', ev: 'idle', since: 1 });
@@ -4213,36 +4225,45 @@ test('createLaneSource: an onNotify that throws costs neither the fold of events
   assert.ok(details.includes('throwing-notifier-a') && details.includes('throwing-notifier-b'), 'both events were folded although their notifier threw');
 });
 
-test('createLaneSource: snapshot() reuses the last advance()\'s reads, live statuses refresh on every advance(), git only on every 20th', () => {
+test('createLaneSource: snapshot() reuses the last advance()\'s reads, live statuses refresh on every advance(), git and transcripts only on every 20th', () => {
   rmSync(SESSIONS_DIR, { recursive: true, force: true });
   mkdirSync(SESSIONS_DIR, { recursive: true });
   const lane3Path = join(wtDir, 'lane3');
   const probe = join(lane3Path, 'throttle-probe.txt');
+  const usage = (tokens) => [assistantLine('claude-sonnet-5', { input_tokens: tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 })];
+  // Outside the worktree, so rewriting it never shows up in `marks`.
+  const transcript = writeTranscript('throttle-ctx.jsonl', usage(1000));
   const writeLive = (status) => writeFileSync(
     join(SESSIONS_DIR, `${process.pid}.json`),
     JSON.stringify({ pid: process.pid, cwd: lane3Path, status, sessionId: 'sess-cost', statusUpdatedAt: 1 }),
   );
   try {
-    appendEvent({ ts: 1, ev: 'busy', project: 'demo', lane: 3, worktree: 'lane3', session: 'sess-cost' });
+    appendEvent({ ts: 1, ev: 'busy', project: 'demo', lane: 3, worktree: 'lane3', session: 'sess-cost', transcript });
     writeLive('busy');
     const { source } = recordingSource();
     const lane3 = () => source.snapshot().groups[0].lanes.find((l) => l.lane === 3);
     source.advance(); // tick 0: the first refresh
     const marksBefore = lane3().marks;
     assert.equal(lane3().ev, 'busy');
+    assert.equal(lane3().context.tokens, 1000);
 
     writeLive('idle');
     writeFileSync(probe, 'x'); // one more untracked file: marks change once git is re-read
+    writeTranscript('throttle-ctx.jsonl', usage(2000));
     assert.equal(lane3().ev, 'busy', 'snapshot() alone re-reads nothing, not even the cheap live statuses');
+    assert.equal(lane3().context.tokens, 1000, 'nor a transcript');
 
     for (let tick = 1; tick < 20; tick++) source.advance();
     assert.equal(lane3().ev, 'idle', 'live statuses are re-read on every advance()');
     assert.deepEqual(lane3().marks, marksBefore, 'git is not re-read before the 20th advance()');
+    assert.equal(lane3().context.tokens, 1000, 'nor transcripts');
 
     source.advance(); // tick 20
     assert.notDeepEqual(lane3().marks, marksBefore, 'the 20th advance() refreshes git, and the new file shows up');
+    assert.equal(lane3().context.tokens, 2000, 'and re-reads the transcripts on screen');
   } finally {
     rmSync(probe, { force: true });
+    rmSync(transcript, { force: true });
     rmSync(SESSIONS_DIR, { recursive: true, force: true });
   }
 });
