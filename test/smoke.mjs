@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,7 +49,8 @@ const { diffFingerprint, changedLineCount, writeMark, readMark, REVIEW_MARK, BYP
 );
 const { EventTail, createState, applyEvents, pruneSessionHistory } = await import(`${ROOT}/lib/event-fold.mjs`);
 const { buildSnapshot, createLaneSource, notifyTitle, liveTransitionNotifications } = await import(`${ROOT}/lib/lane-model.mjs`);
-const { render, renderSnapshot, fmtTokens, fmtElapsed } = await import(
+const { render } = await import(`${ROOT}/ui/status.mjs`);
+const { renderSnapshot, fmtTokens, fmtElapsed } = await import(
   `${ROOT}/ui/dashboard.mjs`
 );
 const { readContext } = await import(`${ROOT}/lib/transcript.mjs`);
@@ -4003,6 +4004,26 @@ test('renderSnapshot takes its width from the caller only, never process.stdout.
     assert.equal(renderSnapshot(snapshot, { width: 200 }), GOLDEN_FRAME_100, 'capped at 100 however wide');
     assert.equal(renderSnapshot(snapshot, {}), GOLDEN_FRAME_100, 'an unknown width renders at 100');
   });
+});
+
+test('import boundary: ui/dashboard.mjs imports only ansi from lib/colors.mjs, and no lib/ module imports from ui/ (#19)', () => {
+  const importsOf = (file) => {
+    const src = readFileSync(join(ROOT, file), 'utf8');
+    assert.ok(!/\bimport\(/.test(src), `${file} has a dynamic import, which this check cannot see through`);
+    return [...src.matchAll(/^import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"]/gm)].map(([, names, from]) => ({ names: names.replace(/\s+/g, ' '), from }));
+  };
+  assert.deepEqual(importsOf('ui/dashboard.mjs'), [{ names: '{ ansi }', from: '../lib/colors.mjs' }], 'the renderer stays pure: no I/O module, no model');
+  // `process` is a global — no import to catch — so the renderer's other half of pure is checked on its source.
+  assert.ok(!/\bprocess\s*[.[]/.test(readFileSync(join(ROOT, 'ui', 'dashboard.mjs'), 'utf8')), 'the renderer reads no process state: its caller passes the width in');
+  for (const file of readdirSync(join(ROOT, 'lib')).filter((f) => f.endsWith('.mjs'))) {
+    const src = readFileSync(join(ROOT, 'lib', file), 'utf8');
+    assert.ok(!/\bimport\(/.test(src), `lib/${file} has a dynamic import, which this check cannot see through`);
+    // Every static specifier: `import … from`, `export … from` and a bare `import '…'`.
+    for (const m of src.matchAll(/\bfrom\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]/gm)) {
+      const spec = m[1] ?? m[2];
+      assert.ok(!/(^|\/)ui\//.test(spec), `lib/${file} imports ${spec} — the dependency runs ui/ → lib/, never back`);
+    }
+  }
 });
 
 // ── Snapshot model (#19) ─────────────────────────────────────────────
