@@ -1,3 +1,17 @@
+/**
+ * The terminal view: `renderSnapshot` draws a `buildSnapshot` result
+ * (lib/lane-model.mjs) and decides nothing about what is true. A rule about
+ * what a row *means* — the live override, which sessions get a row, what
+ * counts as live — belongs in the model, where every view shares it; here it
+ * would be one view's private copy, free to drift.
+ *
+ * Pure — no I/O, no `process` reads, only the clock's local time zone is
+ * ambient — which is what lets #19's golden frames pin every byte. And it must
+ * not throw on what a snapshot carries: `ev` can come straight from an
+ * untrusted live-status file, so `stateOf` falls back on an unknown one
+ * rather than looking it up blindly.
+ */
+
 import { ansi } from '../lib/colors.mjs';
 
 export const C = {
@@ -56,16 +70,17 @@ const STATES = {
 function stateOf(ev) {
   // null/undefined means the fold never saw a liveness event at all for this
   // lane — distinct from `session_end`, which means it saw one close. A stage
-  // marker alone (applyEvents no longer lets `stage` set `ev`) is the usual way
-  // to land here: real progress was recorded with no session to attach it to,
-  // so claiming a state — even "offline" — would overclaim.
+  // marker alone (applyEvents, lib/event-fold.mjs, no longer lets `stage` set
+  // `ev`) is the usual way to land here: real progress was recorded with no
+  // session to attach it to, so claiming a state — even "offline" — would
+  // overclaim.
   if (ev == null) return { icon: '·', color: C.dim, label: () => 'no session seen' };
   // `Object.hasOwn`, not `STATES[ev] ||` — `ev` can come straight from an
   // untrusted live-status file (lib/live-status.mjs) once withLiveOverride
-  // assigns it, and a value like `constructor` resolves on the plain object
-  // literal via the prototype chain, returning a function where a state
-  // descriptor was expected and throwing inside renderSnapshot() the moment
-  // `s.label(r)` is called.
+  // (lib/lane-model.mjs) assigns it, and a value like `constructor` resolves
+  // on the plain object literal via the prototype chain, returning a function
+  // where a state descriptor was expected and throwing inside renderSnapshot()
+  // the moment `s.label(r)` is called.
   return Object.hasOwn(STATES, ev) ? STATES[ev] : { icon: '·', color: C.dim, label: () => ev };
 }
 
@@ -81,11 +96,12 @@ const MARKS_TONE = { danger: `${C.bold}${C.red}`, dirty: C.yellow, ahead: C.gree
  * misalign on text that already carries ANSI codes.
  *
  * A row with no branch — a foreign-project/vanished-lane row kept alive by
- * `rowsFor`'s fail-open `existsSync` check, or a declared lane mid a transient
- * git-read failure — falls back to the worktree name in the branch slot, the
- * one identifier that always exists (matches `notifyTitle`'s fallback), but
- * still shows a carried-forward issue or marks: a failed *branch* read must
- * not blank an issue number `rowsFor` already decided to keep.
+ * `rowsFor`'s fail-open `existsSync` check (lib/lane-model.mjs), or a
+ * declared lane mid a transient git-read failure — falls back to the worktree
+ * name in the branch slot, the one identifier that always exists (matches
+ * `notifyTitle`'s fallback, lib/lane-model.mjs), but still shows a
+ * carried-forward issue or marks: a failed *branch* read must not blank an
+ * issue number `rowsFor` already decided to keep.
  *
  * Carries no project identity of its own — a row from another project (D8:
  * the events log and live-status dir are both machine-global, so `rowsFor`
@@ -158,8 +174,8 @@ const BRANCH_FLOOR = 20;
  * same rule either way. Extracted so a status added to `STATES` only needs
  * its colour/label rule written once, instead of drifting between two
  * copies — the same failure mode `serviceFor`'s own docstring
- * documents having already been paid for once, when its two halves were
- * independently re-derived and disagreed.
+ * (lib/lane-model.mjs) documents having already been paid for once, when its
+ * two halves were independently re-derived and disagreed.
  *
  * `labelInput` is whatever `STATES[ev].label` expects: the snapshot lane for
  * the primary row (`agent_start`'s `e.agent`, `stage`'s `e.stage`, …), or the
@@ -258,7 +274,8 @@ export function renderSnapshot(snapshot, { width } = {}) {
           extraForCell,
         ];
         // Always live-toned, never dimmed: unlike row `[0]`, an extra row only
-        // ever exists for a session `readLiveStatuses()` just confirmed is live.
+        // ever exists for a session `readLiveStatuses()` (lib/live-status.mjs)
+        // just confirmed is live.
         if (showCtx) extraCells.push(pad(ctxCell(s.context), CTX_WIDTH));
         out.push(extraCells.join(' '));
       }
@@ -290,8 +307,9 @@ export function renderSnapshot(snapshot, { width } = {}) {
   for (const e of snapshot.history.slice().reverse()) {
     const s = stateOf(e.ev);
     // Fall back to worktree name when there is no lane number — same fallback
-    // as `branchCell`'s ghost-row case and `notifyTitle`, so a row is never
-    // reduced to the bare `·` placeholder with nothing to identify it by.
+    // as `branchCell`'s ghost-row case and `notifyTitle` (lib/lane-model.mjs),
+    // so a row is never reduced to the bare `·` placeholder with nothing to
+    // identify it by.
     const rawWho = e.lane ?? e.worktree ?? '·';
     // An event with no lane falls back to its worktree name (above), which
     // for a main-repo/non-lane session is that repo's own directory name —

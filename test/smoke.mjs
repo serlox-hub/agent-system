@@ -12,7 +12,8 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync, existsSync, readdirSync } from 'node:fs';
+import fs, { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, appendFileSync, realpathSync, existsSync, readdirSync, renameSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -580,11 +581,9 @@ test('emit() treats an event with an explicit session: undefined as owning the k
 // ── Dashboard state ─────────────────────────────────────────────────
 
 // EventTail wasn't exported before #19 phase 3 moved it to lib/event-fold.mjs,
-// so it was only ever exercised indirectly through createLaneSource. Log
-// rotation and short reads (readSync returning fewer bytes than stat saw) are
-// known-broken and deferred to a follow-up issue — not covered here. This
-// covers a plain missing file and a malformed complete line, both independent
-// of that offset logic.
+// so it was only ever exercised indirectly through createLaneSource. The tests
+// below pin its offset logic directly: rotation, short reads and torn lines
+// (#22).
 test('EventTail.read() returns nothing for a file that does not exist yet, and skips a malformed line without throwing', () => {
   const tailFile = join(TMP, 'event-tail-test.jsonl');
   const tail = new EventTail(tailFile);
@@ -611,6 +610,130 @@ test('EventTail.read() strips control bytes from every event string except path 
   assert.equal(e.session, 's1', 'stripped like readLiveStatuses\' sessionId, so the two still join');
   assert.equal(e.path, raw.path, 'paths are matched against the filesystem, never printed — kept byte for byte');
   assert.equal(e.transcript, raw.transcript);
+});
+
+test('EventTail.read() follows a log rotation without losing a line from either file (#22)', () => {
+  const tailFile = join(TMP, 'event-tail-rotation.jsonl');
+  const line = (ts, extra = {}) => `${JSON.stringify({ ts, ev: 'idle', ...extra })}\n`;
+  writeFileSync(tailFile, line(1) + line(2));
+  const tail = new EventTail(tailFile);
+  assert.deepEqual(tail.read().map((e) => e.ts), [1, 2]);
+
+  // emit(A) lands in the old file and pushes it past the rotation size;
+  // emit(B) rotates and starts a fresh file, smaller than the tail's offset.
+  appendFileSync(tailFile, line(3));
+  renameSync(tailFile, `${tailFile}.1`);
+  writeFileSync(tailFile, line(4));
+  assert.deepEqual(tail.read().map((e) => e.ts), [3, 4], 'A is drained from the old file before B is read from the new one');
+  appendFileSync(tailFile, line(5));
+  assert.deepEqual(tail.read().map((e) => e.ts), [5], 'and the new file is followed from where that read left off');
+
+  // A fresh file already past the old offset: no size check can see this
+  // rotation, and reading the new file from the old offset lands mid-line.
+  renameSync(tailFile, `${tailFile}.1`);
+  writeFileSync(tailFile, line(6, { detail: 'x'.repeat(300) }));
+  assert.deepEqual(tail.read().map((e) => e.ts), [6]);
+});
+
+test('EventTail.read() uses only the bytes a short read returned — never the rest of its buffer (#22)', () => {
+  const tailFile = join(TMP, 'event-tail-short-read.jsonl');
+  const events = [{ ts: 1, ev: 'idle', detail: 'café → done' }, { ts: 2, ev: 'busy' }];
+  writeFileSync(tailFile, events.map((e) => `${JSON.stringify(e)}\n`).join(''));
+  // A synchronous test cannot land a rotation between two syscalls, so
+  // readSync is capped at 2 bytes per call instead — short on every read, and
+  // splitting 'é' and '→' across two of them. syncBuiltinESMExports() carries
+  // the patch into lib/event-fold.mjs's own `import { readSync }` binding.
+  const realReadSync = fs.readSync;
+  fs.readSync = (fd, buf, off, len, pos) => realReadSync(fd, buf, off, Math.min(len, 2), pos);
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(new EventTail(tailFile).read(), events);
+  } finally {
+    fs.readSync = realReadSync;
+    syncBuiltinESMExports();
+  }
+});
+
+test('EventTail.read() holds a torn last line until its end arrives, even when the tear splits a multi-byte character (#22)', () => {
+  const tailFile = join(TMP, 'event-tail-torn.jsonl');
+  const whole = Buffer.from(`${JSON.stringify({ ts: 1, ev: 'idle' })}\n${JSON.stringify({ ts: 2, ev: 'waiting', waitingFor: 'café' })}\n`);
+  const tear = whole.lastIndexOf(Buffer.from('é')) + 1; // between the two bytes of 'é'
+  writeFileSync(tailFile, whole.subarray(0, tear));
+  const tail = new EventTail(tailFile);
+  assert.deepEqual(tail.read(), [{ ts: 1, ev: 'idle' }], 'the complete line is read, the torn one held back');
+  appendFileSync(tailFile, whole.subarray(tear));
+  assert.deepEqual(tail.read(), [{ ts: 2, ev: 'waiting', waitingFor: 'café' }], 'completed on the next read, character intact');
+});
+
+test('EventTail.read() returns only flat events with a string ev — valid JSON that is not one is skipped, a nested field dropped (#22)', () => {
+  const tailFile = join(TMP, 'event-tail-non-object.jsonl');
+  writeFileSync(tailFile, `${[
+    '{"ts":1,"ev":"idle"}', 'null', '5', '"idle"', '{"ts":2}', '{"ts":3,"ev":{"toString":null}}',
+    '{"ts":4,"ev":"busy","project":{"toString":null},"agent":["x"],"detail":null}',
+  ].join('\n')}\n`);
+  assert.deepEqual(new EventTail(tailFile).read(), [{ ts: 1, ev: 'idle' }, { ts: 4, ev: 'busy', detail: null }]);
+});
+
+test('EventTail.read() keeps following the open file while the path names none — a log moved away and back is not replayed (#22)', () => {
+  const tailFile = join(TMP, 'event-tail-vanish.jsonl');
+  const line = (ts) => `${JSON.stringify({ ts, ev: 'idle' })}\n`;
+  writeFileSync(tailFile, line(1) + line(2));
+  const tail = new EventTail(tailFile);
+  assert.deepEqual(tail.read().map((e) => e.ts), [1, 2]);
+  renameSync(tailFile, `${tailFile}.away`);
+  appendFileSync(`${tailFile}.away`, line(3));
+  assert.deepEqual(tail.read().map((e) => e.ts), [3], 'with no file at the path, the open one is still drained');
+  renameSync(`${tailFile}.away`, tailFile);
+  assert.deepEqual(tail.read(), [], 'the same file back at the path continues from its offset, not from byte 0');
+});
+
+test('EventTail.read() resets to byte 0 when the same file is truncated in place, not treated as a rotation (#22)', () => {
+  const tailFile = join(TMP, 'event-tail-truncate.jsonl');
+  const line = (ts) => `${JSON.stringify({ ts, ev: 'idle' })}\n`;
+  writeFileSync(tailFile, line(1) + line(2));
+  const tail = new EventTail(tailFile);
+  assert.deepEqual(tail.read().map((e) => e.ts), [1, 2]);
+  // Same inode, but shorter than the offset already read — `size < offset`
+  // with no inode change, unlike a renamed-away rotation.
+  writeFileSync(tailFile, line(3));
+  assert.deepEqual(tail.read().map((e) => e.ts), [3], 'the offset resets rather than sitting past the end of the shrunk file forever');
+});
+
+test('EventTail.read() discards a torn line still pending when the log rotates — never glued onto the new file\'s first line (#22)', () => {
+  const tailFile = join(TMP, 'event-tail-rotate-torn.jsonl');
+  const line = (ts) => `${JSON.stringify({ ts, ev: 'idle' })}\n`;
+  writeFileSync(tailFile, line(1));
+  const tail = new EventTail(tailFile);
+  assert.deepEqual(tail.read().map((e) => e.ts), [1]);
+  appendFileSync(tailFile, '{"ts":2,"ev":"idle"'); // torn: no closing brace, no trailing newline
+  renameSync(tailFile, `${tailFile}.1`);
+  writeFileSync(tailFile, line(3));
+  assert.deepEqual(tail.read().map((e) => e.ts), [3], 'the pending torn line from the old file is dropped, not glued onto the new one');
+});
+
+test('EventTail.read() commits neither offset nor partial when a read partway through a drain throws — the next read starts over, not from where it failed (#22)', () => {
+  const tailFile = join(TMP, 'event-tail-drain-fail.jsonl');
+  const events = [{ ts: 1, ev: 'idle' }, { ts: 2, ev: 'busy' }];
+  writeFileSync(tailFile, events.map((e) => `${JSON.stringify(e)}\n`).join(''));
+  const tail = new EventTail(tailFile);
+  const realReadSync = fs.readSync;
+  let calls = 0;
+  // First call succeeds short (forcing a second iteration of the drain loop),
+  // the second throws — simulating a read failing partway through a file too
+  // big for one syscall, after some of it was already buffered.
+  fs.readSync = (fd, buf, off, len, pos) => {
+    calls += 1;
+    if (calls === 2) throw new Error('read failed');
+    return realReadSync(fd, buf, off, Math.min(len, 5), pos);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(tail.read(), [], 'a failing read costs the whole drain, not just the events after the bytes it already saw');
+  } finally {
+    fs.readSync = realReadSync;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(tail.read().map((e) => e.ts), [1, 2], 'the next read starts from the same offset and gets everything, nothing lost');
 });
 
 const ev = (ts, e, extra = {}) => ({ ts, ev: e, project: 'demo', lane: 1, worktree: 'lane1', ...extra });
@@ -2968,6 +3091,24 @@ test('readContext falls back to the full file when the last line alone exceeds t
   assert.deepEqual(readContext(p), { tokens: 5000, model: 'claude-sonnet-5' });
 });
 
+test('readContext decodes only the bytes a read returned — whatever else its buffer held is never taken for this transcript\'s context (#22)', () => {
+  const usage = (tokens) => ({ input_tokens: tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
+  const p = writeTranscript('short-read.jsonl', [assistantLine('claude-sonnet-5', { ...usage(1000), _pad: 'x'.repeat(200) })]);
+  const stale = Buffer.from(`\n${assistantLine('claude-opus-5', usage(999999))}`);
+  // The transcript shrinking between stat and read comes back as a read of 0
+  // bytes; the buffer still holds what it held before — here, a line from some
+  // other transcript. Only the bytes the read returned are this file's.
+  const realReadSync = fs.readSync;
+  fs.readSync = (fd, buf, off, len) => { stale.copy(buf, off, 0, Math.min(len, stale.length)); return 0; };
+  syncBuiltinESMExports();
+  try {
+    assert.equal(readContext(p), null);
+  } finally {
+    fs.readSync = realReadSync;
+    syncBuiltinESMExports();
+  }
+});
+
 test('applyEvents folds transcript like branch — carried forward, never cleared by an unrelated event', () => {
   const s = applyEvents(createState(), [
     ev(1, 'session_start', { transcript: '/tmp/a.jsonl' }),
@@ -4300,6 +4441,45 @@ test('createLaneSource: an onNotify that throws costs neither the fold of events
   assert.equal(calls, 2, 'the second notification is still handed over after the first one threw');
   const details = source.snapshot().history.map((e) => e.detail);
   assert.ok(details.includes('throwing-notifier-a') && details.includes('throwing-notifier-b'), 'both events were folded although their notifier threw');
+});
+
+test('createLaneSource: a `null` line between two valid events costs neither of them — both are folded and notified, and advance() does not throw (#22)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  const { source, notified } = recordingSource();
+  appendEvent({ ts: 7, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1', detail: 'null-line-a' });
+  appendEvent(null);
+  appendEvent({ ts: 8, ev: 'idle', project: 'demo', lane: 2, worktree: 'lane2', detail: 'null-line-b' });
+  assert.doesNotThrow(() => source.advance());
+  assert.deepEqual(notified, [
+    { title: 'demo · lane 1', body: 'Waiting for you' },
+    { title: 'demo · lane 2', body: 'Waiting for you' },
+  ]);
+  const details = source.snapshot().history.map((e) => e.detail);
+  assert.ok(details.includes('null-line-a') && details.includes('null-line-b'), 'both events were folded');
+});
+
+test('createLaneSource: an event field no consumer can turn into a string costs no event, replayed or live, and no frame (#22)', () => {
+  rmSync(SESSIONS_DIR, { recursive: true, force: true });
+  // JSON can shadow toString with a non-callable: converting such an object
+  // to a string throws, in a template literal and in Object.hasOwn alike. The
+  // paths do not exist, so rowsFor drops these rows from every later frame.
+  const unprintable = { toString: null };
+  const gone = join(TMP, 'unprintable-gone');
+  appendEvent({ ts: 9, ev: 'idle', project: unprintable, worktree: 'unprintable-replayed', path: gone });
+  let source;
+  let notified;
+  assert.doesNotThrow(() => { ({ source, notified } = recordingSource()); }, 'replaying it must not stop the source from being built');
+  appendEvent({ ts: 10, ev: 'idle', project: 'demo', lane: 1, worktree: 'lane1', detail: 'unprintable-a' });
+  appendEvent({ ts: 11, ev: unprintable, project: 'demo', lane: 1, worktree: 'lane1' });
+  appendEvent({ ts: 12, ev: 'idle', project: unprintable, lane: 2, worktree: 'unprintable-live', path: gone, detail: 'unprintable-b' });
+  assert.doesNotThrow(() => source.advance());
+  assert.deepEqual(notified, [
+    { title: 'demo · lane 1', body: 'Waiting for you' },
+    { title: 'lanes · lane 2', body: 'Waiting for you' },
+  ], 'the event with an unprintable project still notifies, without that field');
+  const details = source.snapshot().history.map((e) => e.detail);
+  assert.ok(details.includes('unprintable-a') && details.includes('unprintable-b'), 'both valid-ev events were folded');
+  assert.doesNotThrow(() => renderSnapshot(source.snapshot(), { width: 100 }), 'and the frame still renders');
 });
 
 test('createLaneSource: snapshot() reuses the last advance()\'s reads, live statuses refresh on every advance(), git and transcripts only on every 20th', () => {

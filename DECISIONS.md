@@ -118,8 +118,8 @@ logged first.
 
 ## D30 — `applyEvents`'s folded `stage` field stays, though nothing renders it
 `core` · 2026-08 · `lib/event-fold.mjs:applyEvents` · #9
-Dropping the STAGE column (#9) was a display decision; the field is the load-bearing half of the guard stopping a stage event from overwriting `ev`/`since`, and has its own test coverage.
-Rejected: deleting it as dead state — it looks unread, but removing it risks taking the stage-is-not-a-liveness-signal guard down with it.
+Dropping the STAGE column (#9) was a display decision, not a data one: `snapshotLane` publishes the field as `Lane.stage` to every view (#19), and since nothing renders it no golden frame would catch it going null.
+Rejected: deleting it as dead state — no view renders it, but the snapshot contract carries it.
 
 ## D29 — `lanes status`'s frame caps at 100 columns even on a wider terminal
 `core` · 2026-08 · `ui/dashboard.mjs:renderSnapshot` · #9
