@@ -489,14 +489,14 @@ switch (cmd) {
 
     // reset/switch/logs each act on exactly one lane, but `select` accepts the
     // same multi-lane syntax (`1,3`, `2-4`, `all`) as dev/stop/each. Refused
-    // rather than narrowed to the first match: `reset --force` is unrecoverable
-    // per lane, and switch/logs cannot mean more than one lane at all (a branch
+    // rather than narrowed to the first match: `reset --force` takes a lane off
+    // whatever it held, and switch/logs cannot mean more than one lane at all (a branch
     // checks out in one worktree; --follow already refuses >1 target) — so a
     // batch form would only exist for reset, and only as a way to lose the
     // whole stack at once. Also refused rather than looped, for the same
     // reason: `dev`/`stop` iterate because their per-lane action is either
     // safe or explicitly force-gated per lane already; a bare `lanes reset all
-    // --force` looping would force-discard every lane's work in one command.
+    // --force` looping would take every lane off its work in one command.
     // `usage` covers the *other* zero-lane case: an omitted argument resolves
     // through `select`'s own "empty means all" (matching dev/stop), so without
     // this a caller who typed nothing would be told how many lanes they never
@@ -632,7 +632,11 @@ switch (cmd) {
         path: target.path,
       });
       out(`${OK} lane ${res.lane} (${res.name}) → detached at origin/${res.branch}`);
-      if (res.branchDeleted) out(`${DIM}  deleted merged branch ${res.branchDeleted}${RESET}`);
+      if (res.branchDeleted) out(`${DIM}  deleted branch ${res.branchDeleted} — already merged or pushed, nothing lost${RESET}`);
+      if (res.branchKept) {
+        out(`${DIM}  kept branch ${res.branchKept} — not fully merged; if it was squash- or`);
+        out(`  rebase-merged, \`git branch -D ${res.branchKept}\` deletes it${RESET}`);
+      }
       break;
     }
 

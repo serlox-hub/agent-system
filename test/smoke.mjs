@@ -1279,18 +1279,24 @@ test('removeWorktree removes a multi-lane top suffix in one call, descending, fr
   assert.equal(worktrees.planCreate(cfg).lane, 2);
 });
 
-test('resetLane refuses a non-free lane unless --force', () => {
-  const { wtd, cfg } = makeLanesFixture('reset-dirty', 1);
-  writeFileSync(join(wtd, 'lane1', 'dirty.txt'), 'x');
+test('resetLane refuses uncommitted changes even with --force — checkout would carry them over, leaving the lane dirty (#26)', () => {
+  const { main, wtd, cfg } = makeLanesFixture('reset-dirty', 1);
+  const lanePath = join(wtd, 'lane1');
+  // Advance origin/main past the lane, so a reset that went ahead would move HEAD.
+  writeFileSync(join(main, 'g.txt'), 'y');
+  git(main, 'add', '-A');
+  git(main, 'commit', '-qm', 'advance base');
+  git(main, 'push', '-q', 'origin', 'main');
+  writeFileSync(join(lanePath, 'f.txt'), 'modified');
+  writeFileSync(join(lanePath, 'dirty.txt'), 'x');
   const lane = worktrees.enumerateLanes(cfg)[0];
-  assert.equal(worktrees.isFree(lane), false);
+  const before = git(lanePath, 'rev-parse', 'HEAD').trim();
 
-  const refused = worktrees.resetLane(cfg, lane);
-  assert.match(refused.error, /not free/);
-
-  const forced = worktrees.resetLane(cfg, lane, { force: true });
-  assert.equal(forced.error, undefined, forced.error);
-  assert.equal(forced.branch, 'main');
+  for (const force of [false, true]) {
+    const res = worktrees.resetLane(cfg, lane, { force });
+    assert.match(res.error, /2 uncommitted change\(s\)/, `force: ${force}`);
+  }
+  assert.equal(git(lanePath, 'rev-parse', 'HEAD').trim(), before, 'HEAD must not move');
 });
 
 test('resetLane detaches a lane back to origin/<base>, deleting a fully-merged outgoing branch', () => {
@@ -1306,6 +1312,7 @@ test('resetLane detaches a lane back to origin/<base>, deleting a fully-merged o
   assert.equal(res.error, undefined, res.error);
   assert.equal(res.branch, 'main');
   assert.equal(res.branchDeleted, 'feat/1-x', 'fully merged into origin/main, so `branch -d` succeeds');
+  assert.equal(res.branchKept, null);
 
   lane = worktrees.enumerateLanes(cfg)[0];
   assert.equal(lane.branch, 'main', 'reports the base name, not the literal HEAD, once detached at its commit');
@@ -1322,10 +1329,35 @@ test('resetLane keeps an outgoing branch that is not fully merged into base', ()
   git(lanePath, 'commit', '-qm', 'unmerged work');
   const lane = worktrees.enumerateLanes(cfg)[0];
 
-  const res = worktrees.resetLane(cfg, lane, { force: true }); // ahead of base, needs force
+  assert.match(worktrees.resetLane(cfg, lane).error, /1 commit\(s\) not in origin\/main/, 'ahead of base, needs force');
+  const res = worktrees.resetLane(cfg, lane, { force: true });
   assert.equal(res.error, undefined, res.error);
   assert.equal(res.branchDeleted, null, '`branch -d` refuses an unmerged branch, so it is kept');
+  assert.equal(res.branchKept, 'feat/2-y', 'a kept branch is reported, not left behind silently (#26)');
   assert.match(git(lanePath, 'branch', '--list', 'feat/2-y'), /feat\/2-y/, 'the branch itself must still exist');
+});
+
+test('resetLane judges a branch pushed with -u against its own remote copy: deleted while that copy exists, kept once it is gone (#26)', () => {
+  const { wtd, cfg } = makeLanesFixture('reset-upstream', 2);
+  for (const [n, branch] of [[1, 'feat/4-pushed'], [2, 'feat/5-remote-gone']]) {
+    const lanePath = join(wtd, `lane${n}`);
+    git(lanePath, 'checkout', '-qb', branch);
+    writeFileSync(join(lanePath, 'new.txt'), 'x');
+    git(lanePath, 'add', '-A');
+    git(lanePath, 'commit', '-qm', 'never merged into base');
+    git(lanePath, 'push', '-q', '-u', 'origin', branch);
+  }
+  // Deleting through push also drops the local origin/<branch> ref, so this
+  // does not depend on whoever runs the suite having fetch.prune set.
+  git(join(wtd, 'lane2'), 'push', '-q', 'origin', '--delete', 'feat/5-remote-gone');
+
+  const [pushed, gone] = worktrees.enumerateLanes(cfg).map((lane) => worktrees.resetLane(cfg, lane, { force: true }));
+  assert.equal(pushed.error, undefined, pushed.error);
+  assert.equal(pushed.branchDeleted, 'feat/4-pushed', 'fully merged into its upstream, so `branch -d` accepts it');
+  assert.equal(pushed.branchKept, null);
+  assert.equal(gone.error, undefined, gone.error);
+  assert.equal(gone.branchDeleted, null);
+  assert.equal(gone.branchKept, 'feat/5-remote-gone', 'upstream gone, so git judges it against HEAD and refuses');
 });
 
 test('resetLane surfaces a failed fetch as an error, never a silent stale reset', () => {
@@ -1451,10 +1483,26 @@ test('resetLane computes no outgoing branch to delete for a lane detached at a n
   const res = worktrees.resetLane(cfg, lane, { force: true }); // ahead of base, needs force
   assert.equal(res.error, undefined, res.error);
   assert.equal(res.branchDeleted, null, 'nothing to delete — a literal HEAD is not a real branch name');
+  assert.equal(res.branchKept, null, 'a detached HEAD carries no branch to keep');
   assert.equal(res.branch, 'main');
 
   const after = worktrees.enumerateLanes(cfg).find((l) => l.lane === 2);
   assert.equal(after.isBase, true);
+});
+
+test('resetLane refuses, even with --force, to orphan commits made on a detached HEAD that no branch holds (#26)', () => {
+  const { wtd, cfg } = makeLanesFixture('reset-detached-orphans', 1);
+  const lanePath = join(wtd, 'lane1');
+  writeFileSync(join(lanePath, 'work.txt'), 'x');
+  git(lanePath, 'add', '-A');
+  git(lanePath, 'commit', '-qm', 'committed straight onto the detached HEAD');
+  const lane = worktrees.enumerateLanes(cfg)[0];
+  assert.equal(lane.branch, 'HEAD', 'precondition: detached, off base');
+  const before = git(lanePath, 'rev-parse', 'HEAD').trim();
+
+  const res = worktrees.resetLane(cfg, lane, { force: true });
+  assert.match(res.error, /1 commit\(s\) on a detached HEAD that no branch holds/);
+  assert.equal(git(lanePath, 'rev-parse', 'HEAD').trim(), before, 'HEAD must not move');
 });
 
 test('removeWorktree checks every selected lane before removing any — a dirty lane blocks the whole contiguous batch, not just itself', () => {
@@ -2358,6 +2406,7 @@ test('lanes reset detaches a lane back to a clean base state through the real CL
   const out = execFileSync(join(ROOT, 'bin', 'lanes'), ['reset', '1'], { cwd: main, encoding: 'utf8' });
   assert.match(out, /lane 1 \(lane1\)/);
   assert.match(out, /origin\/main/);
+  assert.match(out, /deleted branch feat\/1-cli-reset — already merged or pushed, nothing lost/, 'names what happened to the branch it deleted, not just that one was (#26)');
 
   const lane = worktrees.enumerateLanes(cfg)[0];
   assert.equal(lane.branch, 'main');
@@ -2367,6 +2416,19 @@ test('lanes reset detaches a lane back to a clean base state through the real CL
   assert.ok(emitted, 'lanes reset must emit lane_reset, so the dashboard row does not keep showing the finished task');
   assert.equal(emitted.lane, 1);
   assert.equal(emitted.worktree, 'lane1');
+});
+
+test('lanes reset --force names the branch it kept instead of leaving it behind silently (#26)', () => {
+  const { main, wtd } = makeCliLanesFixture('cli-reset-kept', 1);
+  const lanePath = join(wtd, 'lane1');
+  git(lanePath, 'checkout', '-b', 'feat/3-squashed');
+  writeFileSync(join(lanePath, 'new.txt'), 'x');
+  git(lanePath, 'add', '-A');
+  git(lanePath, 'commit', '-qm', 'never an ancestor of base, as after a squash merge');
+
+  const out = execFileSync(join(ROOT, 'bin', 'lanes'), ['reset', '1', '--force'], { cwd: main, encoding: 'utf8' });
+  assert.match(out, /kept branch feat\/3-squashed/);
+  assert.match(out, /git branch -D feat\/3-squashed/);
 });
 
 // ── Session attribution (#13): CLI-driven events ─────────────────────

@@ -154,8 +154,11 @@ it can't be reached by a typo or muscle-memory on `rm`. Both keep the branch
 and print the `git branch -d` to run if you actually want it gone, and both
 refuse outright if a declared service is still running in a targeted lane.
 `lanes reset` returns a lane to that same clean, branch-free state without
-removing it. A lane is "free" (what `/architect` looks for) when nothing would
-be lost by taking it over.
+removing it. It refuses uncommitted changes outright, and commits on a detached
+HEAD that no branch holds; `--force` only overrides commits not in
+`origin/<base>` — what a squash or rebase merge leaves behind — and a branch
+`git branch -d` won't delete is kept and named. A lane is "free" (what
+`/architect` looks for) when nothing would be lost by taking it over.
 
 Each lane can run the project's own services — a React client and a Python API
 in one repo are two entries in `dev.services`, with their own commands,
