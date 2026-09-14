@@ -17,6 +17,29 @@ reversed, never to make room.
 
 ---
 
+## D47 — `test/smoke.mjs` is quiet by default; `VERBOSE=1` is opt-in, not the reverse
+`core` · 2026-09 · `test/smoke.mjs:4765` · #28
+A green run printed ~33 KB (one ` ok ` line per test), re-read on every later
+API call of an agent session; the cost landed on every bare `npm test`, and
+avoiding it required the agent to remember to filter it.
+Rejected: verbose by default with an opt-in `QUIET` flag — the more
+discoverable choice, and what the absence of output would suggest when
+diagnosing a hang. It loses because it inverts who pays: the common case (a
+green run inside an agent session) would keep paying the 33 KB to benefit the
+rare case (debugging a hang), already solved by re-running with `VERBOSE=1`.
+
+## D46 — The run loop rejects async tests instead of awaiting `fn()`
+`core` · 2026-09 · `test/smoke.mjs:4765-4773` · #28
+Keeping tests synchronous preserves the suite's registration-order/shared-state
+model (tests rely on state earlier tests leave behind) and avoids a hung async
+test blocking the run with no timeout or way to tell which test stalled.
+Rejected: switching the loop to `await fn()` — the file already top-level-awaits
+its imports, so it compiles as-is and looks strictly more capable; it is the
+obvious "fix" someone applies on seeing a throw where an await would fit. It
+loses because it lets in tests whose interleaving with the shared HOME/TMP
+sandbox nobody has reasoned through, and a promise that never resolves hangs
+the suite with zero output in quiet mode, naming no culprit.
+
 ## D45 — The README carries the explainer (pitch, flow, costs), not a linked docs page
 `core` · 2026-09 · `README.md`
 What decides adoption is how each piece works and what it costs, so it lives in

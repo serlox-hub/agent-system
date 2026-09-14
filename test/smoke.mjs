@@ -4762,11 +4762,18 @@ test('the baseline sweep drops only the sessions that actually vanished, across 
 });
 
 // ── Run ─────────────────────────────────────────────────────────────
+const VERBOSE = process.env.VERBOSE === '1';
 for (const [name, fn] of tests) {
   try {
-    fn();
+    const result = fn();
+    if (result && typeof result.then === 'function') {
+      throw new Error(
+        'async tests are not supported: the run loop calls fn() without awaiting, ' +
+          'so a rejected promise would count as passed and exit 0',
+      );
+    }
     passed += 1;
-    process.stdout.write(`\x1b[32m ok \x1b[0m ${name}\n`);
+    if (VERBOSE) process.stdout.write(`\x1b[32m ok \x1b[0m ${name}\n`);
   } catch (err) {
     failed += 1;
     // Print the whole message, indented. A truncated assertion message is a

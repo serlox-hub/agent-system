@@ -135,3 +135,10 @@ review-marker staleness, and every branch of the commit guard. No dependencies.
 
 Run it before publishing a change to `lib/`, `hooks/` or `ui/` — the guard's
 option parsing in particular is the kind of thing that breaks silently.
+
+Quiet by default — only failures and the summary print. `VERBOSE=1 npm test`
+prints an ` ok  <name>` line per passing test too, and is also how you diagnose
+a hang (a silent run gives no per-test progress). See
+[`docs/TESTING.md`](TESTING.md) for the suite's own conventions — import
+order, test ordering and isolation, and how to find things in it without
+reading it whole.

@@ -147,7 +147,7 @@
             "string",
             "null"
           ],
-          "description": "Repo-relative path to the project's testing conventions doc, read by the test agent before writing anything."
+          "description": "Repo-relative path to the project's testing conventions doc, read by the test agent before writing anything. Keep it short — test-writer reads it in full before every test-writing pass; point it at a conventions doc, never at a test file."
         },
         "locationRule": {
           "type": "string",
