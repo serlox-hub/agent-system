@@ -179,6 +179,7 @@ Operational limitations, once you use it:
 | Install + per-repo config | [`docs/SETUP.md`](docs/SETUP.md) |
 | Full `lanes` command reference | [`docs/SETUP.md`](docs/SETUP.md#5-managing-lanes) |
 | Commit guard, events, known limitations, tests | [`docs/REFERENCE.md`](docs/REFERENCE.md) |
+| `test/smoke.mjs` conventions, for adding or changing tests | [`docs/TESTING.md`](docs/TESTING.md) |
 | Why the code is the way it is | [`DECISIONS.md`](DECISIONS.md) |
 
 ## Layout
@@ -188,6 +189,7 @@ CLAUDE.md          repo rules; points every session at DECISIONS.md
 DECISIONS.md       why the code is the way it is, and what was rejected
 docs/SETUP.md      install + per-repo configuration walkthrough
 docs/REFERENCE.md  commit guard, events, known limitations, tests
+docs/TESTING.md    test/smoke.mjs conventions — read before adding tests
 docs/img/          the diagrams in this README
 agents/            spec-challenger, code-reviewer, test-writer  → ~/.claude/agents/
 skills/            architect, gate                              → ~/.claude/skills/

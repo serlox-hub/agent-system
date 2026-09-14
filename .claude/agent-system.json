@@ -36,7 +36,7 @@
   },
   "tests": {
     "framework": null,
-    "expertiseDoc": "test/smoke.mjs",
+    "expertiseDoc": "docs/TESTING.md",
     "locationRule": "There is no per-file convention: everything lives in test/smoke.mjs, a single hand-rolled node:assert suite run against a real throwaway git repo in os.tmpdir(). Add new assertions there, near the function they cover — do not introduce a test framework or a second test file."
   },
   "architect": {

@@ -64,3 +64,8 @@ moment.
   a prompt to consider splitting a *new or newly-touched* file, nothing more.
   `.md` files are exempt outright — decision logs and specs need the room prose
   takes.
+- **Adding or changing tests:** read [`docs/TESTING.md`](docs/TESTING.md) first;
+  never read `test/smoke.mjs` whole — it exceeds Claude Code's Read cap. Use the
+  section map and grep recipes there, and read slices of ≤ 150 lines. This is
+  about writing tests — code-reviewer still reads the full file and its diff
+  when reviewing one.
