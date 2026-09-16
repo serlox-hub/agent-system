@@ -117,8 +117,11 @@ function detectCommands(root) {
   const pkgPath = join(root, 'package.json');
   if (!existsSync(pkgPath)) return { pm: null, commands: {} };
   let scripts = {};
+  let deps = {};
   try {
-    scripts = JSON.parse(readFileSync(pkgPath, 'utf8')).scripts || {};
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    scripts = pkg.scripts || {};
+    deps = { ...pkg.dependencies, ...pkg.devDependencies };
   } catch { /* unreadable package.json — fall through with no detection */ }
 
   const pm =
@@ -131,6 +134,8 @@ function detectCommands(root) {
   // Map our canonical names onto whatever this repo actually calls them.
   const pick = (...names) => names.find((n) => scripts[n]);
   const run = (name) => (name ? `${pm} run ${name}` : null);
+  const dep = (name) => Boolean(deps[name]);
+  const execTool = pm === 'bun' ? 'bun run --' : `${pm} exec --`;
   return {
     pm,
     hasDev: Boolean(scripts.dev),
@@ -147,7 +152,24 @@ function detectCommands(root) {
           : null,
       typecheck: run(pick('type-check', 'typecheck', 'tsc')),
       test: run(pick('test:run', 'test:unit', 'test')),
-      testTargeted: pm === 'npm' ? 'npx vitest run' : `${pm} vitest run`,
+      // Derived from dependencies, not asserted like `npx vitest run` used to
+      // be: an unconditional guess reaches the registry for whatever tool the
+      // constant names, even in a repo that never declared it. The dep()
+      // check is what makes that safe, not the verb — `npm exec` IS `npx`,
+      // so it still hits the registry on a lane with no node_modules yet,
+      // same as npx would, just now only for a tool the repo actually depends
+      // on. `--` before the tool's own args is required on npm and yarn
+      // classic, which otherwise swallow them as their own flags (same quirk
+      // as lintFix above); pnpm and yarn berry tolerate it either way. bun
+      // needs `run` instead of `exec` altogether: `bun exec`'s argument runs
+      // as a Bun Shell command and never resolves node_modules/.bin. Verified
+      // against real npm 11 / pnpm 12 / yarn 1 (classic) / yarn 4 (berry) /
+      // bun 1.4 installs.
+      testTargeted: dep('vitest')
+        ? `${execTool} vitest run`
+        : dep('jest')
+          ? `${execTool} jest`
+          : null,
       build: run(pick('build')),
     },
   };

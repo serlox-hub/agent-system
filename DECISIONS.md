@@ -17,17 +17,30 @@ reversed, never to make room.
 
 ---
 
-## D51 — `lintFix`'s fallback and the generated `dev` command need the `--` separator only for npm, never for pnpm
-`core` · 2026-09 · `bin/lanes.mjs:detectCommands`, `bin/lanes.mjs` adopt config builder · #34
-Verified against real npm/pnpm/yarn/bun installs: npm swallows a bare extra flag
-(`--fix`, `--port`) as its own config setting unless it comes after `--`; pnpm
-does the opposite and forwards a literal `--` straight to the script, so
-`eslint . -- --fix` treats `--fix` as a file to lint instead of a flag. yarn
-(classic) and bun tolerate either form.
-Rejected: a single `-- --fix`/`-- --port` form for every manager, uniform
-across managers the way the `run` helper above now is. It fixes npm but breaks
-pnpm, reintroducing a regression #34's own Acceptance criterion explicitly
-rules out ("unchanged in behaviour for yarn and pnpm repos").
+## D51 — `--`/verb rules for generated commands are per shape, not one rule for the whole file
+`core` · 2026-09 · `bin/lanes.mjs:detectCommands`, `bin/lanes.mjs` adopt config builder · #34, #35
+Two distinct quirks live at this same location, verified against real
+npm/pnpm/yarn/bun installs, and neither generalizes to the other:
+- `pm run <script> -- <flag>` (`lintFix`'s fallback, the generated `dev`
+  command): npm swallows a bare extra flag (`--fix`, `--port`) as its own
+  config setting unless it comes after `--`; pnpm does the opposite and
+  forwards a literal `--` straight to the script, so `eslint . -- --fix`
+  treats `--fix` as a file to lint instead of a flag. yarn (classic) and bun
+  tolerate either form.
+- `pm exec -- <tool> <args>` (`testTargeted`): npm and yarn classic swallow
+  the tool's own trailing flags (e.g. `-t foo`) unless prefixed by `--`; pnpm
+  and yarn berry tolerate the `--` either way, so one uniform `<pm> exec --`
+  form covers all four of those managers. bun is the exception here for a
+  different reason: `bun exec`'s argument runs as a Bun Shell command and
+  never resolves `node_modules/.bin`, so bun needs `bun run --` instead of
+  `exec` at all.
+Rejected: a single `-- --fix`/`-- --port` form for every manager under `run`,
+uniform the way the `run` helper is elsewhere — it fixes npm but breaks pnpm,
+reintroducing a regression #34's own Acceptance criterion explicitly rules out
+("unchanged in behaviour for yarn and pnpm repos"). Also rejected, for `exec`:
+branching the `--` per manager the way `run` does — pnpm and yarn berry
+tolerate it fine either way under `exec`, so the extra branch only adds a case
+to get wrong for no behavioural gain.
 
 ## D50 — `worktreesDir`/`basePort` are never hand-written into the committed config, not even "to mandate a shared convention"
 `product` · 2026-09 · `docs/SETUP.md` · #33

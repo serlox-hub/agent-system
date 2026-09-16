@@ -11,7 +11,7 @@
     "lintFix": "pnpm run lint --fix",
     "typecheck": "pnpm run type-check",
     "test": "pnpm run test:run",
-    "testTargeted": "pnpm vitest run",
+    "testTargeted": "pnpm exec -- vitest run",
     "build": "pnpm run build"
   },
 

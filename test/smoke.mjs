@@ -2390,9 +2390,83 @@ test('lanes adopt writes a config a fresh repo can be verified against', () => {
   assert.equal(cfg.commands.lint, 'pnpm run lint', 'package manager comes from the lockfile');
   assert.equal(cfg.commands.build, 'pnpm run build');
   assert.equal(cfg.commands.typecheck, null, 'a script that does not exist stays null');
+  assert.equal(cfg.commands.testTargeted, null, 'no vitest or jest dependency: nothing to assert a command for');
   assert.equal(cfg.worktreesDir, undefined, 'a single-worktree repo gets no lanes');
   assert.deepEqual(cfg.review.domainAxes, [], 'the one field a human must fill in');
   assert.equal(cfg.architect.suggestImplementationModel, true, 'architect suggests an implementation model by default');
+});
+
+test('lanes adopt derives testTargeted from a vitest dependency instead of asserting one', () => {
+  const fresh = join(TMP, 'fresh-vitest');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(join(fresh, 'package.json'), JSON.stringify({ devDependencies: { vitest: '^2.0.0' } }));
+  writeFileSync(join(fresh, 'pnpm-lock.yaml'), '');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(
+    cfg.commands.testTargeted,
+    'pnpm exec -- vitest run',
+    'the command is only emitted for a declared dependency — the -- keeps a caller-appended flag from being swallowed',
+  );
+});
+
+test('lanes adopt derives testTargeted from jest when there is no vitest dependency', () => {
+  const fresh = join(TMP, 'fresh-jest');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(join(fresh, 'package.json'), JSON.stringify({ dependencies: { jest: '^29.0.0' } }));
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.commands.testTargeted, 'npm exec -- jest');
+});
+
+test('lanes adopt prefers vitest over jest when a repo depends on both', () => {
+  const fresh = join(TMP, 'fresh-vitest-and-jest');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(
+    join(fresh, 'package.json'),
+    JSON.stringify({ devDependencies: { vitest: '^2.0.0', jest: '^29.0.0' } }),
+  );
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.commands.testTargeted, 'npm exec -- vitest run');
+});
+
+test("lanes adopt uses `bun run --` for testTargeted, not `bun exec` — bun exec runs a shell command and can't see node_modules/.bin", () => {
+  const fresh = join(TMP, 'fresh-vitest-bun');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(join(fresh, 'package.json'), JSON.stringify({ devDependencies: { vitest: '^2.0.0' } }));
+  writeFileSync(join(fresh, 'bun.lockb'), '');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.commands.testTargeted, 'bun run -- vitest run');
+});
+
+test('lanes adopt uses `yarn exec --` for testTargeted, matching the npm/pnpm branch bun is the sole exception to', () => {
+  const fresh = join(TMP, 'fresh-vitest-yarn');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(join(fresh, 'package.json'), JSON.stringify({ devDependencies: { vitest: '^2.0.0' } }));
+  writeFileSync(join(fresh, 'yarn.lock'), '');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.commands.testTargeted, 'yarn exec -- vitest run');
+});
+
+test('lanes adopt falls back to no detection at all, testTargeted included, when package.json is not valid JSON', () => {
+  const fresh = join(TMP, 'fresh-malformed-pkg');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(join(fresh, 'package.json'), '{ this is not valid json');
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  assert.doesNotMatch(output, /error/i, 'a broken package.json must not crash adopt, only skip detection');
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.commands.testTargeted, null, 'deps cannot be read from broken JSON, so nothing to derive a tool from');
+  assert.equal(cfg.commands.lint, null);
+  assert.equal(cfg.commands.build, null);
 });
 
 test('lanes adopt defaults to npm when no lockfile is present, and npm needs `--` before lintFix and dev --port', () => {
