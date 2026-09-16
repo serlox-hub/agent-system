@@ -1,6 +1,5 @@
 {
   "project": "agent-system",
-  "worktreesDir": "/Users/sergio/MyProjects/agent-system-lanes",
   "commands": {
     "install": "npm install",
     "lint": null,

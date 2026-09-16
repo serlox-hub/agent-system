@@ -17,6 +17,16 @@ reversed, never to make room.
 
 ---
 
+## D50 — `worktreesDir`/`basePort` are never hand-written into the committed config, not even "to mandate a shared convention"
+`product` · 2026-09 · `docs/SETUP.md` · #33
+The only path that put a per-machine value into this repo's own committed
+config was this documented escape hatch — it wasn't a `lanes adopt` bug, it
+was the escape hatch working as designed on an absolute path. Each developer
+sets their own `worktreesDir` via the local override instead.
+Rejected: keeping the escape hatch but requiring a portable value (e.g. a
+`~`-relative path) — a "shared convention" is exactly the case D22 says a
+single committed value can't satisfy in the first place.
+
 ## D49 — CI's test job has no install step, and must not grow one
 `core` · 2026-09 · `.github/workflows/test.yml`
 Zero runtime dependencies means no package-lock.json, so `npm test` runs
