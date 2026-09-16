@@ -135,6 +135,9 @@ review-marker staleness, and every branch of the commit guard. No dependencies.
 
 Run it before publishing a change to `lib/`, `hooks/` or `ui/` — the guard's
 option parsing in particular is the kind of thing that breaks silently.
+Running it locally gets you the signal before you push; it is not the only
+place it runs — GitHub Actions runs the same `npm test` on every pull request
+and push to `main` (`.github/workflows/test.yml`).
 
 Quiet by default — only failures and the summary print. `VERBOSE=1 npm test`
 prints an ` ok  <name>` line per passing test too, and is also how you diagnose

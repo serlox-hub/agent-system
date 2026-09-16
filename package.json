@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Architect gate, generic reviewer/test-writer, and a zero-token lane dashboard for Claude Code worktrees.",
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "scripts": {
     "test": "node test/smoke.mjs",

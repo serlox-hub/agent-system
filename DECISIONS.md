@@ -17,6 +17,16 @@ reversed, never to make room.
 
 ---
 
+## D49 — CI's test job has no install step, and must not grow one
+`core` · 2026-09 · `.github/workflows/test.yml`
+Zero runtime dependencies means no package-lock.json, so `npm test` runs
+straight off a bare checkout.
+Rejected: adding `npm ci` or `setup-node`'s `cache: npm` — both hard-fail
+without a lockfile, and the only way to make them work is committing one for a
+project with no dependencies.
+
+---
+
 ## D48 — The guard resolves the commit's own directory, not the session's
 `core` · 2026-09 · `hooks/commit-guard.mjs:commitCwd`
 The hook payload's `cwd` is the session's, which is the commit's only when the
