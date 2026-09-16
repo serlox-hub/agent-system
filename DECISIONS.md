@@ -17,6 +17,31 @@ reversed, never to make room.
 
 ---
 
+## D48 — The guard resolves the commit's own directory, not the session's
+`core` · 2026-09 · `hooks/commit-guard.mjs:commitCwd`
+The hook payload's `cwd` is the session's, which is the commit's only when the
+command does not move. `cd lane && git commit` and `git -C lane commit` both land
+elsewhere; resolving from the session's cwd guards the wrong repository — it
+blocks against a tree the commit does not touch, and points `lanes allow-commit` at
+a root the retry will not read. The quiet failure is the permissive one: a
+session sitting in a clean, already-gated repo waves an unreviewed commit into
+the repo it `cd`s into, with no `commit_*` event at all.
+D14 already walks git's option grammar by token to find `commit` past `-C dir`;
+this reads that same value instead of discarding it.
+A `cd` is felt downstream based on the operator AFTER it, not before: `&&`, `;`
+and a newline carry, `||` means the cd failed so the old directory still stands,
+and `|` or `&` ran it in a subshell nothing downstream inherits. Reading the
+operator on the near side looks identical, is wrong, and is the obvious
+"simplification".
+The separator list must be every shell command separator, not just the infix
+operators. A NEWLINE separates commands exactly as `;` does and a lone `&`
+backgrounds what precedes it; with either missing, `cd there<newline>git commit`
+is one segment whose first token is `cd`, the commit inside it is never looked
+for, and the guard allows unconditionally — strictly worse than the
+misresolution above, which at least blocked. Both forms are pinned by tests.
+Rejected: following `--git-dir` too — it names a .git directory rather than a
+tree, and git already pairs it with `--work-tree` when the two differ.
+
 ## D47 — `test/smoke.mjs` is quiet by default; `VERBOSE=1` is opt-in, not the reverse
 `core` · 2026-09 · `test/smoke.mjs:4765` · #28
 A green run printed ~33 KB (one ` ok ` line per test), re-read on every later
