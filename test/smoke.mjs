@@ -516,6 +516,141 @@ test('a commit allowed by a one-shot bypass mark writes commit_bypass tagged wit
   assert.equal(bypassed.ev, 'commit_bypass');
 });
 
+// The hook payload's cwd is the SESSION's directory. These three fixtures are
+// the shape the bug had in the wild: a session sitting in one adopted repo,
+// committing into another. `guardHome` stands in for the session's own repo,
+// `guardTarget` for the one the commit actually lands in, and `guardPlain` for
+// a repo that never opted in.
+const guardHome = join(TMP, 'guard-home');
+const guardTarget = join(TMP, 'guard-target');
+const guardPlain = join(TMP, 'guard-plain');
+for (const [dir, project] of [[guardHome, 'home'], [guardTarget, 'target'], [guardPlain, null]]) {
+  mkdirSync(dir);
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.email', 'test@test.test');
+  git(dir, 'config', 'user.name', 'test');
+  writeFileSync(join(dir, 'x.ts'), 'export const x = 1;\n');
+  if (project) {
+    mkdirSync(join(dir, '.claude'));
+    writeFileSync(join(dir, '.claude', 'agent-system.json'), JSON.stringify({ project }));
+  }
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-qm', 'init');
+}
+// guardTarget and guardPlain carry an unreviewed diff; guardHome stays clean,
+// which is what made the real misresolution so quiet — the session's own repo
+// had nothing to report.
+appendFileSync(join(guardTarget, 'x.ts'), 'export const target = 2;\n');
+appendFileSync(join(guardPlain, 'x.ts'), 'export const plain = 2;\n');
+
+/** The guard's full deny reason, for asserting WHICH repo it resolved. */
+const guardReason = (cwd, command) => {
+  const out = execFileSync('node', [join(ROOT, 'hooks', 'commit-guard.mjs')], {
+    input: JSON.stringify({ cwd, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } }),
+    encoding: 'utf8',
+  });
+  return out.trim() ? JSON.parse(out).hookSpecificOutput.permissionDecisionReason : null;
+};
+
+test('the guard follows `cd` into the repo the commit actually lands in, not the session\'s own', () => {
+  // The dangerous direction: the session sits in a repo that never opted in, so
+  // resolving from its cwd allows unconditionally and an unreviewed commit in
+  // an adopted repo goes through with no commit_* event at all.
+  assert.equal(
+    guard(guardPlain, `cd ${guardTarget} && git commit -m wip`),
+    'deny',
+    'the commit lands in an adopted repo with an unreviewed diff — where the session happens to sit decides nothing',
+  );
+});
+
+test('the guard resolves `git -C <dir> commit` against <dir>, the same value it already walks past to find the subcommand', () => {
+  assert.equal(guard(guardPlain, `git -C ${guardTarget} commit -m wip`), 'deny');
+  assert.equal(
+    guard(guardTarget, `git -C ${guardPlain} commit -m wip`),
+    'allow',
+    'and in reverse: a commit into a repo that never opted in is not blocked merely because the session sits in one that did',
+  );
+});
+
+test('the guard resolves the combined --git-dir/--work-tree form against the work tree', () => {
+  assert.equal(
+    guard(guardPlain, `git --git-dir=${guardTarget}/.git --work-tree=${guardTarget} commit -m wip`),
+    'deny',
+  );
+});
+
+test('a relative `cd` resolves against the session cwd, not against nothing', () => {
+  assert.equal(guard(TMP, 'cd guard-target && git commit -m wip'), 'deny');
+});
+
+test('`cd` carries forward only across the operators that actually leave the next command there', () => {
+  assert.equal(
+    guard(guardTarget, `cd ${guardPlain} || git commit -m wip`),
+    'deny',
+    'reaching git after || means the cd FAILED, so the commit is still in the session cwd — an adopted repo with an unreviewed diff',
+  );
+  assert.equal(
+    guard(guardTarget, `cd ${guardPlain} && git commit -m wip`),
+    'allow',
+    'after && the cd succeeded, so the same command line lands somewhere else entirely',
+  );
+});
+
+test('a newline separates two commands exactly as `;` does — the shape almost every real tool call has', () => {
+  // The regression this pins: with newline missing from the separator list,
+  // `cd there<newline>git commit` is ONE segment whose first token is `cd`, the
+  // commit inside it is never looked for, and the guard allows unconditionally.
+  // Strictly worse than the misresolution it replaced — that one at least
+  // blocked.
+  assert.equal(
+    guard(guardPlain, `cd ${guardTarget}\ngit commit -m wip`),
+    'deny',
+    'a newline carries the cd forward and the commit after it must still be seen',
+  );
+  assert.equal(
+    guard(guardPlain, `cd ${guardTarget} ; git commit -m wip`),
+    'deny',
+    'and the explicit `;` it is equivalent to',
+  );
+});
+
+test('a lone `&` backgrounds the cd, so the commit after it runs where the session already was', () => {
+  assert.equal(
+    guard(guardTarget, `cd ${guardPlain} & git commit -m wip`),
+    'deny',
+    'the cd ran in a background subshell — the commit is still in the session cwd, an adopted repo with an unreviewed diff',
+  );
+  assert.equal(
+    guard(guardPlain, `cd ${guardTarget} & git commit -m wip`),
+    'allow',
+    'and in reverse: backgrounding it must not silently relocate the guard either',
+  );
+});
+
+test('the deny reason names the repo the commit lands in, since that is where the retry reads its bypass mark', () => {
+  const reason = guardReason(guardPlain, `cd ${guardTarget} && git commit -m wip`);
+  assert.ok(reason, 'a denied commit must carry a reason');
+  assert.ok(
+    reason.includes(guardTarget),
+    `the reason must point \`lanes allow-commit\` at the repo being committed to, not the session's; got: ${reason}`,
+  );
+  assert.ok(!reason.includes(guardPlain), 'naming the session cwd would send the bypass to a root the retry never reads');
+});
+
+test('a bypass mark is read from, and consumed in, the repo the commit lands in', () => {
+  writeMark(guardTarget, BYPASS_MARK, diffFingerprint(guardTarget));
+  assert.equal(
+    guard(guardPlain, `cd ${guardTarget} && git commit -m wip`),
+    'allow',
+    'the mark written in the target repo is the one that counts',
+  );
+  assert.equal(
+    guard(guardPlain, `cd ${guardTarget} && git commit -m wip`),
+    'deny',
+    'and it is one-shot: consumed in the target repo, not left behind for the next commit',
+  );
+});
+
 // ── Session attribution (#13) ───────────────────────────────────────
 test('emit() falls back to CLAUDE_CODE_SESSION_ID only when the event carries no session of its own', () => {
   const original = process.env.CLAUDE_CODE_SESSION_ID;

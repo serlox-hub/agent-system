@@ -13,6 +13,8 @@
  * change one line after reviewing and the guard fires again.
  */
 
+import { resolve } from 'node:path';
+
 import { readHookInput, resolveContext, emit } from '../lib/context.mjs';
 import {
   diffFingerprint,
@@ -27,6 +29,10 @@ import {
  * Git options that consume the NEXT token as their value. Without this list a
  * regex-only match fails on `git -C . commit` — the `.` is neither an option nor
  * the subcommand — and the commit slips past the guard unreviewed.
+ *
+ * Two of them do not merely need skipping: `-C` and `--work-tree` say which tree
+ * is being committed, so they also decide which project the guard must resolve.
+ * See `commitCwd`.
  */
 const VALUE_OPTS = new Set([
   '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--config-env',
@@ -73,25 +79,96 @@ function tokenize(segment) {
 }
 
 /**
- * True when any command in the line is `git commit`.
+ * Split a command line into segments, keeping the operator that preceded each —
+ * `cd` only carries forward across some of them, and a separator-blind split
+ * cannot tell which.
+ *
+ * The list must be every shell command separator, not just the infix
+ * operators: a NEWLINE separates two commands exactly as `;` does, and a lone
+ * `&` backgrounds the one before it. Miss either and a segment holds two
+ * commands at once — `cd there<newline>git commit` then reads as a single `cd`,
+ * and the commit inside it is never seen at all.
+ */
+function splitSegments(command) {
+  const parts = String(command).split(/(&&|\|\||;|\||\n|&)/);
+  const segments = [];
+  let sep = null;
+  for (let i = 0; i < parts.length; i += 1) {
+    if (i % 2 === 0) segments.push({ text: parts[i], sepBefore: sep });
+    else sep = parts[i];
+  }
+  return segments;
+}
+
+/**
+ * The directory a `git commit` in this command line would actually run in, or
+ * null when the line commits nothing.
+ *
+ * The hook payload's `cwd` is the SESSION's directory, which is only the
+ * commit's directory when the command does not move. `cd lane1 && git commit`
+ * and `git -C lane1 commit` both commit somewhere else, and resolving the
+ * project from the session's cwd instead guards the wrong repository — it
+ * blocks against a tree the commit does not touch, and clears the bypass mark
+ * in a root the retry will not read. Worse than a false block: a session
+ * sitting in a clean, already-gated repo waves through an unreviewed commit in
+ * the repo it `cd`s into.
+ *
+ * D14 already walks git's option grammar by token to find `commit` at all; the
+ * `-C` it walks past is the same value that says where. This reads it rather
+ * than discarding it, and follows `cd` for the same reason.
  *
  * Walks tokens instead of pattern-matching, so it accepts every option form
  * (`-C dir`, `--git-dir=x`, `--no-pager`) while refusing the near-misses that a
  * loose regex would swallow: `git log --grep commit` and `git commit-tree` are
  * not commits.
  */
-function isGitCommit(command) {
-  for (const segment of String(command).split(/&&|\|\||;|\|/)) {
-    const tokens = tokenize(segment.trim());
+function commitCwd(command, baseCwd) {
+  const segments = splitSegments(command);
+  let cwd = baseCwd;
+  for (let idx = 0; idx < segments.length; idx += 1) {
+    const tokens = tokenize(segments[idx].text.trim());
+    if (!tokens.length) continue;
+
+    if (tokens[0] === 'cd') {
+      // What decides whether a cd is felt downstream is the operator AFTER it,
+      // not the one before: only `&&`, `;` and a newline leave the next command
+      // in the new directory. After `||` the cd FAILED, so the old directory
+      // still stands; after `|` or `&` it ran in a subshell whose cwd nothing
+      // downstream inherits. Reading the operator on the wrong side makes
+      // `cd elsewhere || git ...` resolve against a directory the command never
+      // reached.
+      const sepAfter = segments[idx + 1] ? segments[idx + 1].sepBefore : null;
+      if (sepAfter === '&&' || sepAfter === ';' || sepAfter === '\n') {
+        const target = tokens[1];
+        if (target && !target.startsWith('-')) cwd = resolve(cwd, target);
+      }
+      continue;
+    }
+
     const start = tokens.findIndex((t) => t === 'git' || t.endsWith('/git'));
     if (start === -1) continue;
     let i = start + 1;
+    // Relocation is per-invocation: `-C` composes relatively against what the
+    // chain's `cd`s already established, but does not outlive this git call.
+    let dir = cwd;
     while (i < tokens.length && tokens[i].startsWith('-')) {
-      i += VALUE_OPTS.has(tokens[i]) ? 2 : 1;
+      const opt = tokens[i];
+      if (VALUE_OPTS.has(opt)) {
+        const value = tokens[i + 1];
+        // Repeated `-C` is relative to the preceding one, which is what
+        // resolve() already does. `--git-dir` is deliberately not followed: it
+        // names the .git directory rather than a tree, and git itself pairs it
+        // with --work-tree when the two differ.
+        if ((opt === '-C' || opt === '--work-tree') && value) dir = resolve(dir, value);
+        i += 2;
+      } else {
+        if (opt.startsWith('--work-tree=')) dir = resolve(dir, opt.slice('--work-tree='.length));
+        i += 1;
+      }
     }
-    if (tokens[i] === 'commit') return true;
+    if (tokens[i] === 'commit') return dir;
   }
-  return false;
+  return null;
 }
 
 function allow() {
@@ -113,9 +190,10 @@ function deny(reason) {
 
 async function main() {
   const input = await readHookInput();
-  if (!isGitCommit(input?.tool_input?.command || '')) allow();
+  const cwd = commitCwd(input?.tool_input?.command || '', input?.cwd || process.cwd());
+  if (cwd === null) allow();
 
-  const ctx = resolveContext(input?.cwd || process.cwd());
+  const ctx = resolveContext(cwd);
   if (!ctx.optedIn) allow(); // project has not adopted the system
   if (ctx.config?.review?.commitGuard === false) allow(); // explicitly disabled
 
