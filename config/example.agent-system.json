@@ -7,19 +7,19 @@
 
   "commands": {
     "install": "pnpm install",
-    "lint": "pnpm lint",
-    "lintFix": "pnpm lint --fix",
-    "typecheck": "pnpm type-check",
-    "test": "pnpm test:run",
+    "lint": "pnpm run lint",
+    "lintFix": "pnpm run lint --fix",
+    "typecheck": "pnpm run type-check",
+    "test": "pnpm run test:run",
     "testTargeted": "pnpm vitest run",
-    "build": "pnpm build"
+    "build": "pnpm run build"
   },
 
   "dev": {
     "services": [
       {
         "name": "web",
-        "command": "pnpm dev --port {port}",
+        "command": "pnpm run dev --port {port}",
         "portBase": 300,
         "url": "http://localhost:{port}"
       },
