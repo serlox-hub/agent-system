@@ -17,6 +17,19 @@ reversed, never to make room.
 
 ---
 
+## D51 — `lintFix`'s fallback and the generated `dev` command need the `--` separator only for npm, never for pnpm
+`core` · 2026-09 · `bin/lanes.mjs:detectCommands`, `bin/lanes.mjs` adopt config builder · #34
+Verified against real npm/pnpm/yarn/bun installs: npm swallows a bare extra flag
+(`--fix`, `--port`) as its own config setting unless it comes after `--`; pnpm
+does the opposite and forwards a literal `--` straight to the script, so
+`eslint . -- --fix` treats `--fix` as a file to lint instead of a flag. yarn
+(classic) and bun tolerate either form.
+Rejected: a single `-- --fix`/`-- --port` form for every manager — the literal
+shape issue #34's suggested fix shows for the main `run` helper. It fixes npm
+but breaks pnpm, reintroducing a regression the issue's own Acceptance
+criterion explicitly rules out ("unchanged in behaviour for yarn and pnpm
+repos").
+
 ## D50 — `worktreesDir`/`basePort` are never hand-written into the committed config, not even "to mandate a shared convention"
 `product` · 2026-09 · `docs/SETUP.md` · #33
 The only path that put a per-machine value into this repo's own committed

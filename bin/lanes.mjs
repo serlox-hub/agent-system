@@ -130,14 +130,21 @@ function detectCommands(root) {
 
   // Map our canonical names onto whatever this repo actually calls them.
   const pick = (...names) => names.find((n) => scripts[n]);
-  const run = (name) => (name ? `${pm} ${name}` : null);
+  const run = (name) => (name ? `${pm} run ${name}` : null);
   return {
     pm,
     hasDev: Boolean(scripts.dev),
     commands: {
       install: `${pm} install`,
       lint: run(pick('lint')),
-      lintFix: pick('lint:fix') ? run('lint:fix') : pick('lint') ? `${pm} lint --fix` : null,
+      // npm swallows a bare `--fix` as its own flag unless it comes after `--`;
+      // pnpm does the opposite and forwards a literal `--` straight to the
+      // script, so `eslint . -- --fix` treats `--fix` as a file to lint.
+      lintFix: pick('lint:fix')
+        ? run('lint:fix')
+        : pick('lint')
+          ? `${run('lint')} ${pm === 'npm' ? '-- ' : ''}--fix`
+          : null,
       typecheck: run(pick('type-check', 'typecheck', 'tsc')),
       test: run(pick('test:run', 'test:unit', 'test')),
       testTargeted: pm === 'npm' ? 'npx vitest run' : `${pm} vitest run`,
@@ -355,8 +362,21 @@ switch (cmd) {
       // A guess, and flagged as one below: `--port` is right for Vite and Next
       // but wrong for plenty of runners, and a monorepo usually has more than
       // one service. Better a concrete line to edit than an empty section.
+      // Needs `run` and, on npm only, the `--` separator — same quirk as
+      // lintFix above, this time for `--port` instead of `--fix`.
       ...(hasDev
-        ? { dev: { services: [{ name: 'web', command: `${pm} dev --port {port}`, portBase: 300, url: 'http://localhost:{port}' }] } }
+        ? {
+            dev: {
+              services: [
+                {
+                  name: 'web',
+                  command: `${pm} run dev ${pm === 'npm' ? '-- ' : ''}--port {port}`,
+                  portBase: 300,
+                  url: 'http://localhost:{port}',
+                },
+              ],
+            },
+          }
         : { dev: { services: [] } }),
       branch: {
         pattern: '^(?:feat|fix|refactor|chore|docs)/(\\d+)-',

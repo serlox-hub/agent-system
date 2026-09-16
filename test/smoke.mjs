@@ -2387,12 +2387,65 @@ test('lanes adopt writes a config a fresh repo can be verified against', () => {
   writeFileSync(join(fresh, 'pnpm-lock.yaml'), '');
   execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
   const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
-  assert.equal(cfg.commands.lint, 'pnpm lint', 'package manager comes from the lockfile');
-  assert.equal(cfg.commands.build, 'pnpm build');
+  assert.equal(cfg.commands.lint, 'pnpm run lint', 'package manager comes from the lockfile');
+  assert.equal(cfg.commands.build, 'pnpm run build');
   assert.equal(cfg.commands.typecheck, null, 'a script that does not exist stays null');
   assert.equal(cfg.worktreesDir, undefined, 'a single-worktree repo gets no lanes');
   assert.deepEqual(cfg.review.domainAxes, [], 'the one field a human must fill in');
   assert.equal(cfg.architect.suggestImplementationModel, true, 'architect suggests an implementation model by default');
+});
+
+test('lanes adopt defaults to npm when no lockfile is present, and npm needs `--` before lintFix and dev --port', () => {
+  const fresh = join(TMP, 'fresh-npm');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(
+    join(fresh, 'package.json'),
+    JSON.stringify({ scripts: { lint: 'eslint .', build: 'vite build', dev: 'vite' } }),
+  );
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.commands.lint, 'npm run lint', 'no lockfile falls back to npm');
+  assert.equal(cfg.commands.build, 'npm run build');
+  assert.equal(
+    cfg.commands.lintFix,
+    'npm run lint -- --fix',
+    'no lint:fix script: falls back to lint, and npm needs `--` before --fix or it swallows the flag as its own',
+  );
+  assert.equal(
+    cfg.dev.services[0].command,
+    'npm run dev -- --port {port}',
+    'the generated dev command needs the same `--` separator for the same reason',
+  );
+});
+
+test("lanes adopt omits the -- separator for pnpm's lintFix fallback and dev command", () => {
+  const fresh = join(TMP, 'fresh-pnpm-fallback');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(join(fresh, 'package.json'), JSON.stringify({ scripts: { lint: 'eslint .', dev: 'vite' } }));
+  writeFileSync(join(fresh, 'pnpm-lock.yaml'), '');
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(
+    cfg.commands.lintFix,
+    'pnpm run lint --fix',
+    'pnpm forwards a literal -- straight to the script, so it must be omitted here',
+  );
+  assert.equal(cfg.dev.services[0].command, 'pnpm run dev --port {port}');
+});
+
+test('lanes adopt picks an existing lint:fix script as-is, without appending --fix again', () => {
+  const fresh = join(TMP, 'fresh-lintfix-script');
+  mkdirSync(fresh);
+  git(fresh, 'init', '-q');
+  writeFileSync(
+    join(fresh, 'package.json'),
+    JSON.stringify({ scripts: { lint: 'eslint .', 'lint:fix': 'eslint . --fix' } }),
+  );
+  execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
+  const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.commands.lintFix, 'npm run lint:fix', 'a real lint:fix script is used directly, not the lint fallback');
 });
 
 test('lanes adopt refuses to clobber an existing config without --force', () => {
