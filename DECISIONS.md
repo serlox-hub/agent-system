@@ -24,11 +24,10 @@ Verified against real npm/pnpm/yarn/bun installs: npm swallows a bare extra flag
 does the opposite and forwards a literal `--` straight to the script, so
 `eslint . -- --fix` treats `--fix` as a file to lint instead of a flag. yarn
 (classic) and bun tolerate either form.
-Rejected: a single `-- --fix`/`-- --port` form for every manager — the literal
-shape issue #34's suggested fix shows for the main `run` helper. It fixes npm
-but breaks pnpm, reintroducing a regression the issue's own Acceptance
-criterion explicitly rules out ("unchanged in behaviour for yarn and pnpm
-repos").
+Rejected: a single `-- --fix`/`-- --port` form for every manager, uniform
+across managers the way the `run` helper above now is. It fixes npm but breaks
+pnpm, reintroducing a regression #34's own Acceptance criterion explicitly
+rules out ("unchanged in behaviour for yarn and pnpm repos").
 
 ## D50 — `worktreesDir`/`basePort` are never hand-written into the committed config, not even "to mandate a shared convention"
 `product` · 2026-09 · `docs/SETUP.md` · #33
