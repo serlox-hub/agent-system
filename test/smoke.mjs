@@ -2773,6 +2773,16 @@ test('lanes adopt writes an auto-detected worktreesDir to the local override, ne
   assert.ok(gitignore.includes('.claude/agent-system.local.json'), 'adopt appends the ignore entry');
 });
 
+test("this repo's own committed config never carries a per-machine value (D22, D42)", () => {
+  const cfg = JSON.parse(readFileSync(join(ROOT, '.claude', 'agent-system.json'), 'utf8'));
+  assert.equal(cfg.worktreesDir, undefined, 'per-machine values never land in this repo\'s own committed config (D22, D42)');
+  assert.equal(cfg.basePort, undefined, 'per-machine values never land in this repo\'s own committed config (D22, D42)');
+  assert.equal(cfg.$schema, undefined, 'per-machine values never land in this repo\'s own committed config (D22, D42)');
+  for (const svc of cfg.dev?.services ?? []) {
+    assert.equal(svc.portBase, undefined, `service "${svc.name}": per-machine values never land in this repo's own committed config (D22, D42)`);
+  }
+});
+
 test('lanes adopt appends the .gitignore entry once, and does nothing when there is no .gitignore', () => {
   const noIgnore = join(TMP, 'adopt-no-gitignore');
   mkdirSync(noIgnore);

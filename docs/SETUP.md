@@ -70,9 +70,7 @@ different disks, naming conventions, or port ranges), so they always go into
 the gitignored `.claude/agent-system.local.json` at the repo root, via `lanes
 worktrees-dir`/`base-port` under the hood. `adopt` also adds that filename to
 `.gitignore` if the repo has one, and warns if it couldn't (no `.gitignore` at
-all, for instance). A team can still hand-write `worktreesDir` or `basePort`
-into the committed config to mandate a shared convention — the local file just
-wins whenever it's present.
+all, for instance).
 
 If no worktrees convention is detected and you're running this from a real
 terminal, it offers to create a sibling `<project>-lanes` directory and use
