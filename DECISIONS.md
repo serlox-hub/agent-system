@@ -29,18 +29,34 @@ npm/pnpm/yarn/bun installs, and neither generalizes to the other:
   tolerate either form.
 - `pm exec -- <tool> <args>` (`testTargeted`): npm and yarn classic swallow
   the tool's own trailing flags (e.g. `-t foo`) unless prefixed by `--`; pnpm
-  and yarn berry tolerate the `--` either way, so one uniform `<pm> exec --`
-  form covers all four of those managers. bun is the exception here for a
+  and yarn berry tolerate the `--` either way. bun is the exception for a
   different reason: `bun exec`'s argument runs as a Bun Shell command and
   never resolves `node_modules/.bin`, so bun needs `bun run --` instead of
-  `exec` at all.
+  `exec` at all. Its `--` is not required, unlike npm/yarn classic's: `bun run
+  -- faketool run -t foo` and `bun run faketool run -t foo` are identical on
+  bun 1.4.2. Kept anyway, for the same reason `run` keeps it for yarn/bun in
+  the bullet above — one form to read, not four.
+  npm gets a third form, `npx --no-install --`, not `npm exec --`: `npm exec`
+  IS `npx`, so with the dependency merely *declared* but not yet installed
+  (the normal state of a fresh lane before `npm install`) it silently
+  installs and runs whatever version the registry serves — verified on npm
+  11 with jest declared but absent from `node_modules`: `npm exec -- jest`
+  fetches and runs `jest@latest`, exit 0, no prompt. `npx --no-install --`
+  is identical when the tool is present and refuses instead of fetching when
+  it isn't (verified both directions). Reaching for `npm exec --no-install`
+  instead doesn't work: npm parses `--no-install` as an unrecognized flag and
+  installs anyway, same as plain `exec` (verified). pnpm and yarn berry's
+  `exec` don't reach the registry for a missing binary in the first place, so
+  neither needs this.
 Rejected: a single `-- --fix`/`-- --port` form for every manager under `run`,
 uniform the way the `run` helper is elsewhere — it fixes npm but breaks pnpm,
 reintroducing a regression #34's own Acceptance criterion explicitly rules out
 ("unchanged in behaviour for yarn and pnpm repos"). Also rejected, for `exec`:
 branching the `--` per manager the way `run` does — pnpm and yarn berry
 tolerate it fine either way under `exec`, so the extra branch only adds a case
-to get wrong for no behavioural gain.
+to get wrong for no behavioural gain. Also rejected: `npm exec --no-install --`
+as the network-safe npm form — looks like the obvious fix and silently isn't
+one, per the trap above.
 
 ## D50 — `worktreesDir`/`basePort` are never hand-written into the committed config, not even "to mandate a shared convention"
 `product` · 2026-09 · `docs/SETUP.md` · #33

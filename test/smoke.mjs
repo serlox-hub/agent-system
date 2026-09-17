@@ -2418,7 +2418,7 @@ test('lanes adopt derives testTargeted from jest when there is no vitest depende
   writeFileSync(join(fresh, 'package.json'), JSON.stringify({ dependencies: { jest: '^29.0.0' } }));
   execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
   const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
-  assert.equal(cfg.commands.testTargeted, 'npm exec -- jest');
+  assert.equal(cfg.commands.testTargeted, 'npx --no-install -- jest');
 });
 
 test('lanes adopt prefers vitest over jest when a repo depends on both', () => {
@@ -2431,7 +2431,7 @@ test('lanes adopt prefers vitest over jest when a repo depends on both', () => {
   );
   execFileSync(join(ROOT, 'bin', 'lanes'), ['adopt'], { cwd: fresh, encoding: 'utf8' });
   const cfg = JSON.parse(readFileSync(join(fresh, '.claude', 'agent-system.json'), 'utf8'));
-  assert.equal(cfg.commands.testTargeted, 'npm exec -- vitest run');
+  assert.equal(cfg.commands.testTargeted, 'npx --no-install -- vitest run');
 });
 
 test("lanes adopt uses `bun run --` for testTargeted, not `bun exec` — bun exec runs a shell command and can't see node_modules/.bin", () => {
