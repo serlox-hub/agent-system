@@ -117,8 +117,11 @@ function detectCommands(root) {
   const pkgPath = join(root, 'package.json');
   if (!existsSync(pkgPath)) return { pm: null, commands: {} };
   let scripts = {};
+  let deps = {};
   try {
-    scripts = JSON.parse(readFileSync(pkgPath, 'utf8')).scripts || {};
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    scripts = pkg.scripts || {};
+    deps = { ...pkg.dependencies, ...pkg.devDependencies };
   } catch { /* unreadable package.json — fall through with no detection */ }
 
   const pm =
@@ -131,6 +134,9 @@ function detectCommands(root) {
   // Map our canonical names onto whatever this repo actually calls them.
   const pick = (...names) => names.find((n) => scripts[n]);
   const run = (name) => (name ? `${pm} run ${name}` : null);
+  const dep = (name) => Boolean(deps[name]);
+  const execTool =
+    pm === 'bun' ? 'bun run --' : pm === 'npm' ? 'npx --no-install --' : `${pm} exec --`;
   return {
     pm,
     hasDev: Boolean(scripts.dev),
@@ -147,7 +153,34 @@ function detectCommands(root) {
           : null,
       typecheck: run(pick('type-check', 'typecheck', 'tsc')),
       test: run(pick('test:run', 'test:unit', 'test')),
-      testTargeted: pm === 'npm' ? 'npx vitest run' : `${pm} vitest run`,
+      // Derived from dependencies, not asserted like `npx vitest run` used to
+      // be: an unconditional guess reaches the registry for whatever tool the
+      // constant names, even in a repo that never declared it. dep() alone
+      // isn't enough to close that off, though — `npm exec` IS `npx`, so on a
+      // lane with no node_modules yet it silently installs and runs whatever
+      // version the registry serves for a dependency the repo merely
+      // declares but hasn't installed (verified: `npm exec -- jest` with jest
+      // in package.json but absent from node_modules fetches and runs
+      // jest@latest, exit 0, no prompt). `npx --no-install --` is the fix:
+      // identical output when the tool is present, and it refuses instead of
+      // fetching when it's not (verified both directions on npm 11). The
+      // trap is reaching for `npm exec --no-install` instead — npm parses
+      // `--no-install` as an unrecognized flag and installs anyway (verified:
+      // same silent install as plain `exec`). `--` before the tool's own args
+      // is still required on npm and yarn classic, which otherwise swallow
+      // them as their own flags (same quirk as lintFix above); pnpm and yarn
+      // berry tolerate it either way, and neither reaches the registry under
+      // `exec` the way npm's does. bun needs `run` instead of `exec`
+      // altogether: `bun exec`'s argument runs as a Bun Shell command and
+      // never resolves node_modules/.bin. Its `--` is not required there —
+      // `bun run -- faketool run -t foo` and `bun run faketool run -t foo`
+      // are identical on bun 1.4.2 — kept only for symmetry with the other
+      // managers' `exec` form.
+      testTargeted: dep('vitest')
+        ? `${execTool} vitest run`
+        : dep('jest')
+          ? `${execTool} jest`
+          : null,
       build: run(pick('build')),
     },
   };

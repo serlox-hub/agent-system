@@ -73,8 +73,16 @@ Follow the repo's existing test style — read two or three neighbouring test
 files first and match their structure, naming and helpers. A test that looks
 foreign to the codebase is a finding against you, not a contribution.
 
-Then run the targeted command from `commands.testTargeted` on what you wrote,
-and iterate until it passes. Do **not** run lint, typecheck or the full suite —
+Then verify what you wrote. Run `commands.testTargeted` on it and iterate until
+it passes. If `commands.testTargeted` is null — normal for a repo whose
+framework `lanes adopt` doesn't recognize — fall back to `commands.test` (the
+full suite) and iterate on that instead: slower, but rule 2 above means a real
+pass, not an assumed one. If `commands.test` is also null, there is nothing to
+run: say so under **Skipped** and report the tests as unverified, never as
+`Verified:`. Either way, name the exact command you ran, or that none was
+available — never leave it implicit.
+
+Beyond that one fallback, do **not** run lint, typecheck or the full suite —
 the orchestrator does that once, at the end, over the whole tree.
 
 ## Output format
@@ -83,7 +91,7 @@ the orchestrator does that once, at the end, over the whole tree.
 ## Tests
 - Created: <file> — N tests (<what they cover, one clause each>)
 - Extended: <file> — N tests added
-- Verified: <command run> — pass
+- Verified: <command run> — pass, or: Unverified — no testTargeted or test command configured
 
 ## Skipped
 - <unit>: <why it was not worth testing>

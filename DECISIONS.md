@@ -17,17 +17,46 @@ reversed, never to make room.
 
 ---
 
-## D51 — `lintFix`'s fallback and the generated `dev` command need the `--` separator only for npm, never for pnpm
-`core` · 2026-09 · `bin/lanes.mjs:detectCommands`, `bin/lanes.mjs` adopt config builder · #34
-Verified against real npm/pnpm/yarn/bun installs: npm swallows a bare extra flag
-(`--fix`, `--port`) as its own config setting unless it comes after `--`; pnpm
-does the opposite and forwards a literal `--` straight to the script, so
-`eslint . -- --fix` treats `--fix` as a file to lint instead of a flag. yarn
-(classic) and bun tolerate either form.
-Rejected: a single `-- --fix`/`-- --port` form for every manager, uniform
-across managers the way the `run` helper above now is. It fixes npm but breaks
-pnpm, reintroducing a regression #34's own Acceptance criterion explicitly
-rules out ("unchanged in behaviour for yarn and pnpm repos").
+## D51 — `--`/verb rules for generated commands are per shape, not one rule for the whole file
+`core` · 2026-09 · `bin/lanes.mjs:detectCommands`, `bin/lanes.mjs` adopt config builder · #34, #35
+Two distinct quirks live at this same location, verified against real
+npm/pnpm/yarn/bun installs, and neither generalizes to the other:
+- `pm run <script> -- <flag>` (`lintFix`'s fallback, the generated `dev`
+  command): npm swallows a bare extra flag (`--fix`, `--port`) as its own
+  config setting unless it comes after `--`; pnpm does the opposite and
+  forwards a literal `--` straight to the script, so `eslint . -- --fix`
+  treats `--fix` as a file to lint instead of a flag. yarn (classic) and bun
+  tolerate either form.
+- `pm exec -- <tool> <args>` (`testTargeted`): npm and yarn classic swallow
+  the tool's own trailing flags (e.g. `-t foo`) unless prefixed by `--`; pnpm
+  and yarn berry tolerate the `--` either way. bun is the exception for a
+  different reason: `bun exec`'s argument runs as a Bun Shell command and
+  never resolves `node_modules/.bin`, so bun needs `bun run --` instead of
+  `exec` at all. Its `--` is not required, unlike npm/yarn classic's: `bun run
+  -- faketool run -t foo` and `bun run faketool run -t foo` are identical on
+  bun 1.4.2. Kept anyway, for the same reason `run` keeps it for yarn/bun in
+  the bullet above — one form to read, not four.
+  npm gets a third form, `npx --no-install --`, not `npm exec --`: `npm exec`
+  IS `npx`, so with the dependency merely *declared* but not yet installed
+  (the normal state of a fresh lane before `npm install`) it silently
+  installs and runs whatever version the registry serves — verified on npm
+  11 with jest declared but absent from `node_modules`: `npm exec -- jest`
+  fetches and runs `jest@latest`, exit 0, no prompt. `npx --no-install --`
+  is identical when the tool is present and refuses instead of fetching when
+  it isn't (verified both directions). Reaching for `npm exec --no-install`
+  instead doesn't work: npm parses `--no-install` as an unrecognized flag and
+  installs anyway, same as plain `exec` (verified). pnpm and yarn berry's
+  `exec` don't reach the registry for a missing binary in the first place, so
+  neither needs this.
+Rejected: a single `-- --fix`/`-- --port` form for every manager under `run`,
+uniform the way the `run` helper is elsewhere — it fixes npm but breaks pnpm,
+reintroducing a regression #34's own Acceptance criterion explicitly rules out
+("unchanged in behaviour for yarn and pnpm repos"). Also rejected, for `exec`:
+branching the `--` per manager the way `run` does — pnpm and yarn berry
+tolerate it fine either way under `exec`, so the extra branch only adds a case
+to get wrong for no behavioural gain. Also rejected: `npm exec --no-install --`
+as the network-safe npm form — looks like the obvious fix and silently isn't
+one, per the trap above.
 
 ## D50 — `worktreesDir`/`basePort` are never hand-written into the committed config, not even "to mandate a shared convention"
 `product` · 2026-09 · `docs/SETUP.md` · #33
