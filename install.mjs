@@ -177,7 +177,7 @@ if (UNINSTALL) {
       ok(`${BIN} is already on your PATH`);
     } else {
       steps.unshift(
-        `Put the CLI on your PATH:\n       echo 'export PATH="${BIN}:$PATH"' >> ~/.zshrc && exec zsh`,
+        `Put the CLI on your PATH:\n       echo 'export PATH="${BIN}:$PATH"' >> ~/.zshrc && export PATH="${BIN}:$PATH"`,
       );
     }
     log('Done. Next:');
