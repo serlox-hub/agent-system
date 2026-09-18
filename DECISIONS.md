@@ -17,6 +17,15 @@ reversed, never to make room.
 
 ---
 
+## D52 — Install instructions re-run the `export` in the current shell, not `exec zsh` or `source ~/.zshrc`
+`core` · 2026-09 · `install.mjs:180`, `docs/SETUP.md:41`
+PATH has to apply immediately without replacing the user's shell (`exec zsh` discards
+its state and any running job) or re-sourcing a profile that is not guaranteed re-entrant.
+Rejected: `... >> ~/.zshrc && source ~/.zshrc` — the obvious DRY fix for the duplicated
+string, but a user's `~/.zshrc` is arbitrary code with no guarantee it is safe to run
+twice (duplicate PATH entries, `compinit` warnings, re-run plugin managers), which turns
+a one-line install step into an unrelated debugging session.
+
 ## D51 — `--`/verb rules for generated commands are per shape, not one rule for the whole file
 `core` · 2026-09 · `bin/lanes.mjs:detectCommands`, `bin/lanes.mjs` adopt config builder · #34, #35
 Two distinct quirks live at this same location, verified against real

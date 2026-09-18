@@ -34,7 +34,7 @@ And `git pull` plus re-running `./install.sh` is the whole upgrade.
 
 ```bash
 ./install.sh                                  # once per machine
-export PATH="$PWD/bin:$PATH"                  # add to ~/.zshrc to keep it
+export PATH="$PWD/bin:$PATH"                  # add the resolved path to ~/.zshrc — see docs/SETUP.md
 cd <your repo>
 lanes adopt                                   # once per repo — detects what it can
 $EDITOR .claude/agent-system.json

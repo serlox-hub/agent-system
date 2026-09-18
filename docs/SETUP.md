@@ -8,7 +8,7 @@ no config file means no events, no commit guard, nothing). Everything reversible
 | Want to... | Run |
 |---|---|
 | Install on this machine | `./install.sh` |
-| Put `lanes` on your PATH | `echo 'export PATH="$PWD/bin:$PATH"' >> ~/.zshrc && exec zsh` |
+| Put `lanes` on your PATH | `./install.sh` prints the exact line — see [§1](#1-install-on-your-machine) |
 | Opt a repo in | `lanes adopt` (from inside the repo) |
 | Set this machine's lanes directory | `lanes worktrees-dir <path>` |
 | Set this machine's port prefix | `lanes base-port <n>` |
@@ -38,7 +38,7 @@ Zero runtime dependencies. No `npm install`.
 git clone <this repo> ~/dev/agent-system
 cd ~/dev/agent-system
 ./install.sh
-echo 'export PATH="$HOME/dev/agent-system/bin:$PATH"' >> ~/.zshrc && exec zsh
+echo 'export PATH="$HOME/dev/agent-system/bin:$PATH"' >> ~/.zshrc && export PATH="$HOME/dev/agent-system/bin:$PATH"
 ```
 
 What `install.sh` does, and nothing else:
