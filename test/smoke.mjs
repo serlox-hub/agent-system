@@ -2299,81 +2299,269 @@ test('the sh wrapper resolves and runs the CLI', () => {
   }
 });
 
-// The installer no longer symlinks the CLI (D16), but people symlink CLIs anyway.
-// This is the property D10 buys: both paths must behave identically.
+// The installer symlinks the CLI into ~/.local/bin, and people symlink CLIs of
+// their own anyway. This is the property D10 buys: both paths behave identically.
 test('the wrapper resolves correctly when invoked through a symlink', () => {
   const linked = join(TMP, 'lanes');
   execFileSync('ln', ['-s', join(ROOT, 'bin', 'lanes'), linked]);
   assert.ok(execFileSync(linked, { encoding: 'utf8' }).includes('lanes doctor'));
 });
 
-test('lanes doctor warns (not blocks) when worktreesDir is missing but its parent exists', () => {
-  const missingButHealable = join(TMP, 'doctor-healable');
-  mkdirSync(missingButHealable);
-  git(missingButHealable, 'init', '-q');
-  mkdirSync(join(missingButHealable, '.claude'));
-  writeFileSync(
-    join(missingButHealable, '.claude', 'agent-system.json'),
-    JSON.stringify({ project: 'doctor-healable', worktreesDir: join(missingButHealable, 'not-yet') }),
+// `cli on PATH` is the one row that catches the failure a shell profile hides:
+// PATH set in ~/.zshrc reaches an interactive shell and nothing else, so a
+// session started by systemd or cron cannot run `lanes reviewed` at all.
+const doctorRepo = (name, extra = {}) => {
+  const dir = join(TMP, name);
+  mkdirSync(dir);
+  git(dir, 'init', '-q');
+  mkdirSync(join(dir, '.claude'));
+  writeFileSync(join(dir, '.claude', 'agent-system.json'), JSON.stringify({ project: name, ...extra }));
+  return dir;
+};
+
+test('lanes doctor warns when the CLI is not linked into ~/.local/bin', () => {
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], {
+    cwd: doctorRepo('doctor-cli-missing'),
+    encoding: 'utf8',
+  });
+  assert.match(output, /cli on PATH\s+.*\.local\/bin\/lanes is missing/);
+  assert.match(output, /nothing puts `lanes` on a non-interactive PATH/);
+});
+
+test('lanes doctor reports the CLI as reachable once the link exists', () => {
+  // HOME is TMP for the whole suite (see the header), so this is the sandbox's
+  // own ~/.local/bin — never the developer's.
+  const linkDir = join(TMP, '.local', 'bin');
+  mkdirSync(linkDir, { recursive: true });
+  const link = join(linkDir, 'lanes');
+  execFileSync('ln', ['-s', join(ROOT, 'bin', 'lanes'), link]);
+  try {
+    const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], {
+      cwd: doctorRepo('doctor-cli-linked'),
+      encoding: 'utf8',
+    });
+    assert.match(output, /cli on PATH\s+.*\.local\/bin\/lanes.*linked, outside any shell profile/);
+  } finally {
+    // A later test reading the same row would otherwise see this test's link.
+    rmSync(link, { force: true });
+  }
+});
+
+test('lanes doctor warns when the CLI link is a regular file, not a symlink', () => {
+  const linkDir = join(TMP, '.local', 'bin');
+  mkdirSync(linkDir, { recursive: true });
+  const link = join(linkDir, 'lanes');
+  writeFileSync(link, '#!/bin/sh\necho not-a-symlink\n');
+  try {
+    const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], {
+      cwd: doctorRepo('doctor-cli-foreign'),
+      encoding: 'utf8',
+    });
+    assert.match(output, /cli on PATH\s+.*\.local\/bin\/lanes is not a symlink — `install\.sh` left it alone/);
+  } finally {
+    rmSync(link, { force: true });
+  }
+});
+
+test('lanes doctor warns when the CLI link is a broken symlink', () => {
+  const linkDir = join(TMP, '.local', 'bin');
+  mkdirSync(linkDir, { recursive: true });
+  const link = join(linkDir, 'lanes');
+  execFileSync('ln', ['-s', join(TMP, 'no-such-target-for-cli-link'), link]);
+  try {
+    const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], {
+      cwd: doctorRepo('doctor-cli-dangling'),
+      encoding: 'utf8',
+    });
+    assert.match(output, /cli on PATH\s+.*\.local\/bin\/lanes is a broken symlink — nothing puts `lanes` on a non-interactive PATH/);
+  } finally {
+    rmSync(link, { force: true });
+  }
+});
+
+// install.mjs runs for real here — HOME is redirected per test to an isolated
+// directory under TMP (never the suite-wide TMP itself, which other tests
+// already use as `~/.claude`), so a real install/uninstall round-trip can run
+// without disturbing any other test's fixtures.
+const installHome = (name) => {
+  const dir = join(TMP, name);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+};
+
+// This repo's own ROOT (the suite runs from a lane, a linked worktree) refuses
+// the CLI link by design (see the test right below this block), so any test
+// that needs the link actually created runs install.mjs from a fake clone
+// instead: a `.git` *directory* (never a worktree's pointer file), a copy of
+// install.mjs so its own ROOT resolves inside the fake clone, and a bin/lanes
+// file to link to. agents/ and skills/ are not needed — linkTree no-ops when
+// its source directory is absent.
+const fakeClone = (name) => {
+  const dir = join(TMP, name);
+  mkdirSync(join(dir, '.git'), { recursive: true });
+  mkdirSync(join(dir, 'bin'), { recursive: true });
+  fs.copyFileSync(join(ROOT, 'install.mjs'), join(dir, 'install.mjs'));
+  fs.copyFileSync(join(ROOT, 'bin', 'lanes'), join(dir, 'bin', 'lanes'));
+  return dir;
+};
+
+test('install.mjs refuses to link the CLI when run from a linked worktree, and creates nothing', () => {
+  const home = installHome('install-worktree-guard');
+  // Runs the real, unmodified install.mjs from this suite's own ROOT — a lane,
+  // whose `.git` is a worktree pointer file, not a clone's directory.
+  const output = execFileSync('node', [join(ROOT, 'install.mjs')], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  });
+  assert.match(output, /not touched — this is a linked worktree/);
+  assert.throws(
+    () => fs.lstatSync(join(home, '.local', 'bin', 'lanes')),
+    'a linked worktree must not get a machine-wide CLI link',
   );
+});
+
+test('install.mjs symlinks bin/lanes into ~/.local/bin on install', () => {
+  const home = installHome('install-fresh');
+  const clone = fakeClone('install-fresh-clone');
+  const output = execFileSync('node', [join(clone, 'install.mjs')], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  });
+  const link = join(home, '.local', 'bin', 'lanes');
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), 'expected a symlink at ~/.local/bin/lanes');
+  assert.equal(fs.readlinkSync(link), join(clone, 'bin', 'lanes'));
+  assert.match(output, /bin\/lanes → .*\.local\/bin\/lanes/);
+});
+
+test('install.mjs --uninstall removes the CLI link it owns', () => {
+  const home = installHome('install-uninstall-owned');
+  const clone = fakeClone('install-uninstall-owned-clone');
+  execFileSync('node', [join(clone, 'install.mjs')], { env: { ...process.env, HOME: home } });
+  const link = join(home, '.local', 'bin', 'lanes');
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), 'precondition: install created the link');
+  const output = execFileSync('node', [join(clone, 'install.mjs'), '--uninstall'], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  });
+  assert.match(output, /removed .*\.local\/bin\/lanes/);
+  assert.throws(() => fs.lstatSync(link), 'the link must be gone, not just unresolved');
+});
+
+// Regression for the ownedLink fix: a bare `readlinkSync(p).startsWith(ROOT)`
+// would treat a sibling path that merely shares ROOT as a string prefix (e.g.
+// a worktree directory named `<repo>-lane1`) as owned by this repo. Only a
+// real subpath — `ROOT + sep` — should count.
+test('install.mjs --uninstall leaves a symlink alone when its target only shares ROOT as a string prefix', () => {
+  const home = installHome('install-uninstall-not-owned');
+  const linkDir = join(home, '.local', 'bin');
+  mkdirSync(linkDir, { recursive: true });
+  const link = join(linkDir, 'lanes');
+  const collidingTarget = `${ROOT}-fake/bin/lanes`;
+  execFileSync('ln', ['-s', collidingTarget, link]);
+  const output = execFileSync('node', [join(ROOT, 'install.mjs'), '--uninstall'], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  });
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), 'a symlink this repo does not own must survive uninstall');
+  assert.equal(fs.readlinkSync(link), collidingTarget);
+  assert.doesNotMatch(output, /removed .*\.local\/bin\/lanes/);
+});
+
+// Same ROOT + sep boundary, pinned at the other two sites it was fixed
+// (review finding rc-5): `isOurs` here, and `wired` in `bin/lanes.mjs` doctor,
+// right below. Both used to accept a bare `.includes(ROOT)`, which would
+// treat `${ROOT}-fake/...` — a sibling path merely sharing ROOT as a string
+// prefix — as this clone's own hook entry.
+test('install.mjs --uninstall leaves a hook entry alone when its command only shares ROOT as a string prefix (isOurs)', () => {
+  const home = installHome('install-isours-not-owned');
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  const settingsPath = join(home, '.claude', 'settings.json');
+  const foreignEntry = { hooks: [{ type: 'command', command: `node ${ROOT}-fake/hooks/emit.mjs` }] };
+  writeFileSync(settingsPath, JSON.stringify({ hooks: { SessionStart: [foreignEntry] } }));
+  execFileSync('node', [join(ROOT, 'install.mjs'), '--uninstall'], { env: { ...process.env, HOME: home } });
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.deepEqual(settings.hooks.SessionStart, [foreignEntry], 'a lane\'s hook entry must survive uninstall from this clone');
+});
+
+test('lanes doctor reports hooks as not wired when the only entry only shares ROOT as a string prefix (wired)', () => {
+  const home = installHome('doctor-wired-not-owned');
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  const settingsPath = join(home, '.claude', 'settings.json');
+  const foreignEntry = { hooks: [{ type: 'command', command: `node ${ROOT}-fake/hooks/emit.mjs` }] };
+  writeFileSync(settingsPath, JSON.stringify({ hooks: { SessionStart: [foreignEntry] } }));
+  const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], {
+    cwd: doctorRepo('doctor-wired-fake-root'),
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  });
+  const stripped = output.replace(new RegExp(`${ESC}\\[[0-9;]*m`, 'g'), '');
+  assert.match(stripped, /✗ hooks wired/, 'a lane\'s entry must not read as this clone\'s');
+});
+
+test('install.mjs warns before replacing a foreign symlink at the CLI link path', () => {
+  const home = installHome('install-replace-foreign-symlink');
+  const clone = fakeClone('install-replace-foreign-symlink-clone');
+  const linkDir = join(home, '.local', 'bin');
+  mkdirSync(linkDir, { recursive: true });
+  const link = join(linkDir, 'lanes');
+  const oldTarget = join(home, 'some-other-tool');
+  execFileSync('ln', ['-s', oldTarget, link]);
+  const output = execFileSync('node', [join(clone, 'install.mjs')], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  });
+  assert.match(output, /replacing .*\.local\/bin\/lanes — it pointed at/);
+  assert.ok(output.includes(oldTarget), 'names the previous target, so it can be put back');
+  assert.equal(fs.readlinkSync(link), join(clone, 'bin', 'lanes'), 'still replaces the foreign symlink with ours');
+});
+
+test('install.mjs refuses to replace a regular file at the CLI link path', () => {
+  const home = installHome('install-refuse-regular-file');
+  const clone = fakeClone('install-refuse-regular-file-clone');
+  const linkDir = join(home, '.local', 'bin');
+  mkdirSync(linkDir, { recursive: true });
+  const link = join(linkDir, 'lanes');
+  writeFileSync(link, '#!/bin/sh\necho user-owned\n');
+  const output = execFileSync('node', [join(clone, 'install.mjs')], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf8',
+  });
+  assert.match(output, /\.local\/bin\/lanes exists and is not a symlink — left untouched/);
+  assert.ok(!fs.lstatSync(link).isSymbolicLink(), 'must not have replaced the file with a symlink');
+  assert.equal(readFileSync(link, 'utf8'), '#!/bin/sh\necho user-owned\n', 'must not have overwritten file contents');
+});
+
+test('lanes doctor warns (not blocks) when worktreesDir is missing but its parent exists', () => {
+  const missingButHealable = doctorRepo('doctor-healable', { worktreesDir: join(TMP, 'doctor-healable', 'not-yet') });
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: missingButHealable, encoding: 'utf8' });
   assert.match(output, /worktrees\s+.*not-yet.*does not exist yet.*will create it/);
   assert.doesNotMatch(output, /does not exist, and neither does its parent/);
 });
 
 test('lanes doctor blocks when worktreesDir is missing and so is its parent', () => {
-  const orphanParent = join(TMP, 'doctor-orphan');
-  mkdirSync(orphanParent);
-  git(orphanParent, 'init', '-q');
-  mkdirSync(join(orphanParent, '.claude'));
-  writeFileSync(
-    join(orphanParent, '.claude', 'agent-system.json'),
-    JSON.stringify({ project: 'doctor-orphan', worktreesDir: join(TMP, 'no-such-parent-dir', 'wts') }),
-  );
+  const orphanParent = doctorRepo('doctor-orphan', { worktreesDir: join(TMP, 'no-such-parent-dir', 'wts') });
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: orphanParent, encoding: 'utf8' });
   assert.match(output, /worktrees\s+.*does not exist, and neither does its parent/);
   assert.doesNotMatch(output, /will create it/);
 });
 
 test('lanes doctor commands row falls back to the default gate list when review.gates is unset', () => {
-  const dir = join(TMP, 'doctor-gates-default');
-  mkdirSync(dir);
-  git(dir, 'init', '-q');
-  mkdirSync(join(dir, '.claude'));
-  writeFileSync(
-    join(dir, '.claude', 'agent-system.json'),
-    JSON.stringify({ project: 'doctor-gates-default', commands: { lintFix: 'x', typecheck: 'x', lint: 'x', test: 'x' } }),
-  );
+  const dir = doctorRepo('doctor-gates-default', { commands: { lintFix: 'x', typecheck: 'x', lint: 'x', test: 'x' } });
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: dir, encoding: 'utf8' });
   assert.match(output, /commands\s+lintFix, typecheck, lint, test all set/);
 });
 
 test('lanes doctor commands row lists the default gates missing from commands', () => {
-  const dir = join(TMP, 'doctor-gates-missing-default');
-  mkdirSync(dir);
-  git(dir, 'init', '-q');
-  mkdirSync(join(dir, '.claude'));
-  writeFileSync(
-    join(dir, '.claude', 'agent-system.json'),
-    JSON.stringify({ project: 'doctor-gates-missing-default', commands: { test: 'x' } }),
-  );
+  const dir = doctorRepo('doctor-gates-missing-default', { commands: { test: 'x' } });
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: dir, encoding: 'utf8' });
   assert.match(output, /commands\s+missing: lintFix, typecheck, lint — \/gate will skip those gates/);
 });
 
 test('lanes doctor commands row checks review.gates instead of the default list when set', () => {
-  const dir = join(TMP, 'doctor-gates-custom');
-  mkdirSync(dir);
-  git(dir, 'init', '-q');
-  mkdirSync(join(dir, '.claude'));
-  writeFileSync(
-    join(dir, '.claude', 'agent-system.json'),
-    JSON.stringify({
-      project: 'doctor-gates-custom',
-      commands: { test: 'x', build: 'x' },
-      review: { gates: ['test', 'build', 'e2e'] },
-    }),
-  );
+  const dir = doctorRepo('doctor-gates-custom', {
+    commands: { test: 'x', build: 'x' },
+    review: { gates: ['test', 'build', 'e2e'] },
+  });
   const output = execFileSync(join(ROOT, 'bin', 'lanes'), ['doctor'], { cwd: dir, encoding: 'utf8' });
   assert.match(output, /commands\s+missing: e2e — \/gate will skip those gates/);
   assert.doesNotMatch(output, /lintFix|typecheck/, 'lintFix/typecheck are not in review.gates, so must not be checked');

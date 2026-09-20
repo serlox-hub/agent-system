@@ -18,7 +18,7 @@ reversed, never to make room.
 ---
 
 ## D52 — Install instructions re-run the `export` in the current shell, not `exec zsh` or `source ~/.zshrc`
-`core` · 2026-09 · `install.mjs:180`, `docs/SETUP.md:41`
+`core` · 2026-09 · `install.mjs` PATH step
 PATH has to apply immediately without replacing the user's shell (`exec zsh` discards
 its state and any running job) or re-sourcing a profile that is not guaranteed re-entrant.
 Rejected: `... >> ~/.zshrc && source ~/.zshrc` — the obvious DRY fix for the duplicated
@@ -391,11 +391,14 @@ lane 3 is independent per machine and per work history, so a shared palette
 indexed by number is meaningless. File format is `N=hex` so a symlink from
 another tool's colour file syncs them with no code coupling.
 
-## D16 — The CLI is not installed anywhere; PATH points at this repo's `bin/`
-`product` · 2026-08 · `install.mjs`, `docs/SETUP.md`
-`git pull` is then the whole upgrade. Rejected: symlinking into `~/Scripts` —
-it assumes that directory exists, and the link silently rots if the clone moves.
-Rejected: copying the CLI — a stale copy is worse than no CLI.
+## D16 — The CLI is symlinked into `~/.local/bin`, never copied
+`product` · 2026-09 · `install.mjs`, `bin/lanes.mjs` doctor, `docs/SETUP.md` · #42
+The link points back into this clone, so `git pull` is still the whole upgrade,
+and `install.sh` recreates it if the clone moves. Rejected: a PATH line in the
+shell profile as the only route (the original design) — a profile reaches
+interactive shells and nothing else, so a session started by a launcher, systemd
+or cron cannot run `lanes reviewed` and the commit guard blocks a commit nothing
+can unblock. Rejected: copying the CLI — a stale copy is worse than no CLI.
 
 ## D10 — `bin/lanes` is a POSIX sh wrapper around `lanes.mjs`
 `core` · 2026-08 · `bin/lanes`

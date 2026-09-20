@@ -8,7 +8,7 @@ no config file means no events, no commit guard, nothing). Everything reversible
 | Want to... | Run |
 |---|---|
 | Install on this machine | `./install.sh` |
-| Put `lanes` on your PATH | `./install.sh` prints the exact line — see [§1](#1-install-on-your-machine) |
+| Put `lanes` on your PATH | Usually nothing — `./install.sh` links it into `~/.local/bin`; add that dir to PATH if it is not there — see [§1](#1-install-on-your-machine) |
 | Opt a repo in | `lanes adopt` (from inside the repo) |
 | Set this machine's lanes directory | `lanes worktrees-dir <path>` |
 | Set this machine's port prefix | `lanes base-port <n>` |
@@ -38,15 +38,39 @@ Zero runtime dependencies. No `npm install`.
 git clone <this repo> ~/dev/agent-system
 cd ~/dev/agent-system
 ./install.sh
-echo 'export PATH="$HOME/dev/agent-system/bin:$PATH"' >> ~/.zshrc && export PATH="$HOME/dev/agent-system/bin:$PATH"
 ```
 
 What `install.sh` does, and nothing else:
 - symlinks `agents/*` and `skills/*` into `~/.claude/`
+- symlinks `bin/lanes` into `~/.local/bin/lanes`, creating that directory if needed
 - merges its hook entries into `~/.claude/settings.json` (backs it up first, keeps your own hooks)
 
-PATH points at this repo's own `bin/` — no copies — so `git pull` is the whole
-upgrade. Re-run `./install.sh` after every pull; it's idempotent.
+Both sets of symlinks point back into this clone — no copies — so `git pull` is
+the whole upgrade. Re-run `./install.sh` after every pull; it's idempotent, and
+it is also what relinks them if you ever move the clone. The hook entries are a
+different matter: they are rewritten, not linked, and a merge only replaces the
+entries pointing at the clone's *current* path, so entries left by a previous
+location survive and keep failing.
+
+**Why the symlink, and not just a PATH line.** The skills shell out to `lanes`
+— `/gate` Phase 7 runs `lanes reviewed`, `/architect` Step 5 runs `lanes free`
+— and a `/gate` that cannot run `lanes reviewed` leaves the commit guard
+blocking a commit nothing can unblock. A line in `~/.zshrc` or `~/.bashrc` is
+read by interactive shells and by nothing else, so a Claude Code session
+started by **a launcher, a systemd unit or cron** would never see it. What
+makes `~/.local/bin` different is not the export line — it is that launchers
+and user services commonly carry that directory in their own PATH already,
+which an arbitrary path inside a clone never is. So the symlink alone is
+usually enough, and nothing needs adding to a profile.
+
+**If the installer did print an export line**, add it — but understand what it
+does and does not buy. It fixes your terminal. It does **not** fix the
+non-interactive case, because it lands in the same profile no launcher reads.
+Cover that where the launcher gets its own environment: `Environment=PATH=…`
+in the systemd unit, `PATH=` at the top of the crontab, or whatever your
+supervisor uses. `lanes doctor`'s `cli on PATH` row reports whether the symlink
+is in place; it cannot see your launcher's PATH, so it cannot confirm that half
+for you.
 
 **Restart any open Claude Code session.** Hooks load at session start.
 
@@ -180,9 +204,12 @@ allow-commit` is a one-shot bypass of the commit guard, and `lanes stage
 ./install.sh --uninstall
 ```
 
-Removes the symlinks and hook entries it added (your own hooks untouched). Left
-in place, because it's yours: your event log at `~/.claude/lanes/`, the PATH
-entry in your shell profile, every `.claude/agent-system.json` in your repos.
+Removes the symlinks it added — `~/.claude/agents/*`, `~/.claude/skills/*` and
+`~/.local/bin/lanes` — plus its hook entries (your own hooks untouched). It only
+ever removes a symlink that points back into this clone, so a `lanes` of your own
+at that path is left alone. Left in place, because it's yours: your event log at
+`~/.claude/lanes/`, any PATH entry you added to a shell profile by hand, every
+`.claude/agent-system.json` in your repos.
 
 ---
 
@@ -190,7 +217,8 @@ entry in your shell profile, every `.claude/agent-system.json` in your repos.
 
 | Symptom | Fix |
 |---|---|
-| `lanes: command not found` | `bin/` not on PATH — re-run `./install.sh`, it prints the exact export line |
+| `lanes: command not found` | Re-run `./install.sh` — it relinks `~/.local/bin/lanes` and prints the export line if that directory is not on your PATH |
+| `lanes` works in your terminal but not from a service/cron | Your PATH comes from a shell profile, which a non-login process never reads. `lanes doctor` → `cli on PATH`; re-run `./install.sh` |
 | Nothing in `lanes status` | Session predates the install — restart it. Then `lanes doctor` |
 | Commit guard never fires | Check `review.commitGuard` isn't `false`, and that the repo has a config |
 | Guard fires again right after `/gate` | Expected — the tree changed since. The marker is a hash of the diff |
