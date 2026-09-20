@@ -2389,13 +2389,15 @@ const installHome = (name) => {
   return dir;
 };
 
-// This repo's own ROOT (the suite runs from a lane, a linked worktree) refuses
-// the CLI link by design (see the test right below this block), so any test
-// that needs the link actually created runs install.mjs from a fake clone
-// instead: a `.git` *directory* (never a worktree's pointer file), a copy of
-// install.mjs so its own ROOT resolves inside the fake clone, and a bin/lanes
-// file to link to. agents/ and skills/ are not needed — linkTree no-ops when
-// its source directory is absent.
+// install.mjs resolves its own ROOT from its own path, so every test here runs
+// a *copy* of it from a root this suite builds. Never the checkout the suite
+// runs from: that is a lane on a developer's machine and a plain clone under
+// actions/checkout, so borrowing it would assert a property of the environment
+// instead of one of the installer.
+// A fake clone is a `.git` *directory* (never a worktree's pointer file), a copy
+// of install.mjs so its own ROOT resolves inside the fake clone, and a bin/lanes
+// file to link to. agents/ and skills/ are not needed — linkTree no-ops when its
+// source directory is absent.
 const fakeClone = (name) => {
   const dir = join(TMP, name);
   mkdirSync(join(dir, '.git'), { recursive: true });
@@ -2405,11 +2407,22 @@ const fakeClone = (name) => {
   return dir;
 };
 
-test('install.mjs refuses to link the CLI when run from a linked worktree, and creates nothing', () => {
+// The same, but `.git` is a pointer file rather than a directory — what git
+// writes in a linked worktree. Fabricated, not a real `git worktree add`: the
+// guard only lstats this path, and the gitdir it names need not exist.
+const fakeWorktree = (name) => {
+  const dir = join(TMP, name);
+  mkdirSync(join(dir, 'bin'), { recursive: true });
+  writeFileSync(join(dir, '.git'), `gitdir: ${join(TMP, '.git', 'worktrees', name)}\n`);
+  fs.copyFileSync(join(ROOT, 'install.mjs'), join(dir, 'install.mjs'));
+  fs.copyFileSync(join(ROOT, 'bin', 'lanes'), join(dir, 'bin', 'lanes'));
+  return dir;
+};
+
+test('install.mjs refuses to link the CLI when run from a linked worktree, and creates no link', () => {
   const home = installHome('install-worktree-guard');
-  // Runs the real, unmodified install.mjs from this suite's own ROOT — a lane,
-  // whose `.git` is a worktree pointer file, not a clone's directory.
-  const output = execFileSync('node', [join(ROOT, 'install.mjs')], {
+  const worktree = fakeWorktree('install-worktree-guard-wt');
+  const output = execFileSync('node', [join(worktree, 'install.mjs')], {
     env: { ...process.env, HOME: home },
     encoding: 'utf8',
   });
