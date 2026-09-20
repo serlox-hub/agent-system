@@ -11,8 +11,8 @@
  */
 
 import { fileURLToPath } from 'node:url';
-import { dirname, join, basename, resolve as resolvePath } from 'node:path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, basename, sep, resolve as resolvePath } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 
@@ -800,9 +800,35 @@ switch (cmd) {
     // Match on the repo's real path, not a name — the directory can be renamed.
     let wired = false;
     try {
-      wired = JSON.stringify(JSON.parse(readFileSync(settingsPath, 'utf8')).hooks || {}).includes(ROOT);
+      // ROOT + sep, matching install.mjs's `isOurs`: a bare substring match makes
+      // a lane's hook entries read as this clone's, and vice versa.
+      wired = JSON.stringify(JSON.parse(readFileSync(settingsPath, 'utf8')).hooks || {}).includes(ROOT + sep);
     } catch { /* reported as not wired */ }
     wired ? row(OK, 'hooks wired', settingsPath) : bad('hooks wired', `run ${join(ROOT, 'install.sh')}`);
+    // The skills shell out to `lanes`, and a shell profile only ever reaches an
+    // interactive shell. Three states, not two: `install.sh` refuses to replace a
+    // regular file here, so reporting its mere presence as ✓ would contradict the
+    // installer on the same state. Where the link points is deliberately not
+    // checked — it resolves to the main clone, so comparing against this worktree
+    // would warn on every lane while `lanes` works perfectly.
+    const cliLink = join(homedir(), '.local', 'bin', 'lanes');
+    let cliKind = 'missing';
+    try {
+      // lstat sees the link itself; existsSync follows it, so a dangling link —
+      // the clone moved without a re-install — is not reported as installed.
+      if (lstatSync(cliLink).isSymbolicLink()) cliKind = existsSync(cliLink) ? 'link' : 'dangling';
+      else cliKind = 'foreign';
+    } catch { /* missing */ }
+    if (cliKind === 'link') {
+      // States what it checked, not what it guarantees: the link resolving says
+      // nothing about whether the launcher's PATH actually carries that directory.
+      row(OK, 'cli on PATH', `${cliLink} ${DIM}(linked, outside any shell profile)${RESET}`);
+    } else if (cliKind === 'foreign') {
+      warn('cli on PATH', `${cliLink} is not a symlink — \`install.sh\` left it alone, so this is not our CLI`);
+    } else {
+      const why = cliKind === 'dangling' ? 'is a broken symlink' : 'is missing';
+      warn('cli on PATH', `${cliLink} ${why} — nothing puts \`lanes\` on a non-interactive PATH; run ${join(ROOT, 'install.sh')}`);
+    }
     if (!existsSync(EVENTS_FILE)) {
       warn('event log', 'not created yet — it appears on the first event');
     } else {

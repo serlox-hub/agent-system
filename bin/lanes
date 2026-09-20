@@ -2,7 +2,7 @@
 #
 # Wrapper for the lanes CLI.
 #
-# This directory goes on your PATH, so this file is what `lanes` runs.
+# install.sh symlinks this file into ~/.local/bin/lanes, so this is what `lanes` runs.
 #
 # It stays a wrapper rather than a bare Node script because an extensionless Node
 # entry point takes its module type from the nearest package.json — which breaks

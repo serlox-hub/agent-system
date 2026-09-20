@@ -33,8 +33,9 @@ And `git pull` plus re-running `./install.sh` is the whole upgrade.
 ## Install
 
 ```bash
-./install.sh                                  # once per machine
-export PATH="$PWD/bin:$PATH"                  # add the resolved path to ~/.zshrc — see docs/SETUP.md
+./install.sh                                  # once per machine; links lanes into ~/.local/bin
+                                              # `lanes` not found? install.sh printed the PATH
+                                              # line to add — see docs/SETUP.md §1
 cd <your repo>
 lanes adopt                                   # once per repo — detects what it can
 $EDITOR .claude/agent-system.json
@@ -197,7 +198,7 @@ hooks/             emit.mjs, commit-guard.{sh,mjs}              → wired in set
 lib/               context.mjs (project/lane/event), marks.mjs (review markers),
                    lane-model.mjs (what lanes status shows, as plain JSON)
 ui/                status.mjs (lanes status), dashboard.mjs (its terminal renderer)
-bin/               lanes (sh wrapper) + lanes.mjs — put this dir on your PATH
+bin/               lanes (sh wrapper) + lanes.mjs — symlinked into ~/.local/bin
 config/            schema + annotated example
 test/              smoke.mjs — npm test
 ```
