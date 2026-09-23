@@ -166,13 +166,19 @@ On approval, prepend the entry to `$DECISIONS`. **If `review.decisionsFile` is
 null, or the file it names is not on disk, skip this phase entirely** rather than
 creating one uninvited.
 
-Match the conventions already visible in that file. If it has none — the entries
-are freeform — use this shape, which is what the format is for:
+The entry is the candidate reformatted, never a fresh piece of writing. Match
+whatever shape the file already uses — its heading, its metadata line, whatever
+fields those carry — and carry the candidate's substance across without adding
+to it. **Length is not one of those conventions.** A log whose entries have
+grown long teaches the next one to be long, and every future review pays to read
+what you padded.
+
+If the file has no shape to match, use this one, which is what the format is for:
 
 ```
 ## D<next id> — <the choice, as a claim>
 `core` · <YYYY-MM> · <file:line>[ · #<issue>]
-<why, at most 2 lines>
+<why — the candidate's own sentence>
 Rejected: <the obvious alternative> — <one clause on why it loses>
 ```
 

@@ -5234,6 +5234,65 @@ test('the baseline sweep drops only the sessions that actually vanished, across 
   );
 });
 
+// ── Skill prompts ───────────────────────────────────────────────────
+
+test('/gate Phase 6 anchors the entry to the reviewer\'s candidate, ungated and with no line count (#44)', () => {
+  const skill = readFileSync(join(ROOT, 'skills', 'gate', 'SKILL.md'), 'utf8');
+  const phase6 = skill
+    .split(/^## Phase \d+ — Mark reviewed/m)[0]
+    .split(/^## Phase \d+ — Record the decision/m)[1];
+  assert.ok(phase6, 'Phase 6 section not found in skills/gate/SKILL.md — did the heading change?');
+
+  // The anchor. Without it the phase's only instruction is "match the conventions
+  // already visible in that file", and a log whose entries have grown long is
+  // then telling the next entry to be long — measured at ~8x the candidate.
+  assert.match(phase6, /candidate reformatted/, 'the entry must be anchored to the candidate, not composed afresh');
+
+  // It has to reach every repo. This guidance used to sit behind "if it has
+  // none", so any log that already had entries — every log after its first —
+  // reached this phase with no size guidance at all. Assert that nothing
+  // conditions the anchor, rather than that one historical sentence is absent:
+  // the same branch reworded would slip straight past a string check. Scoped to
+  // the anchor's own paragraph, because the phase opens with an unrelated
+  // conditional ("If it is a fact about how something works…").
+  const anchorPara = phase6.split(/\n\n/).find((para) => para.includes('candidate reformatted'));
+  assert.ok(anchorPara, 'the anchor sentence is gone from Phase 6');
+  assert.doesNotMatch(
+    anchorPara.slice(0, anchorPara.indexOf('candidate reformatted')),
+    /\b(If|When|Unless)\b/,
+    'the anchor must be unconditional — a condition ahead of it puts repos with a shaped log back outside the guidance',
+  );
+
+  // Never a number: half of this repo's own log exceeds the "at most 2 lines"
+  // this replaced, so a count here is a rule the authoring repo already ignores.
+  assert.doesNotMatch(phase6, /at most \d+ lines?/, 'length follows from the candidate, never from a count');
+});
+
+test('/architect Step 6 anchors the entry to the linked issue, with no line count and no circular CLAUDE.md citation (#44)', () => {
+  const skill = readFileSync(join(ROOT, 'skills', 'architect', 'SKILL.md'), 'utf8');
+  const step6 = skill
+    .split(/^## Step 7 — Hand off/m)[0]
+    .split(/^## Step 6 — Record the product decision, if there is one/m)[1];
+  assert.ok(step6, 'Step 6 section not found in skills/architect/SKILL.md — did the heading change?');
+
+  // The anchor. Architect has no reviewer candidate to reformat, so the same
+  // defense against a freely-composed entry instead comes from the issue this
+  // step just linked: the entry holds only what a reader needs without opening
+  // it, and the issue carries the rest.
+  assert.match(step6, /let it carry the weight/, 'the entry must be anchored to the linked issue, not composed afresh');
+
+  // The old text funneled the shape through a single citation — "follow the
+  // repo's conventions in CLAUDE.md" — which is circular: CLAUDE.md is what
+  // sends a session to this skill's own conventions in the first place. Assert
+  // the citation is gone, not just reworded to something equally circular.
+  assert.doesNotMatch(step6, /conventions in `CLAUDE\.md`/, 'the circular CLAUDE.md citation must not come back');
+
+  // Never a number: this replaced "at most 3 lines of prose", for the same
+  // reason /gate dropped its own "at most 2 lines" — the log's own entries
+  // already exceed either count.
+  assert.doesNotMatch(step6, /at most \d+ lines?/, 'length follows from what the issue needs, never from a count');
+});
+
 // ── Run ─────────────────────────────────────────────────────────────
 const VERBOSE = process.env.VERBOSE === '1';
 for (const [name, fn] of tests) {

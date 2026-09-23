@@ -255,13 +255,15 @@ would change what the tool *is*. Most tasks, including most features, produce no
 `product` entry — a scoped feature is not a contract.
 
 If one qualifies, propose it with `AskUserQuestion` (the entry text as the option
-`description`, plus `Skip`) and write it only on approval. Follow the repo's
-conventions in `CLAUDE.md`: next ID, newest first, metadata line
-`product · YYYY-MM · location · #<issue>`, at most 3 lines of prose, and an
-explicit `Rejected:` clause naming the alternative that lost.
+`description`, plus `Skip`) and write it only on approval. Match whatever shape
+the log already uses — its heading, its metadata line, whatever fields those
+carry; `product · YYYY-MM · location · #<issue>` when the file leaves that open.
+**Length is not one of those conventions.**
 
-Link the issue you just created. That pointer is the whole reason the entry can
-stay 3 lines — the full spec and the challenger's objections live in the issue.
+Link the issue you just created and let it carry the weight: the entry holds only
+what a reader needs without opening it — the claim, the why, and an explicit
+`Rejected:` clause naming the alternative that lost. The full spec and the
+challenger's objections stay in the issue, which is what keeps the entry short.
 
 ## Step 7 — Hand off
 
