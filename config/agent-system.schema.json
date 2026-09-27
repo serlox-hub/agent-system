@@ -164,7 +164,7 @@
             "github",
             "none"
           ],
-          "description": "\"github\" needs `gh` authenticated (check with `gh auth status`) — /architect creates an issue and its linked branch. \"none\" skips that: /architect hands you the finished spec instead, and you file it wherever you actually track work."
+          "description": "\"github\" needs `gh` authenticated (check with `gh auth status`) — /architect creates an issue whose Start section creates the linked branch. \"none\" skips that: /architect hands you the finished spec instead, and you file it wherever you actually track work."
         },
         "specSections": {
           "type": "array",

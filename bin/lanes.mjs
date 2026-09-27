@@ -935,7 +935,7 @@ switch (cmd) {
         '  lanes clear [--force]          Remove every lane, top-down; refuses to lose work',
         '  lanes reset <n> [--force]      Detach a lane back to a clean base state',
         '  lanes switch <n> <b> [--create]  Point a lane at another branch',
-        '  lanes free                     Lanes safe to take over (used by /architect)',
+        '  lanes free                     Lanes safe to take over (used when an issue starts)',
         '  lanes each <cmd> [--lanes 1,3] Run a command in each lane',
         '',
         'Dev services',

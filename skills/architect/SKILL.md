@@ -1,6 +1,6 @@
 ---
 name: architect
-description: Adversarial design conversation that runs BEFORE any code is written. Interrogates the request, attacks the premise, forces the contract to be explicit, has an independent agent try to tear the spec apart, and only then creates the GitHub issue and its linked branch. Use at the start of any non-trivial task. Never writes source code.
+description: Adversarial design conversation that runs BEFORE any code is written. Interrogates the request, attacks the premise, forces the contract to be explicit, has an independent agent try to tear the spec apart, and only then creates the GitHub issue, whose first section creates the linked branch when implementation starts. Use at the start of any non-trivial task. Never writes source code.
 ---
 
 # Architect
@@ -39,7 +39,8 @@ created or the user leaves the mode explicitly.
    The gate exists to buy exactly one thing — thinking before typing. If you
    implement, the gate is gone and this skill is pointless.
 
-   The only files you may create are the GitHub issue (via `gh`) and the branch.
+   The only thing you may create is the GitHub issue (via `gh`). Not even the
+   branch: the issue's Start section creates it when implementation begins.
 2. **Challenge before you help.** The user's framing is a hypothesis, not a
    requirement. Your first job is to find what is wrong, missing, or
    self-deceiving in it. Agreeing quickly is the failure mode, not politeness.
@@ -58,7 +59,7 @@ lanes stage architect
 ```
 
 Read `.claude/agent-system.json` from the repo root for `architect.specSections`,
-`branch.prefixes`, `architect.challengeSpec` and
+`branch.prefixes`, `branch.base` (default `main`), `architect.challengeSpec` and
 `architect.suggestImplementationModel`. If the file is missing, tell the user
 the project has not opted in and stop — do not guess conventions.
 
@@ -165,81 +166,84 @@ Suggested implementation model: <Sonnet|Opus> — <one line reason>.
 Ask for explicit confirmation before creating anything. If the user wants
 changes, iterate here — an issue is cheap to write and expensive to un-write.
 
-## Step 5 — Create the issue and its linked branch
+## Step 5 — Create the issue
 
 Only after explicit confirmation.
 
-**Preflight — pick the lane before touching anything.**
+Create **only the issue**. No local branch, no remote branch, no lane. The task
+may not be implemented for weeks: a branch made now would hold a stale
+`origin/<base>`, and a lane holding an unstarted branch looks taken while
+`lanes free` still hands it to the next task. The branch is created when
+implementation starts, by the first section of the issue itself.
 
-```bash
-lanes free      # tab-separated: lane, name, path, branch. Exit 1 when none.
-```
-
-- **If the worktree you are in is one of the free lanes**, use it. Staying put is
-  the least surprising outcome and needs no session move.
-- **If it is not free but another lane is**, take the first free one. The user's
-  current worktree is busy with something else and must not be disturbed.
-- **If no lane is free**, stop. Show `lanes status --once` and say plainly that every lane
-  has uncommitted changes or unpushed commits, so there is nowhere to put this
-  work. The user decides what to land, park or discard. Do not stash, do not
-  force, do not pick a dirty lane.
-- **If no `worktreesDir` resolves for this repo** — committed default or this
-  machine's local override alike (`lanes free` errors about it) — there are no
-  lanes: fall back to the current worktree and require a clean tree there,
-  exactly as before.
-
-When the current worktree is dirty but you are placing the branch elsewhere, do
-**not** touch the current one. And when local changes are the *subject* of the
-task — the user already wrote code and wants it captured — this is the wrong
-skill: point them at `/issue-start`, which is built for documenting after the
-fact.
+When local changes are the *subject* of the task — the user already wrote code
+and wants it captured — this is the wrong skill: point them at `/issue-start`,
+which is built for documenting after the fact.
 
 1. Derive the prefix (`feat`/`fix`/`refactor`/`chore`/`docs`) from the nature of
    the work, and the label from `branch.prefixes` in the config.
-2. Create the issue:
+2. Create the issue with the spec as its body, passed through a quoted heredoc
+   so the backticks and `$(...)` in it stay literal instead of running:
    ```bash
-   gh issue create --title "<title>" --body "<spec>" --label "<label>" --assignee @me
+   gh issue create --title "<title>" --label "<label>" --assignee @me --body-file - <<'EOF'
+   <spec>
+   EOF
    ```
    Extract the issue number from the returned URL. If this fails, stop — nothing
    has been mutated yet.
-3. Put the branch in the lane you picked:
-   ```bash
-   lanes switch <lane> <prefix>/<number>-<kebab-slug> --create
-   ```
-   It branches off `origin/<base>` after a fetch, and refuses if that lane turned
-   dirty since the preflight.
+3. Prepend the **Start** section below to the body, now that the branch name
+   (`<prefix>/<number>-<kebab-slug>`) is known, with `gh issue edit <number>
+   --body-file - <<'EOF'` (quoted heredoc again: the section is full of
+   commands that must land as text). Fill in `<branch>`, `<number>` and
+   `<base>` (`branch.base`); leave the rest verbatim (`<lane>` is picked by
+   whoever runs it). It must stand on its own: the session that runs it has
+   not loaded this skill. If the edit fails, report it and print the section so
+   the user can paste it — the issue exists either way.
 
-   Without lanes (no `worktreesDir`), do it directly in the current worktree:
-   ```bash
-   git fetch origin && git checkout -b <prefix>/<number>-<kebab-slug> origin/main
-   ```
-   **Never `git checkout main` first.** Git refuses to check out a branch that is
-   already checked out in another worktree, and the primary worktree (the repo's
-   own root, outside `worktreesDir`) almost always holds the base branch — lanes
-   themselves stay detached, never on a branch literally named after it.
-   Branching straight off `origin/<base>` is both worktree-safe and fresher — no
-   pull needed.
-4. Link the branch to the issue so GitHub shows the relationship:
-   ```bash
-   git push origin HEAD:refs/heads/$(git branch --show-current)
-   git push origin --delete $(git branch --show-current)
-   REPO_ID=$(gh api repos/:owner/:repo --jq '.node_id')
-   ISSUE_ID=$(gh issue view <number> --json id --jq '.id')
-   gh api graphql -f query='
-   mutation($issueId: ID!, $oid: GitObjectID!, $repositoryId: ID!, $name: String!) {
-     createLinkedBranch(input: { issueId: $issueId, oid: $oid, repositoryId: $repositoryId, name: $name }) {
-       linkedBranch { id ref { name } }
-     }
-   }' -f issueId="$ISSUE_ID" -f repositoryId="$REPO_ID" \
-      -f name="$(git branch --show-current)" -f oid="$(git rev-parse HEAD)"
-   git push -u origin HEAD
-   ```
-   If the GraphQL link fails, report it and continue — the issue and branch both
-   exist, they are just not cross-linked.
-5. Emit the stage transition:
-   ```bash
-   lanes stage implement "#<number>"
-   ```
+   ````markdown
+   ## Start
+
+   Do this first, before reading further. Branch: `<branch>`
+
+   0. Check it has not already run. If `git branch --show-current` is already
+      `<branch>`, skip this section. If `git rev-parse --verify --quiet <branch>`
+      or `git ls-remote --exit-code origin <branch>` finds it anywhere else,
+      stop and tell the user where it lives. Never re-run step 3 on an existing
+      branch: its `push --delete` would delete the remote and close any open PR.
+   1. Pick a lane: `lanes free` (tab-separated: lane, name, path, branch; exit 1
+      when none).
+      - This worktree is listed: use it.
+      - Another lane is listed: use the first one, and say loudly that the branch
+        is in that lane's path, not here. Stop after step 3; the user opens a
+        session there (optionally `lanes dev <n>`).
+      - None listed: stop and show `lanes status --once`. Every lane has
+        uncommitted or unpushed work; the user decides what to land, park or
+        discard. Never stash, force, or take a dirty lane.
+      - `lanes free` errors about `worktreesDir`: no lanes in this repo. Use this
+        worktree, and require a clean tree.
+   2. Create the branch off a fresh base:
+      `lanes switch <lane> <branch> --create`
+      (no lanes: `git fetch origin && git checkout -b <branch> origin/<base>`;
+      never `git checkout <base>` first, the primary worktree usually holds it).
+   3. From the branch's worktree, link it to this issue and push:
+      ```bash
+      git push origin HEAD:refs/heads/<branch>
+      git push origin --delete <branch>
+      REPO_ID=$(gh api repos/:owner/:repo --jq '.node_id')
+      ISSUE_ID=$(gh issue view <number> --json id --jq '.id')
+      gh api graphql -f query='
+      mutation($issueId: ID!, $oid: GitObjectID!, $repositoryId: ID!, $name: String!) {
+        createLinkedBranch(input: { issueId: $issueId, oid: $oid, repositoryId: $repositoryId, name: $name }) {
+          linkedBranch { id ref { name } }
+        }
+      }' -f issueId="$ISSUE_ID" -f repositoryId="$REPO_ID" \
+         -f name="<branch>" -f oid="$(git rev-parse HEAD)"
+      git push -u origin HEAD
+      lanes stage implement "#<number>"
+      ```
+      If the GraphQL link fails, report it and continue: the branch exists, it
+      is just not linked to the issue.
+   ````
 
 ## Step 6 — Record the product decision, if there is one
 
@@ -271,22 +275,13 @@ Print, and then **stop**:
 
 ```
 Issue:  #<number> — <url>
-Branch: <name>
-Lane:   <n> — <worktree name>   <path>
+Branch: <name> (not created yet: the issue's Start section does it)
 Model:  <Sonnet|Opus> (suggested)
-Next:   implement, then /gate before committing.
+Next:   when you want to implement it, open a session and ask it to implement
+        #<number>. Then /gate before committing.
 ```
 
 Omit the `Model:` line when `architect.suggestImplementationModel` is `false`.
-
-**If the lane is not the worktree this session is running in, say so first and
-loudly** — the branch is somewhere else, and continuing here would write to the
-wrong tree:
-
-```
-⚠  This session is in <current worktree>, but the branch is in lane <n> (<path>).
-   Open a session there before implementing.  Optionally: lanes dev <n>
-```
 
 Do not start implementing in the same turn. The handoff is the point: the user
 decides when to move, and moving is a fresh, uncontaminated start.

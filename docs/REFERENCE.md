@@ -120,7 +120,7 @@ Stated plainly, because finding these yourself later is worse:
 - **A lane frees up only when its commits reach `origin/<base>`.** `isFree`
   counts commits ahead and `lanes free` does not fetch, so a merged branch
   frees its lane only after a fetch, and a squash- or rebase-merged one never
-  does: it stays `+N`, `/architect` skips it, and `lanes reset <n> --force`
+  does: it stays `+N`, an issue's Start section skips it, and `lanes reset <n> --force`
   reclaims it.
 
 ## Tests

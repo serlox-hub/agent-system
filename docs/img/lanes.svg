@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="990" height="274" viewBox="0 0 990 274" role="img" aria-labelledby="lanes-title lanes-desc">
   <title id="lanes-title">Lanes over time</title>
-  <desc id="lanes-desc">Three long-lived lanes, each with its own port. Branches cycle through them: in lane 1, fix/398 is merged and the lane becomes free; in lane 2, feat/402 is merged and feat/410 takes its place; lane 3 starts free and then takes feat/405. Now, lane 1 is the only free lane, so /architect places the new task, feat/412-invoices, there.</desc>
+  <desc id="lanes-desc">Three long-lived lanes, each with its own port. Branches cycle through them: in lane 1, fix/398 is merged and the lane becomes free; in lane 2, feat/402 is merged and feat/410 takes its place; lane 3 starts free and then takes feat/405. Now, lane 1 is the only free lane, so the new task, feat/412-invoices, starts there.</desc>
   <style>
     .bg{fill:#F5F7F6}
     .ln{fill:none;stroke:#131A17;stroke-width:1.25}
@@ -36,7 +36,7 @@
   </defs>
   <rect class="bg" width="990" height="274" rx="8"/>
   <g transform="translate(20,14)">
-    <text x="740" y="22" text-anchor="middle" class="lab">/architect · new task</text>
+    <text x="740" y="22" text-anchor="middle" class="lab">issue Start · new task</text>
     <line class="ln" x1="740" y1="28" x2="740" y2="69" marker-end="url(#ah)"/>
 
     <rect class="k1" x="0" y="66" width="5" height="40"/>
