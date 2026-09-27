@@ -13,6 +13,7 @@
  * change one line after reviewing and the guard fires again.
  */
 
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
 import { readHookInput, resolveContext, emit } from '../lib/context.mjs';
@@ -101,6 +102,20 @@ function splitSegments(command) {
 }
 
 /**
+ * The shell expands a leading `~` before `cd` or git ever see it; resolve()
+ * does not, and reads `~/repo` as a directory named `~` under the cwd. That
+ * guarded the session's repo instead of the one the commit landed in.
+ *
+ * tokenize() drops quotes, so a quoted `"~/repo"`, which the shell leaves
+ * literal, is expanded too. Accepted: that cd or -C fails before the commit
+ * runs, so the cost is at most a spurious block.
+ */
+function resolveDir(base, target) {
+  if (target === '~' || target.startsWith('~/')) return resolve(homedir(), target.slice(2));
+  return resolve(base, target);
+}
+
+/**
  * The directory a `git commit` in this command line would actually run in, or
  * null when the line commits nothing.
  *
@@ -140,7 +155,7 @@ function commitCwd(command, baseCwd) {
       const sepAfter = segments[idx + 1] ? segments[idx + 1].sepBefore : null;
       if (sepAfter === '&&' || sepAfter === ';' || sepAfter === '\n') {
         const target = tokens[1];
-        if (target && !target.startsWith('-')) cwd = resolve(cwd, target);
+        if (target && !target.startsWith('-')) cwd = resolveDir(cwd, target);
       }
       continue;
     }
@@ -159,9 +174,10 @@ function commitCwd(command, baseCwd) {
         // resolve() already does. `--git-dir` is deliberately not followed: it
         // names the .git directory rather than a tree, and git itself pairs it
         // with --work-tree when the two differ.
-        if ((opt === '-C' || opt === '--work-tree') && value) dir = resolve(dir, value);
+        if ((opt === '-C' || opt === '--work-tree') && value) dir = resolveDir(dir, value);
         i += 2;
       } else {
+        // Not resolveDir: a `~` after `=` is mid-word, so neither the shell nor git expands it.
         if (opt.startsWith('--work-tree=')) dir = resolve(dir, opt.slice('--work-tree='.length));
         i += 1;
       }

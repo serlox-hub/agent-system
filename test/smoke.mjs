@@ -583,6 +583,26 @@ test('a relative `cd` resolves against the session cwd, not against nothing', ()
   assert.equal(guard(TMP, 'cd guard-target && git commit -m wip'), 'deny');
 });
 
+test('a leading `~` resolves against the home directory, as the shell expands it', () => {
+  const env = { ...process.env, HOME: TMP };
+  assert.equal(guard(guardPlain, 'cd ~/guard-target && git commit -m wip', { env }), 'deny');
+  assert.equal(
+    guard(guardTarget, 'cd ~/guard-plain && git commit -m wip', { env }),
+    'allow',
+    'read as a `~` folder under the session cwd, this guarded the session\'s adopted repo instead',
+  );
+  assert.equal(guard(guardPlain, 'git -C ~/guard-target commit -m wip', { env }), 'deny');
+});
+
+test('the `=` form of `--work-tree` leaves a leading `~` literal — neither shell nor git expands it mid-word', () => {
+  const env = { ...process.env, HOME: TMP };
+  assert.equal(
+    guard(guardPlain, 'git --work-tree=~/guard-target commit -m wip', { env }),
+    'allow',
+    'if this were expanded it would resolve to guardTarget, an adopted repo with an unreviewed diff, and deny',
+  );
+});
+
 test('`cd` carries forward only across the operators that actually leave the next command there', () => {
   assert.equal(
     guard(guardTarget, `cd ${guardPlain} || git commit -m wip`),
