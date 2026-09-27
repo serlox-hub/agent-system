@@ -56,11 +56,12 @@ touches, and how you will know it worked. The answers become a spec with an
 explicit contract — module paths, signatures, error cases. Then
 `spec-challenger`, an agent that never heard the conversation, tries to tear
 it apart. Objections that hold get folded in; the rest are argued in front of
-you. Only when you confirm does it create the GitHub issue and its branch, in a
-free lane. An example of what lands in the issue, with the default sections:
+you. Only when you confirm does it create the GitHub issue. The issue's first
+section creates the branch, in a free lane, when you start implementing it. An example of what lands in the issue, with the default sections:
 
 ```text
 #412  Export invoices as CSV
+Start          Pick a free lane, create feat/412-invoices off origin/main, link it, push.
 Problem        Finance rebuilds the monthly invoice export by hand: ~2 h, error-prone.
 Constraints    No new dependencies; the invoices API must not change.
 Approach       Stream rows server-side. Rejected: client-side export — the
@@ -115,11 +116,11 @@ terminal you commit as usual.
 A lane is a long-lived git worktree: its own directory, branch and port, all on
 the same repo. You create lanes once and cycle branches through them. A lane is
 free when its tree is clean and it has no commits missing from `origin/<base>`,
-and `/architect` places each new task in a free one. A merge-commit merge frees
+and each issue's Start section places its branch in a free one. A merge-commit merge frees
 the lane after the next fetch; a squash or rebase merge never does, since it
 rewrites the commits — reclaim that lane with `lanes reset <n> --force`.
 
-![Three lanes over time, each with its own port: branches are merged and replaced in each lane; at "now", lane 1 is the only free lane, so /architect places the new task, feat/412-invoices, there.](docs/img/lanes.svg)
+![Three lanes over time, each with its own port: branches are merged and replaced in each lane; at "now", lane 1 is the only free lane, so the new task, feat/412-invoices, starts there.](docs/img/lanes.svg)
 
 Each session's hooks append events to a local log that `lanes status` reads
 every second — nothing calls the model, so the dashboard costs zero tokens.

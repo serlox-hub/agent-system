@@ -17,6 +17,14 @@ reversed, never to make room.
 
 ---
 
+## D53 — `/architect` creates only the issue; the issue's Start section creates the branch when implementation begins
+`product` · 2026-09 · `skills/architect/SKILL.md` Step 5
+A branch made at design time freezes a stale base and makes a lane look taken while
+`lanes free` still hands it out. The Start section is copied into each issue, so a
+later change to the procedure does not reach issues already filed.
+Rejected: creating only the remote branch (still a stale base); a new `lanes start`
+command (another entry point for one step).
+
 ## D52 — Install instructions re-run the `export` in the current shell, not `exec zsh` or `source ~/.zshrc`
 `core` · 2026-09 · `install.mjs` PATH step
 PATH has to apply immediately without replacing the user's shell (`exec zsh` discards
@@ -360,10 +368,10 @@ to a scratch dir to check feasibility (then deletes it). Rejected: a flat "no co
 at all" rule — it made specs vaguer and blocked feasibility checks.
 
 ## D20 — Lanes are long-lived infrastructure; "free" means nothing would be lost
-`product` · 2026-08 · `lib/worktrees.mjs:isFree`, `skills/architect/SKILL.md`
+`product` · 2026-08 · `lib/worktrees.mjs:isFree`, `skills/architect/SKILL.md` Step 5 Start section
 You create a lane once and cycle branches through it, so `new`/`rm` are setup, not
 per-task. Free = clean tree AND (on base OR nothing ahead of it), which is what
-`/architect` checks before placing a branch. Rejected: a worktree per task —
+an issue's Start section checks before placing a branch. Rejected: a worktree per task —
 churns lane numbers, and lane numbers drive colour and port.
 
 ## D19 — Services spawn detached, as process-group leaders

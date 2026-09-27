@@ -53,7 +53,7 @@ entries pointing at the clone's *current* path, so entries left by a previous
 location survive and keep failing.
 
 **Why the symlink, and not just a PATH line.** The skills shell out to `lanes`
-— `/gate` Phase 7 runs `lanes reviewed`, `/architect` Step 5 runs `lanes free`
+— `/gate` Phase 7 runs `lanes reviewed`, an issue's Start section runs `lanes free`
 — and a `/gate` that cannot run `lanes reviewed` leaves the commit guard
 blocking a commit nothing can unblock. A line in `~/.zshrc` or `~/.bashrc` is
 read by interactive shells and by nothing else, so a Claude Code session
@@ -153,7 +153,7 @@ lanes switch 2 feat/42-thing --create
 lanes rm                            # remove the top lane; refuses to lose work
 lanes clear                         # remove every lane, top-down; refuses to lose work
 lanes reset 2                       # detach a lane back to a clean base state, keep it
-lanes free                          # lanes safe to take over (what /architect checks)
+lanes free                          # lanes safe to take over (what an issue's Start checks)
 lanes each 'git fetch && git merge origin/main'   # across every lane
 lanes dev 2      # start lane 2's services      (selector: 1 · 1,3 · 2-4 · . · all)
 lanes stop       # stop everything
@@ -180,7 +180,7 @@ removing it. It refuses uncommitted changes outright, and commits on a detached
 HEAD that no branch holds; `--force` only overrides commits not in
 `origin/<base>` — what a squash or rebase merge leaves behind — and a branch
 `git branch -d` won't delete is kept and named. A lane is "free" (what
-`/architect` looks for) when nothing would be lost by taking it over.
+an issue's Start section looks for) when nothing would be lost by taking it over.
 
 Each lane can run the project's own services — a React client and a Python API
 in one repo are two entries in `dev.services`, with their own commands,
