@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1004" height="290" viewBox="0 0 1004 290" role="img" aria-labelledby="gate-title gate-desc">
   <title id="gate-title">What /gate does</title>
-  <desc id="gate-desc">code-reviewer reads domainAxes, DECISIONS.md and CLAUDE.md and reviews your diff with clean context. Mechanical findings are applied automatically; judgment calls are asked. Then test-writer writes tests, the project's gates run, and lanes reviewed marks the diff's fingerprint.</desc>
+  <desc id="gate-desc">code-reviewer reads domainAxes, DECISIONS.md and CLAUDE.md and reviews your diff with clean context. Mechanical findings are applied automatically; judgment calls are asked, or decided against the project's own criteria when there is nobody to ask. Then test-writer writes tests, the project's gates run, and lanes reviewed marks the diff's fingerprint.</desc>
   <style>
     .bg{fill:#F5F7F6}
     .box{fill:#FFFFFF;stroke:#131A17;stroke-width:1.25}

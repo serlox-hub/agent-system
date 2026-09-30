@@ -5313,6 +5313,51 @@ test('/architect Step 6 anchors the entry to the linked issue, with no line coun
   assert.doesNotMatch(step6, /at most \d+ lines?/, 'length follows from what the issue needs, never from a count');
 });
 
+test('/gate has a written branch for when it cannot ask, in every phase that asks (#51)', () => {
+  const skill = readFileSync(join(ROOT, 'skills', 'gate', 'SKILL.md'), 'utf8');
+  const section = (from, to) => {
+    const after = skill.split(new RegExp(`^## Phase \\d+ — ${from}`, 'm'))[1];
+    assert.ok(after, `Phase "${from}" not found in skills/gate/SKILL.md — did the heading change?`);
+    return to ? after.split(new RegExp(`^## (Phase \\d+ — ${to}|Rules)`, 'm'))[0] : after;
+  };
+
+  // Both asking phases must say what they do when the tool is gone. A `--print`
+  // session has no AskUserQuestion and no flag brings it back, so this is not a
+  // rare path for anyone driving the skill headless — it is the only path.
+  for (const [from, to] of [['Classify and ask', 'Apply'], ['Record the decision', 'Mark reviewed']]) {
+    assert.match(section(from, to), /not in your toolset/, `Phase "${from}" must state what it does when it cannot ask`);
+  }
+
+  // Phase 2's criterion is the project's own axes. Without that clause the
+  // branch would be "decide somehow", which is what the human used to supply.
+  assert.match(section('Classify and ask', 'Apply'), /review\.domainAxes/, "Phase 2's branch must name what decides in the user's place");
+
+  // Batch B's input is "what the user picked". With no user that is undefined,
+  // and an undefined step is how the behaviour ended up in an operator's prompt.
+  assert.match(section('Apply', 'Tests'), /With no user to pick/, "Phase 3's Batch B must define its input when nobody picked");
+
+  // Two more things a headless run would otherwise get wrong: printing a
+  // "will be applied" notice nobody can react to, and writing a $DECISIONS
+  // entry with no trace in the summary that nothing approved it.
+  assert.match(section('Classify and ask', 'Apply'), /Skip\s+the auto-apply notice/, 'Phase 2 must drop the notice when nothing is being asked');
+  assert.match(section('Summary'), /added D<n> with nothing to approve it/, 'the summary must be able to say an entry had no approver');
+
+  // The two buckets are different claims: one was never a question, the other
+  // was a question nobody could answer. The old shared heading said "no
+  // question asked", which is true of both and distinguishes neither.
+  const summary = section('Summary');
+  assert.match(summary, /^### Mechanical \(applied automatically\)$/m, 'the summary must name the mechanical bucket by its cause');
+  assert.match(summary, /^### Judgment \(decided without a human\)$/m, 'the summary must report judgment calls decided with nobody to ask');
+  assert.doesNotMatch(summary, /no question asked/, 'the old shared heading cannot survive: it describes both buckets');
+
+  // The two absolutes in `## Rules` are still true with a user present, so they
+  // are scoped rather than deleted. Left unqualified they contradict the branch.
+  const rules = skill.split(/^## Rules$/m)[1];
+  assert.ok(rules, '## Rules section not found');
+  assert.match(rules, /With no user to reach/, 'the judgment-calls rule must say who decides when there is no user');
+  assert.match(rules, /With no user to\s+ask/, 'the decisions-entry rule must say what approves when there is no user');
+});
+
 // ── Run ─────────────────────────────────────────────────────────────
 const VERBOSE = process.env.VERBOSE === '1';
 for (const [name, fn] of tests) {

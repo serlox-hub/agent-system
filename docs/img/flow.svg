@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="990" height="212" viewBox="0 0 990 212" role="img" aria-labelledby="flow-title flow-desc">
   <title id="flow-title">agent-system daily flow</title>
-  <desc id="flow-desc">Your request goes through /architect; you decide; you implement; you decide; /gate reviews, fixes, tests and marks the exact diff; you decide; git commit passes only if the diff is the one reviewed. If the diff changed after review, the commit is blocked and goes back to /gate.</desc>
+  <desc id="flow-desc">Your request goes through /architect; you decide; you implement; you decide; /gate reviews, fixes, tests and marks the exact diff; you decide; git commit passes only if the diff is the one reviewed. If the diff changed after review, the commit is blocked and goes back to /gate. Run headless, the decision points are taken by the session itself.</desc>
   <style>
     .bg{fill:#F5F7F6}
     .box{fill:#FFFFFF;stroke:#131A17;stroke-width:1.25}

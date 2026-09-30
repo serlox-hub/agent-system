@@ -112,6 +112,16 @@ Stated plainly, because finding these yourself later is worse:
   carrying no id of its own is keyed by pid instead, so — like an untagged
   event, above — its `Stop` can double-fire too). History is
   replayed into the display but never notified, on either path.
+- **When there is nobody to ask, `/gate` decides for itself.** A `--print` session has
+  no `AskUserQuestion`, so Phase 2's questions and Phase 6's approval cannot
+  happen at all. Rather than stall, the skill applies every finding and writes a
+  decision entry that passes its own test, choosing against the project's
+  `review.domainAxes` and `CLAUDE.md`. Two consequences worth knowing: nothing
+  inside `/gate` stops for you, since the gates were already advisory and the
+  question was the only place anything stopped — the commit guard still blocks an
+  unreviewed commit, and its own question has no headless branch yet; and nothing
+  records what was decided beyond that run's own summary. A repo with `review.domainAxes` empty gets the weakest
+  version of this, because the axes are what stands in for you.
 - **Project-local agents and skills win over these.** A repo with its own
   `.claude/agents/` or `.claude/skills/` keeps using them, so adopting this
   system there does not change existing behaviour on its own — you get the hooks

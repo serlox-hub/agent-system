@@ -34,7 +34,8 @@ proposal mechanics live in the skills that do the proposing:
   since a product decision is made in conversation and barely shows in a diff.
 
 Both propose, you approve, they write. Never write an entry the user did not
-approve.
+approve — when there is nobody to ask, the skill's own test is what approves it
+(see D54).
 
 ## Auditing is a byproduct, not a process
 

@@ -6,13 +6,15 @@ zero-token dashboard that shows which worktree session is waiting on you.
 
 Zero dependencies. Plain Node ESM and two shell scripts.
 
-![Daily flow: your request goes through /architect, you decide, you implement, you decide, /gate reviews and marks the exact diff, you decide, and git commit passes only if the diff is the one reviewed — if it changed, the commit is blocked and goes back to /gate.](docs/img/flow.svg)
+![Daily flow: your request goes through /architect, you decide, you implement, you decide, /gate reviews and marks the exact diff, you decide, and git commit passes only if the diff is the one reviewed — if it changed, the commit is blocked and goes back to /gate. Run headless, the decision points are taken by the session itself.](docs/img/flow.svg)
 
 The amber diamonds are where you decide; nothing moves to the next phase on its
 own. A pipeline that runs straight through multiplies the cost of a bad first
 step by every stage after it, and turns you into the final approver of a large
 diff instead of a pilot correcting course. The red line is the commit guard: if
-the diff changes after review, the commit is blocked.
+the diff changes after review, the commit is blocked. All of that assumes
+someone is there to decide; see [Known limitations](docs/REFERENCE.md#known-limitations)
+for what `/gate` does when there is nobody to ask.
 
 ## What changes day to day
 
@@ -20,7 +22,7 @@ the diff changes after review, the commit is blocked.
 |---|---|
 | It misreads the request, and you find out in an 800-line diff. | `/architect` interrogates the problem with you, and a second agent with none of your context attacks the spec before any code exists. |
 | Review applies generic best practices. | The reviewer applies your project's own criteria: its `domainAxes`, its `CLAUDE.md`, its recorded decisions. |
-| A review hands you a list and you rule on every item. | Mechanical fixes apply themselves; only judgment calls reach you. |
+| A review hands you a list and you rule on every item. | Mechanical fixes apply themselves; only judgment calls reach you, and with nobody to ask `/gate` decides them by your project's own criteria. |
 | On a busy day, an unreviewed commit slips through. | `git commit` is blocked until that exact diff has passed `/gate`, and the approval expires if you touch a line. |
 | With four sessions open, you lose track of which one is waiting. | `lanes status` shows it live and notifies you, without spending a token. |
 | The next session "fixes" something that was deliberate. | `DECISIONS.md` keeps the why and what was rejected, and the reviewer flags any diff that contradicts it. |
@@ -79,11 +81,12 @@ for non-trivial work; skip it for a typo.
 
 ### `/gate` — review against your project's own criteria
 
-![/gate: code-reviewer reads domainAxes, DECISIONS.md and CLAUDE.md and reviews your diff with clean context; mechanical findings are auto-applied and judgment calls are asked; then test-writer writes tests, the project's gates run, and lanes reviewed marks the diff fingerprint.](docs/img/gate.svg)
+![/gate: code-reviewer reads domainAxes, DECISIONS.md and CLAUDE.md and reviews your diff with clean context; mechanical findings are auto-applied and judgment calls are asked, or decided against the project's own criteria when there is nobody to ask; then test-writer writes tests, the project's gates run, and lanes reviewed marks the diff fingerprint.](docs/img/gate.svg)
 
 One command before every commit. The reviewer starts with clean context and
 only reports. Mechanical findings are applied without asking; judgment calls
-come to you as questions. The gates run last, on the tree as modified, and a
+come to you as questions, or are decided against your project's own criteria
+when there is nobody to ask. The gates run last, on the tree as modified, and a
 failure is reported as a warning — your call, not a block.
 
 What makes the reviewer worth running is `review.domainAxes`: your team's rules
@@ -146,9 +149,10 @@ Full command reference (numbering, per-machine overrides, services, colours):
 
 Any decision a future session might plausibly undo, because it looks odd, goes
 into `DECISIONS.md` with what was rejected and why. `/architect` and `/gate`
-propose entries, you approve or skip them, and the reviewer reads the log on
-every run: it stops reporting deliberate choices as problems, and flags any
-diff that contradicts a live entry. The file itself is the opt-in; set
+propose entries, you approve or skip them — with nobody to ask, the skill's
+own test decides — and the reviewer reads the log on every run: it stops
+reporting deliberate choices as problems, and flags any diff that contradicts
+a live entry. The file itself is the opt-in; set
 `review.decisionsFile` if yours is not at the repo root. A real entry:
 
 ```text

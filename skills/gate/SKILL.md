@@ -1,6 +1,6 @@
 ---
 name: gate
-description: Reviews the uncommitted changes end to end — code review with clean context, auto-applies mechanical fixes, asks only about judgment calls, writes unit tests for what changed, then runs lint --fix and typecheck. Marks the diff as reviewed so the commit guard lets it through. Run this before every commit.
+description: Reviews the uncommitted changes end to end — code review with clean context, auto-applies mechanical fixes, asks about judgment calls or decides them when nobody can be asked, writes unit tests for what changed, then runs lint --fix and typecheck. Marks the diff as reviewed so the commit guard lets it through. Run this before every commit.
 ---
 
 # Review
@@ -72,6 +72,17 @@ themselves; that trade is the whole point of this flow.
 - `Fixability: judgment` **without** `Alternatives:` → batched into a checkbox
   question (`multiSelect: true`), up to 4 per question.
 
+**When `AskUserQuestion` is not in your toolset** — a `--print` session has
+none — you cannot ask, so decide. Every finding goes to Phase 3, and the summary
+reports what decided each one. In order: what the project's `review.domainAxes`
+and its `CLAUDE.md` point at; failing that, whichever option leaves the code
+easier to change later; never an option because it is quicker to apply. No
+general rule settles a real conflict between two good principles, but it can
+rule out the shortcut. With `review.domainAxes` empty and no `CLAUDE.md` to read, you are deciding on the
+middle rule alone, which is a far weaker basis — say so in the summary. Skip
+the auto-apply notice below: nothing is being asked, and Phase 8 reports what
+was applied.
+
 Before asking anything, print the auto-apply notice — in the future tense,
 because nothing has been edited yet:
 
@@ -104,6 +115,11 @@ picked it. For radio answers, the chosen alternative *is* the instruction — do
 not ask a follow-up question. If a selection turns out ambiguous, that is a
 defect in the agent's `Alternatives:` wording: note it in the summary and skip
 it, but do not go back to the user.
+
+With no user to pick, Batch B is every `judgment` finding, resolved by Phase 2's
+criterion: the reviewer's `Fix:` unless that criterion points at one of its
+`Alternatives:`. Taking the `Fix:` is a choice, not the absence of one, so name
+what you chose and which rule decided it.
 
 No verification between batches. Everything is verified in Phase 5.
 
@@ -166,6 +182,11 @@ On approval, prepend the entry to `$DECISIONS`. **If `review.decisionsFile` is
 null, or the file it names is not on disk, skip this phase entirely** rather than
 creating one uninvited.
 
+**When `AskUserQuestion` is not in your toolset**, run the test above yourself
+and write the entry if it survives. Unlike Phase 2's, this test is already
+written out, so it needs no one to supply it. Say in the summary that nothing
+approved it.
+
 The entry is the candidate reformatted, never a fresh piece of writing. Match
 whatever shape the file already uses — its heading, its metadata line, whatever
 fields those carry — and carry the candidate's substance across without adding
@@ -212,10 +233,14 @@ marked it despite open warnings.
 ## Review summary — <branch> <#issue>
 
 ### Findings
-N found (C critical, I important) → A auto-applied, S user-selected applied
+N found (C critical, I important) → A mechanical applied, S judgment applied
 
-### Auto-applied (no question asked)
+### Mechanical (applied automatically)
 - rc-N [Category] file:line — summary
+
+### Judgment (decided without a human)
+- rc-N [Category] file:line — <what was chosen> — <the rule that decided it>
+
 Revert any of these with `git restore <file>`.
 
 ### Not applied
@@ -233,12 +258,16 @@ Revert any of these with `git restore <file>`.
 - skipped: <any gate with no configured command>
 
 ### Decisions
-- Added D<n>: <one-line claim>   | or: none needed
+- Added D<n>: <one-line claim>   | or: added D<n> with nothing to approve it   | or: none needed
 
 ### Commit
 Diff marked as reviewed — the commit guard will let this through until the tree
 changes again.
 ```
+
+Omit `### Judgment (decided without a human)` when a user answered Phase 2, and
+`### Mechanical (applied automatically)` when nothing mechanical was found. The
+revert line prints whenever either bucket did.
 
 One line per gate in `$GATES`, in order. The four above carry those fixed
 labels; any other key reports as `- <key>: clean | failed — <error>`.
@@ -252,7 +281,9 @@ anything is unresolved.
 - **Never fix things the agents did not report.** Scope discipline is what makes
   the summary trustworthy.
 - **Only judgment calls reach the user.** Everything else is applied or skipped.
-- **Never write a `$DECISIONS` entry the user did not approve**, and never
-  create the file if the repo does not already have one.
+  With no user to reach, Phase 2's criterion decides them instead.
+- **Never write a `$DECISIONS` entry the user did not approve.** With no user to
+  ask, Phase 6's own test is what approves it. Never create the file if the repo
+  does not already have one.
 - **`lanes reviewed` runs last**, after every edit including the `$DECISIONS`
   entry, or the marker is stale on arrival.
