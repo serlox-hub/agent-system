@@ -17,6 +17,21 @@ reversed, never to make room.
 
 ---
 
+## D54 — With nobody to ask, `/gate` decides rather than stalls
+`product` · 2026-09 · `skills/gate/SKILL.md` Phases 2, 3 and 6 · #51
+A `--print` session has no `AskUserQuestion` and no flag restores it, so both
+asking phases had a branch the procedure never described and the behaviour came
+from whatever the operator wrote in their own prompt. Phase 6's test was already
+written out; Phase 2 had none, so the project's `review.domainAxes` is what now
+stands in for the user.
+Rejected: abstaining on judgment findings — 9 of a reported 32 would be applied,
+which is a read-only reviewer for every headless run.
+Rejected: a fourth agent holding the approval role — headless it would run on
+every pass, which is the straight-through pipeline D1 rejects.
+Rejected: telling `code-reviewer` which mode it runs in so it classifies more
+conservatively — the same diff would then get two verdicts depending on how the
+session was launched, and its clean context is what D1 protects.
+
 ## D53 — `/architect` creates only the issue; the issue's Start section creates the branch when implementation begins
 `product` · 2026-09 · `skills/architect/SKILL.md` Step 5
 A branch made at design time freezes a stale base and makes a lane look taken while

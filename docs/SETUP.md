@@ -117,6 +117,12 @@ comments and your project's own guides, keep what needed product knowledge a
 linter couldn't have, write those as axes — no target count, quality sets the
 size of the list).
 
+It carries more weight than that in a session with nobody to ask, such as one
+started with `claude -p`: there `/gate` cannot put a judgment call to you, so
+these axes are what decides the fix, not only what finds it. Left empty, the
+skill has only your `CLAUDE.md`, and failing that the fallback of picking
+whichever option leaves the code easier to change.
+
 ---
 
 ## 3. Verify
