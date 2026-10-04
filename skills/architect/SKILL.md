@@ -39,8 +39,9 @@ created or the user leaves the mode explicitly.
    The gate exists to buy exactly one thing — thinking before typing. If you
    implement, the gate is gone and this skill is pointless.
 
-   The only thing you may create is the GitHub issue (via `gh`). Not even the
-   branch: the issue's Start section creates it when implementation begins.
+   The only thing you may create is the GitHub issue (via `gh`), with its
+   "Blocked by" dependencies on other issues (Step 5). Not even the branch:
+   the issue's Start section creates it when implementation begins.
 2. **Challenge before you help.** The user's framing is a hypothesis, not a
    requirement. Your first job is to find what is wrong, missing, or
    self-deceiving in it. Agreeing quickly is the failure mode, not politeness.
@@ -161,7 +162,11 @@ Challenger raised N objections: A accepted, B rejected (reasons above).
 Cheapest alternative considered: <one line> — rejected because <one line>.
 Biggest remaining risk: <one line>.
 Suggested implementation model: <Sonnet|Opus> — <one line reason>.
+Order: <"#N" or "<title of a spec in this conversation>" before this, and why / "independent">.
 ```
+
+The `Order:` line names every issue (new in this conversation or already open)
+that must land before this one, and why in a few words. Step 5 records it.
 
 Ask for explicit confirmation before creating anything. If the user wants
 changes, iterate here — an issue is cheap to write and expensive to un-write.
@@ -210,6 +215,12 @@ which is built for documenting after the fact.
       or `git ls-remote --exit-code origin <branch>` finds it anywhere else,
       stop and tell the user where it lives. Never re-run step 3 on an existing
       branch: its `push --delete` would delete the remote and close any open PR.
+      Then check it is not blocked:
+      `gh api repos/:owner/:repo/issues/<number>/dependencies/blocked_by --jq '[.[] | select(.state == "open") | .number]'`.
+      A non-empty list means those issues must merge first: stop and name them.
+      Branching now would start from a base without their changes. If the call
+      itself fails (not an empty list), say so and ask before continuing: an
+      unknown answer is not "unblocked".
    1. Pick a lane: `lanes free` (tab-separated: lane, name, path, branch; exit 1
       when none).
       - This worktree is listed: use it.
@@ -244,6 +255,30 @@ which is built for documenting after the fact.
       If the GraphQL link fails, report it and continue: the branch exists, it
       is just not linked to the issue.
    ````
+4. Record the order from Step 4 as GitHub's native "Blocked by" dependency, one
+   call per pair, as a chain (A ← B ← C, not C blocked by both A and B unless it
+   really needs both). Skip it when the issue is independent.
+   ```bash
+   BLOCKER_ID=$(gh api repos/:owner/:repo/issues/<blocker> --jq '.id')
+   gh api -X POST repos/:owner/:repo/issues/<number>/dependencies/blocked_by -F issue_id="$BLOCKER_ID"
+   gh api repos/:owner/:repo/issues/<number>/dependencies/blocked_by --jq '[.[].number]'
+   ```
+   `issue_id` is the blocker's numeric `id`, not its number nor its node id.
+   The last call must list the blocker. A prose note in the body is not enough:
+   each implementation branches off a fresh `origin/<base>`, so starting the
+   second issue before the first merges builds on code without it, and the
+   PRs collide. The relation is what the Start section's step 0 checks, and
+   what an autonomous worker can read to hold an issue back. If the call
+   fails, report it and add the line `Blocked by #<blocker> (not recorded as a
+   GitHub dependency)` to the top of the issue body with `gh issue edit`, so the
+   order at least exists in prose.
+
+   An issue counts as "before" when this one builds on its Contract, or both
+   rewrite the same section of a file, so the second would have to redo its
+   changes after the first merges. Sharing a file where each only appends (a
+   test suite, a translation file) does not count. When the
+   conversation splits the work into several issues, create them in landing
+   order so each blocker exists before the issue it blocks.
 
 ## Step 6 — Record the product decision, if there is one
 
@@ -277,11 +312,14 @@ Print, and then **stop**:
 Issue:  #<number> — <url>
 Branch: <name> (not created yet: the issue's Start section does it)
 Model:  <Sonnet|Opus> (suggested)
+After:  #<blocker>[, #<blocker>] (merge first; recorded as "Blocked by" | NOT recorded, see issue body)
 Next:   when you want to implement it, open a session and ask it to implement
         #<number>. Then /gate before committing.
 ```
 
-Omit the `Model:` line when `architect.suggestImplementationModel` is `false`.
+Omit the `Model:` line when `architect.suggestImplementationModel` is `false`,
+and the `After:` line when the issue is independent. With several issues, print
+one block per issue, in landing order.
 
 Do not start implementing in the same turn. The handoff is the point: the user
 decides when to move, and moving is a fresh, uncontaminated start.
