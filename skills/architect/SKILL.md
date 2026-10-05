@@ -190,12 +190,19 @@ which is built for documenting after the fact.
 2. Create the issue with the spec as its body, passed through a quoted heredoc
    so the backticks and `$(...)` in it stay literal instead of running:
    ```bash
-   gh issue create --title "<title>" --label "<label>" --assignee @me --body-file - <<'EOF'
+   gh issue create --title "<title>" --label "<label>" --body-file - <<'EOF'
    <spec>
    EOF
    ```
    Extract the issue number from the returned URL. If this fails, stop — nothing
    has been mutated yet.
+
+   **Deliberately not `--assignee @me`.** Assignment means *someone is working on
+   this*, and `/architect` ends at a filed issue nobody has started — step 7 hands
+   off rather than beginning the work. Assigning at creation makes the field carry
+   no information: every issue is assigned from birth, so the board can no longer
+   tell a reader what is being worked on. Whoever starts the work assigns it then,
+   the only moment the field is true.
 3. Prepend the **Start** section below to the body, now that the branch name
    (`<prefix>/<number>-<kebab-slug>`) is known, with `gh issue edit <number>
    --body-file - <<'EOF'` (quoted heredoc again: the section is full of
