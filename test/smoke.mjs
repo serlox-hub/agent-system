@@ -5313,6 +5313,34 @@ test('/architect Step 6 anchors the entry to the linked issue, with no line coun
   assert.doesNotMatch(step6, /at most \d+ lines?/, 'length follows from what the issue needs, never from a count');
 });
 
+test('/architect Step 5 creates the issue unassigned, with the reason on record', () => {
+  const skill = readFileSync(join(ROOT, 'skills', 'architect', 'SKILL.md'), 'utf8');
+  const step5 = skill
+    .split(/^## Step 6 — Record the product decision/m)[0]
+    .split(/^## Step 5 — Create the issue/m)[1];
+  assert.ok(step5, 'Step 5 section not found in skills/architect/SKILL.md — did the heading change?');
+
+  // `/architect` ends at a filed issue nobody has started — step 7 hands off
+  // rather than beginning the work. `--assignee @me` on the `gh issue create`
+  // line would assign it to the session filing it, not to whoever eventually
+  // starts the work, so the flag must never come back onto that command.
+  // Scoped to the command line itself, not the whole step — the rationale
+  // paragraph below legitimately quotes `--assignee @me` by name to explain
+  // why it is absent, and a bare search over all of Step 5 would flag that
+  // quote as if it were the flag coming back.
+  const createLine = step5.split('\n').find((line) => line.includes('gh issue create'));
+  assert.ok(createLine, 'the `gh issue create` command line is gone from Step 5');
+  assert.doesNotMatch(createLine, /--assignee/, 'the issue must be created unassigned — assignment happens when work starts, not when it is filed');
+
+  // The flag's absence is not self-explanatory: a session tidying this step's
+  // command block, with no memory of why it was dropped, would read a bare
+  // `gh issue create` as incomplete and restore `--assignee @me`. The
+  // rationale paragraph is what stops that — assert it is still there, not
+  // just that the flag is gone, since deleting the prose is exactly how the
+  // flag gets silently re-added.
+  assert.match(step5, /Deliberately not/, 'the rationale for omitting --assignee must stay on record, or a future edit will re-add the flag');
+});
+
 test('/gate has a written branch for when it cannot ask, in every phase that asks (#51)', () => {
   const skill = readFileSync(join(ROOT, 'skills', 'gate', 'SKILL.md'), 'utf8');
   const section = (from, to) => {
